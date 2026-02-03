@@ -1,11 +1,7 @@
-# jetstream-turbo
-![Image from 391 Vol 1– 19 by Francis Picabia, https://archive.org/details/391-vol-1-19/page/n24/mode/1up](./jetstream-turbo.png)
-Turbocharged Jetstream messages - hydrates referenced objects, stores to SQLite, punches up to S3 for long term storage.
+# Jetstream Turbo Rewrites
 
-## Scratch
+This repo is aimed at creating other language versions of jetstream-turbo by graze.social.
 
-1. `docker compose build && docker compose up`
-2. `docker exec -it jetstream_turbo_service bash`
-3. `pdm run turbocharger`
+It is vibe coded from the original source code. The LICENSE for the python code remains unchanged as well as the source code itself. I just moved the python code into its own folder so that I could use the source code as context for OpenCode.
 
-Note: Will almost certainly require round robining session strings. A to-do though everything else is now playing nicely.
+The original source code is available at https://github.com/graze-social/jetstream-turbo
