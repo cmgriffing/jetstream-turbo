@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  jetstream-turbo:
+    build: .
+    container_name: jetstream_turbo_service
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - RUST_LOG=info
+      - TURBO_BATCH_SIZE=10
+      - TURBO_MAX_CONCURRENT=100
+    env_file:
+      - .env
+    volumes:
+      # Mount the code directory
+      - ./src:/app/src
+      # Mount the data directory for SQLite databases
+      - ./data_store:/app/data_store
+      # Exclude .venv if it exists
+      - /dev/null:/app/.venv
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "--quiet", "--output-document", "-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

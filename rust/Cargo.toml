@@ -1,0 +1,91 @@
+[workspace]
+members = [
+    "."
+]
+
+[package]
+name = "jetstream-turbo"
+version = "0.1.0"
+edition = "2021"
+authors = ["Devin Gaffney <devin@graze.social>"]
+description = "Turbocharged Jetstream messages - hydrates referenced objects, stores to SQLite, punches up to S3 for long term storage"
+license = "MIT"
+repository = "https://github.com/graze-social/jetstream-turbo"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+tokio-util = "0.7"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# HTTP and WebSocket
+axum = "0.7"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+simd-json = "0.14"
+
+# Configuration
+config = "0.14"
+dotenvy = "0.15"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Storage
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid"] }
+aws-sdk-s3 = "1.47"
+aws-config = "1.5"
+redis = { version = "0.26", features = ["tokio-comp", "connection-manager"] }
+
+# Caching and utilities
+lru = "0.12"
+dashmap = "6.1"
+uuid = { version = "1.11", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.15"
+
+# Retry and rate limiting
+backoff = { version = "0.4", features = ["tokio"] }
+governor = "0.6"
+
+# Compression
+flate2 = "1.0"
+tar = "0.4"
+
+# Streams and futures
+futures = "0.3"
+futures-util = "0.3"
+tokio-stream = "0.1"
+url = "2.5"
+
+[dev-dependencies]
+tokio-test = "0.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+wiremock = "0.6"
+tempfile = "3.12"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[[bin]]
+name = "jetstream-turbo"
+path = "src/main.rs"
+
+[profile.dev]
+debug = true
