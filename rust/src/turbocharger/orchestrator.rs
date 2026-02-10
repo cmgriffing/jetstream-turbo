@@ -4,7 +4,7 @@ use tokio::sync::Semaphore;
 use futures::StreamExt;
 use tracing::{error, info, warn};
 use crate::config::Settings;
-use crate::client::{JetstreamClient, BlueskyClient, GrazeClient};
+use crate::client::{JetstreamClient, BlueskyClient, BlueskyAuthClient};
 use crate::hydration::{Hydrator, TurboCache};
 use crate::storage::{SQLiteStore, S3Store, RedisStore};
 use crate::models::{
@@ -17,7 +17,7 @@ pub struct TurboCharger {
     settings: Settings,
     jetstream_client: JetstreamClient,
     bluesky_client: Arc<BlueskyClient>,
-    graze_client: GrazeClient,
+    auth_client: BlueskyAuthClient,
     hydrator: Hydrator,
     sqlite_store: SQLiteStore,
     s3_store: S3Store,
@@ -29,19 +29,19 @@ impl TurboCharger {
     pub async fn new(settings: Settings, modulo: u32, shard: u32) -> TurboResult<Self> {
         info!("Initializing TurboCharger with modulo={}, shard={}", modulo, shard);
         
-        // Initialize clients
+        // Initialize Jetstream client
         let jetstream_client = JetstreamClient::with_defaults(settings.jetstream_hosts.clone());
         
-        // Fetch session strings from Graze API
-        let graze_client = GrazeClient::new(
-            settings.graze_api_base_url.clone(),
-            settings.turbo_credential_secret.clone(),
+        // Authenticate directly with Bluesky
+        let auth_client = BlueskyAuthClient::new(
+            settings.bluesky_handle.clone(),
+            settings.bluesky_app_password.clone(),
         );
         
-        let session_strings = graze_client.fetch_session_strings().await?;
-        info!("Fetched {} session strings from Graze API", session_strings.len());
+        let session_string = auth_client.authenticate().await?;
+        info!("Successfully authenticated with Bluesky as {}", settings.bluesky_handle);
         
-        let bluesky_client = Arc::new(BlueskyClient::new(session_strings));
+        let bluesky_client = Arc::new(BlueskyClient::new(vec![session_string]));
         
         // Initialize cache
         let cache = TurboCache::new(settings.cache_size_users, settings.cache_size_posts);
@@ -71,7 +71,7 @@ impl TurboCharger {
             settings,
             jetstream_client,
             bluesky_client,
-            graze_client,
+            auth_client,
             hydrator,
             sqlite_store,
             s3_store,
@@ -158,12 +158,12 @@ impl TurboCharger {
     }
     
     pub async fn refresh_sessions(&self) -> TurboResult<()> {
-        info!("Refreshing Bluesky session strings");
+        info!("Refreshing Bluesky session");
         
-        let session_strings = self.graze_client.fetch_session_strings().await?;
-        self.bluesky_client.refresh_sessions(session_strings).await;
+        let session_string = self.auth_client.authenticate().await?;
+        self.bluesky_client.refresh_sessions(vec![session_string]).await;
         
-        info!("Refreshed {} session strings", self.bluesky_client.get_session_count().await);
+        info!("Refreshed session for {}", self.settings.bluesky_handle);
         Ok(())
     }
     

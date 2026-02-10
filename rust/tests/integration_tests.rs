@@ -2,10 +2,10 @@
 mod tests {
     use jetstream_turbo::config::Settings;
     use jetstream_turbo::hydration::TurboCache;
-    use jetstream_turbo::client::{JetstreamClient, GrazeClient};
+    use jetstream_turbo::client::{JetstreamClient, BlueskyAuthClient};
     use jetstream_turbo::models::{jetstream::JetstreamMessage, bluesky::BlueskyProfile};
     use wiremock::{MockServer, Mock, ResponseTemplate};
-    use wiremock::matchers::{method, path, query_param};
+    use wiremock::matchers::{method, path};
     use tempfile::TempDir;
     use std::time::Duration;
     
@@ -19,28 +19,28 @@ mod tests {
     }
     
     #[tokio::test]
-    async fn test_graze_client_integration() {
+    async fn test_bluesky_auth_integration() {
         let mock_server = MockServer::start().await;
         
-        Mock::given(method("GET"))
-            .and(path("/app/api/v1/turbo-tokens/credentials"))
-            .and(query_param("credential_secret", "test_secret"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(r#"[
-                {"session_string": "session1:::bsky.social", "created_at": "2023-01-01T00:00:00Z", "domain": "bsky.social"},
-                {"session_string": "session2:::bsky.social", "created_at": "2023-01-01T00:00:00Z", "domain": "bsky.social"}
-            ]"#))
+        Mock::given(method("POST"))
+            .and(path("/com.atproto.server.createSession"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "accessJwt": "test_jwt_token",
+                "refreshJwt": "test_refresh_token",
+                "handle": "test.bsky.social",
+                "did": "did:plc:test"
+            })))
             .mount(&mock_server)
             .await;
         
-        let client = GrazeClient::new(
-            mock_server.uri(),
-            "test_secret".to_string(),
+        let client = BlueskyAuthClient::new(
+            "test.bsky.social".to_string(),
+            "test-app-password".to_string(),
         );
         
-        let sessions = client.fetch_session_strings().await.unwrap();
-        assert_eq!(sessions.len(), 2);
-        assert!(sessions[0].contains("session1"));
-        assert!(sessions[1].contains("session2"));
+        let session = client.authenticate().await.unwrap();
+        assert!(session.contains("test_jwt_token"));
+        assert!(session.contains("bsky.social"));
     }
     
     #[tokio::test]

@@ -4,10 +4,12 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Settings {
-    // API Configuration
-    pub graze_api_base_url: String,
+    // Bluesky Authentication
+    pub bluesky_handle: String,
+    pub bluesky_app_password: String,
+
+    // General Configuration
     pub stream_name: String,
-    pub turbo_credential_secret: String,
 
     // Jetstream Configuration
     #[serde(default = "default_jetstream_hosts")]
@@ -46,9 +48,9 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            graze_api_base_url: "https://api.graze.social".to_string(),
-            stream_name: "".to_string(),
-            turbo_credential_secret: "".to_string(),
+            bluesky_handle: String::new(),
+            bluesky_app_password: String::new(),
+            stream_name: String::new(),
             jetstream_hosts: default_jetstream_hosts(),
             wanted_collections: "app.bsky.feed.post".to_string(),
             redis_url: "redis://localhost:6379".to_string(),
@@ -85,8 +87,12 @@ impl Settings {
             settings.set("stream_name", stream_name)?;
         }
 
-        if let Ok(credential_secret) = std::env::var("TURBO_CREDENTIAL_SECRET") {
-            settings.set("turbo_credential_secret", credential_secret)?;
+        if let Ok(handle) = std::env::var("BLUESKY_HANDLE") {
+            settings.set("bluesky_handle", handle)?;
+        }
+
+        if let Ok(password) = std::env::var("BLUESKY_APP_PASSWORD") {
+            settings.set("bluesky_app_password", password)?;
         }
 
         let settings = settings.try_deserialize()?;
@@ -102,8 +108,12 @@ impl Settings {
             anyhow::bail!("STREAM_NAME environment variable is required");
         }
 
-        if self.turbo_credential_secret.is_empty() {
-            anyhow::bail!("TURBO_CREDENTIAL_SECRET environment variable is required");
+        if self.bluesky_handle.is_empty() {
+            anyhow::bail!("BLUESKY_HANDLE environment variable is required");
+        }
+
+        if self.bluesky_app_password.is_empty() {
+            anyhow::bail!("BLUESKY_APP_PASSWORD environment variable is required");
         }
 
         if self.batch_size == 0 {
@@ -149,7 +159,12 @@ mod tests {
         assert!(settings.validate().is_err());
 
         settings.stream_name = "test".to_string();
-        settings.turbo_credential_secret = "".to_string();
+        settings.bluesky_handle = "".to_string();
+
+        assert!(settings.validate().is_err());
+
+        settings.bluesky_handle = "test.bsky.social".to_string();
+        settings.bluesky_app_password = "".to_string();
 
         assert!(settings.validate().is_err());
     }

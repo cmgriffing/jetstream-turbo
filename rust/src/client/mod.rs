@@ -1,8 +1,8 @@
 pub mod jetstream;
 pub mod bluesky;
-pub mod graze;
+pub mod auth;
 pub mod pool;
 
 pub use jetstream::JetstreamClient;
 pub use bluesky::BlueskyClient;
-pub use graze::GrazeClient;
+pub use auth::BlueskyAuthClient;
