@@ -1,10 +1,9 @@
-use sqlx::{SqlitePool, sqlite::SqliteConnectOptions, sqlite::SqliteJournalMode};
+use sqlx::{SqlitePool, sqlite::SqliteConnectOptions, sqlite::SqliteJournalMode, Row};
 use std::path::Path;
 use chrono::{DateTime, Utc};
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 use crate::models::{
     enriched::EnrichedRecord,
-    errors::TurboError,
     TurboResult,
 };
 
@@ -72,27 +71,30 @@ impl SQLiteStore {
     pub async fn store_record(&self, record: &EnrichedRecord) -> TurboResult<i64> {
         let now = Utc::now();
         
-        let result = sqlx::query!(
+        let message_json = serde_json::to_value(&record.message)?;
+        let metadata_json = serde_json::to_value(&record.hydrated_metadata)?;
+        
+        let result = sqlx::query(
             r#"
             INSERT INTO records (
                 at_uri, did, time_us, message, message_metadata,
                 created_at, hydrated_at, hydration_time_ms,
                 api_calls_count, cache_hit_rate, cache_hits, cache_misses
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
-            record.get_at_uri(),
-            record.get_did(),
-            record.message.time_us,
-            serde_json::to_value(&record.message)?,
-            serde_json::to_value(&record.hydrated_metadata)?,
-            record.processed_at.to_rfc3339(),
-            now.to_rfc3339(),
-            record.metrics.hydration_time_ms as i64,
-            record.metrics.api_calls_count as i64,
-            record.metrics.cache_hit_rate,
-            record.metrics.cache_hits as i64,
-            record.metrics.cache_misses as i64
+            "#
         )
+        .bind(record.get_at_uri())
+        .bind(record.get_did())
+        .bind(record.message.time_us as i64)
+        .bind(message_json.to_string())
+        .bind(metadata_json.to_string())
+        .bind(record.processed_at.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind(record.metrics.hydration_time_ms as i64)
+        .bind(record.metrics.api_calls_count as i64)
+        .bind(record.metrics.cache_hit_rate)
+        .bind(record.metrics.cache_hits as i64)
+        .bind(record.metrics.cache_misses as i64)
         .execute(&self.pool)
         .await?;
         
@@ -130,35 +132,38 @@ impl SQLiteStore {
     ) -> TurboResult<i64> {
         let now = Utc::now();
         
-        let result = sqlx::query!(
+        let message_json = serde_json::to_value(&record.message)?;
+        let metadata_json = serde_json::to_value(&record.hydrated_metadata)?;
+        
+        let result = sqlx::query(
             r#"
             INSERT INTO records (
                 at_uri, did, time_us, message, message_metadata,
                 created_at, hydrated_at, hydration_time_ms,
                 api_calls_count, cache_hit_rate, cache_hits, cache_misses
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
-            record.get_at_uri(),
-            record.get_did(),
-            record.message.time_us,
-            serde_json::to_value(&record.message)?,
-            serde_json::to_value(&record.hydrated_metadata)?,
-            record.processed_at.to_rfc3339(),
-            now.to_rfc3339(),
-            record.metrics.hydration_time_ms as i64,
-            record.metrics.api_calls_count as i64,
-            record.metrics.cache_hit_rate,
-            record.metrics.cache_hits as i64,
-            record.metrics.cache_misses as i64
+            "#
         )
-        .execute(&mut *tx)
+        .bind(record.get_at_uri())
+        .bind(record.get_did())
+        .bind(record.message.time_us as i64)
+        .bind(message_json.to_string())
+        .bind(metadata_json.to_string())
+        .bind(record.processed_at.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind(record.metrics.hydration_time_ms as i64)
+        .bind(record.metrics.api_calls_count as i64)
+        .bind(record.metrics.cache_hit_rate)
+        .bind(record.metrics.cache_hits as i64)
+        .bind(record.metrics.cache_misses as i64)
+        .execute(&mut **tx)
         .await?;
         
         Ok(result.last_insert_rowid())
     }
     
     pub async fn get_record_by_uri(&self, at_uri: &str) -> TurboResult<Option<EnrichedRecord>> {
-        let row = sqlx::query!(
+        let row = sqlx::query(
             r#"
             SELECT at_uri, did, time_us, message, message_metadata,
                    created_at, hydrated_at, hydration_time_ms,
@@ -166,15 +171,15 @@ impl SQLiteStore {
             FROM records 
             WHERE at_uri = ?
             LIMIT 1
-            "#,
-            at_uri
+            "#
         )
+        .bind(at_uri)
         .fetch_optional(&self.pool)
         .await?;
         
         match row {
             Some(row) => {
-                let record = self.row_to_record(row)?;
+                let record = self.row_to_record(row).await?;
                 Ok(Some(record))
             }
             None => Ok(None),
@@ -182,41 +187,49 @@ impl SQLiteStore {
     }
     
     async fn row_to_record(&self, row: sqlx::sqlite::SqliteRow) -> TurboResult<EnrichedRecord> {
-        let message: serde_json::Value = serde_json::from_str(row.get::<String, _>("message"))?;
-        let hydrated_metadata: serde_json::Value = serde_json::from_str(row.get::<String, _>("message_metadata"))?;
+        let message_str: String = row.try_get("message")?;
+        let metadata_str: String = row.try_get("message_metadata")?;
+        
+        let message: serde_json::Value = serde_json::from_str(&message_str)?;
+        let hydrated_metadata: serde_json::Value = serde_json::from_str(&metadata_str)?;
         
         let message = serde_json::from_value(message)?;
         let hydrated_metadata = serde_json::from_value(hydrated_metadata)?;
         
+        let hydrated_at: String = row.try_get("hydrated_at")?;
+        let processed_at = DateTime::parse_from_rfc3339(&hydrated_at)
+            .map_err(|e| crate::models::errors::TurboError::InvalidMessage(format!("Date parse error: {}", e)))?
+            .with_timezone(&Utc);
+        
         Ok(EnrichedRecord {
             message,
             hydrated_metadata,
-            processed_at: DateTime::parse_from_rfc3339(row.get("hydrated_at"))?.with_timezone(&Utc),
+            processed_at,
             metrics: crate::models::enriched::ProcessingMetrics {
-                hydration_time_ms: row.get("hydration_time_ms") as u64,
-                api_calls_count: row.get("api_calls_count") as u32,
-                cache_hit_rate: row.get("cache_hit_rate"),
-                cache_hits: row.get("cache_hits") as u32,
-                cache_misses: row.get("cache_misses") as u32,
+                hydration_time_ms: row.try_get::<i64, _>("hydration_time_ms").unwrap_or(0) as u64,
+                api_calls_count: row.try_get::<i64, _>("api_calls_count").unwrap_or(0) as u32,
+                cache_hit_rate: row.try_get("cache_hit_rate").unwrap_or(0.0),
+                cache_hits: row.try_get::<i64, _>("cache_hits").unwrap_or(0) as u32,
+                cache_misses: row.try_get::<i64, _>("cache_misses").unwrap_or(0) as u32,
             },
         })
     }
     
     pub async fn count_records(&self) -> TurboResult<i64> {
-        let result = sqlx::query!("SELECT COUNT(*) as count FROM records")
+        let result = sqlx::query("SELECT COUNT(*) as count FROM records")
             .fetch_one(&self.pool)
             .await?;
         
-        Ok(result.count)
+        let count: i64 = result.try_get("count")?;
+        Ok(count)
     }
     
     pub async fn cleanup_old_records(&self, older_than: DateTime<Utc>) -> TurboResult<u64> {
-        let result = sqlx::query!(
-            "DELETE FROM records WHERE created_at < ?",
-            older_than.to_rfc3339()
-        )
-        .execute(&self.pool)
-        .await?;
+        let older_than_str = older_than.to_rfc3339();
+        let result = sqlx::query("DELETE FROM records WHERE created_at < ?")
+            .bind(&older_than_str)
+            .execute(&self.pool)
+            .await?;
         
         let deleted = result.rows_affected();
         info!("Cleaned up {} old records", deleted);

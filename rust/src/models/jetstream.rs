@@ -106,16 +106,16 @@ impl JetstreamMessage {
         {
             // Extract from reply references
             if let Some(reply) = &record.reply {
-                mentioned_dids.push(&reply.root.uri.split(':').next().unwrap_or(""));
-                mentioned_dids.push(&reply.parent.uri.split(':').next().unwrap_or(""));
+                mentioned_dids.push(reply.root.uri.split(':').next().unwrap_or(""));
+                mentioned_dids.push(reply.parent.uri.split(':').next().unwrap_or(""));
             }
 
             // Extract from facets (mentions, quotes)
             if let Some(facets) = &record.facets {
                 for facet in facets {
-                    for feature in &facets.features {
+                    for feature in &facet.features {
                         if let Some(did) = &feature.did {
-                            mentioned_dids.push(did.as_str());
+                            mentioned_dids.push(did);
                         }
                     }
                 }

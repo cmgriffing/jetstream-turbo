@@ -1,8 +1,8 @@
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Settings {
     // Bluesky Authentication
     pub bluesky_handle: String,
@@ -14,6 +14,7 @@ pub struct Settings {
     // Jetstream Configuration
     #[serde(default = "default_jetstream_hosts")]
     pub jetstream_hosts: Vec<String>,
+    #[serde(default = "default_wanted_collections")]
     pub wanted_collections: String,
 
     // Redis Configuration
@@ -91,7 +92,7 @@ impl Settings {
             settings.set("bluesky_app_password", password)?;
         }
 
-        let settings = settings.try_deserialize()?;
+        let settings: Settings = settings.try_deserialize()?;
 
         // Validate required settings
         settings.validate()?;
@@ -133,6 +134,10 @@ fn default_jetstream_hosts() -> Vec<String> {
         "jetstream1.eu-west.bsky.network".to_string(),
         "jetstream2.eu-west.bsky.network".to_string(),
     ]
+}
+
+fn default_wanted_collections() -> String {
+    "app.bsky.feed.post".to_string()
 }
 
 #[cfg(test)]

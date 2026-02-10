@@ -1,14 +1,16 @@
-use redis::{AsyncCommands, Client as RedisClient, aio::Connection as RedisConnection};
+use redis::{AsyncCommands, Client as RedisClient, aio::MultiplexedConnection};
 use serde_json;
 use tracing::{debug, error, info};
 use crate::models::{
     enriched::EnrichedRecord,
     errors::{TurboError, TurboResult},
 };
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub struct RedisStore {
     client: RedisClient,
-    connection: RedisConnection,
+    connection: Arc<Mutex<MultiplexedConnection>>,
     stream_name: String,
     max_length: Option<usize>,
 }
@@ -16,26 +18,27 @@ pub struct RedisStore {
 impl RedisStore {
     pub async fn new(redis_url: &str, stream_name: String, max_length: Option<usize>) -> TurboResult<Self> {
         info!("Connecting to Redis at: {}", redis_url);
-        
+
         let client = RedisClient::open(redis_url)?;
-        let connection = client.get_async_connection().await?;
-        
+        let connection = client.get_multiplexed_async_connection().await?;
+
         info!("Connected to Redis, using stream: {}", stream_name);
-        
+
         Ok(Self {
             client,
-            connection,
+            connection: Arc::new(Mutex::new(connection)),
             stream_name,
             max_length,
         })
     }
-    
-    pub async fn publish_record(&mut self, record: &EnrichedRecord) -> TurboResult<String> {
+
+    pub async fn publish_record(&self, record: &EnrichedRecord) -> TurboResult<String> {
         let message_json = serde_json::to_string(record)?;
         let message_id = generate_message_id(&record);
-        
+        let mut conn = self.connection.lock().await;
+
         // Add to Redis stream
-        let _: () = self.connection
+        let _: () = conn
             .xadd(
                 &self.stream_name,
                 &message_id,
@@ -48,76 +51,97 @@ impl RedisStore {
             )
             .await
             .map_err(|e| TurboError::RedisOperation(e))?;
-        
+
         // Trim stream if max_length is set
         if let Some(max_len) = self.max_length {
-            let _: () = self.connection
-                .xtrim_maxlen(&self.stream_name, max_len)
+            let _: () = redis::cmd("XTRIM")
+                .arg(&self.stream_name)
+                .arg("MAXLEN")
+                .arg(max_len)
+                .query_async(&mut *conn)
                 .await
                 .map_err(|e| TurboError::RedisOperation(e))?;
         }
-        
+
         debug!("Published record to Redis stream with ID: {}", message_id);
         Ok(message_id)
     }
-    
-    pub async fn publish_batch(&mut self, records: &[EnrichedRecord]) -> TurboResult<Vec<String>> {
+
+    pub async fn publish_batch(&self, records: &[EnrichedRecord]) -> TurboResult<Vec<String>> {
         let mut message_ids = Vec::with_capacity(records.len());
-        
+
         for record in records {
             let message_id = self.publish_record(record).await?;
             message_ids.push(message_id);
         }
-        
+
         info!("Published batch of {} records to Redis stream", records.len());
         Ok(message_ids)
     }
-    
-    pub async fn get_stream_info(&mut self) -> TurboResult<StreamInfo> {
-        let info: redis::Info = self.connection
-            .info()
+
+    pub async fn get_stream_info(&self) -> TurboResult<StreamInfo> {
+        let mut conn = self.connection.lock().await;
+        
+        // Use redis::cmd for info command
+        let info: String = redis::cmd("INFO")
+            .query_async(&mut *conn)
             .await
             .map_err(|e| TurboError::RedisOperation(e))?;
-            
-        let stream_length: Option<usize> = self.connection
+
+        let stream_length: usize = conn
             .xlen(&self.stream_name)
             .await
             .map_err(|e| TurboError::RedisOperation(e))?;
-            
+
+        // Parse redis version from info string
+        let redis_version = info
+            .lines()
+            .find(|line| line.starts_with("redis_version:"))
+            .and_then(|line| line.split(':').nth(1))
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
         Ok(StreamInfo {
-            redis_version: info.redis_version(),
-            stream_length: stream_length.unwrap_or(0),
+            redis_version,
+            stream_length,
             stream_name: self.stream_name.clone(),
             max_length: self.max_length,
         })
     }
-    
-    pub async fn clear_stream(&mut self) -> TurboResult<()> {
+
+    pub async fn clear_stream(&self) -> TurboResult<()> {
         info!("Clearing Redis stream: {}", self.stream_name);
-        
-        let _: () = self.connection
-            .del(&self.stream_name)
+        let mut conn = self.connection.lock().await;
+
+        let _: () = redis::cmd("DEL")
+            .arg(&self.stream_name)
+            .query_async(&mut *conn)
             .await
             .map_err(|e| TurboError::RedisOperation(e))?;
-        
+
         debug!("Cleared Redis stream: {}", self.stream_name);
         Ok(())
     }
-    
-    pub async fn health_check(&mut self) -> TurboResult<bool> {
-        match self.connection.ping().await {
-            Ok(()) => Ok(true),
+
+    pub async fn health_check(&self) -> TurboResult<bool> {
+        let mut conn = self.connection.lock().await;
+        // Use redis::cmd for ping command
+        let result: Result<String, redis::RedisError> = redis::cmd("PING")
+            .query_async(&mut *conn)
+            .await;
+        match result {
+            Ok(_) => Ok(true),
             Err(e) => {
                 error!("Redis health check failed: {}", e);
                 Ok(false)
             }
         }
     }
-    
+
     pub fn get_stream_name(&self) -> &str {
         &self.stream_name
     }
-    
+
     pub fn get_max_length(&self) -> Option<usize> {
         self.max_length
     }

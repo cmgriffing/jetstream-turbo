@@ -48,8 +48,8 @@ impl<T> PooledClient<T> {
     }
 }
 
-impl<T> ClientPool<T> 
-where 
+impl<T> ClientPool<T>
+where
     T: Clone + Send + Sync + 'static
 {
     pub fn new<F>(max_size: usize, factory: F) -> Self 
@@ -106,12 +106,12 @@ where
     }
 }
 
-pub struct PooledClientGuard<T> {
+pub struct PooledClientGuard<T: Send + Sync + 'static> {
     client: Option<PooledClient<T>>,
     pool: Arc<RwLock<Vec<PooledClient<T>>>>,
 }
 
-impl<T> Drop for PooledClientGuard<T> {
+impl<T: Send + Sync + 'static> Drop for PooledClientGuard<T> {
     fn drop(&mut self) {
         if let Some(client) = self.client.take() {
             let pool = self.pool.clone();
@@ -123,15 +123,15 @@ impl<T> Drop for PooledClientGuard<T> {
     }
 }
 
-impl<T> std::ops::Deref for PooledClientGuard<T> {
+impl<T: Send + Sync + 'static> std::ops::Deref for PooledClientGuard<T> {
     type Target = T;
-    
+
     fn deref(&self) -> &Self::Target {
         &self.client.as_ref().unwrap().client
     }
 }
 
-impl<T> std::ops::DerefMut for PooledClientGuard<T> {
+impl<T: Send + Sync + 'static> std::ops::DerefMut for PooledClientGuard<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         panic!("Cannot get mutable reference to pooled client");
     }

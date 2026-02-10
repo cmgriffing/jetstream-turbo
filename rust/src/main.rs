@@ -34,19 +34,18 @@ async fn main() -> Result<()> {
     
     // Create turbocharger
     let turbocharger = TurboCharger::new(settings.clone(), args.modulo, args.shard).await?;
-    
-    // Create HTTP server
-    let server = create_server(settings.http_port).await?;
-    
+    let turbocharger = std::sync::Arc::new(turbocharger);
+
     // Run both turbocharger and server
+    let turbocharger_clone = turbocharger.clone();
     let turbocharger_handle = tokio::spawn(async move {
-        if let Err(e) = turbocharger.run().await {
+        if let Err(e) = turbocharger_clone.run().await {
             tracing::error!("Turbocharger failed: {}", e);
         }
     });
-    
+
     let server_handle = tokio::spawn(async move {
-        if let Err(e) = server.await {
+        if let Err(e) = create_server(settings.http_port, turbocharger).await {
             tracing::error!("Server failed: {}", e);
         }
     });

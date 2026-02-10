@@ -2,14 +2,14 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use futures::StreamExt;
-use tracing::{error, info, warn};
+use tracing::{error, info};
+use serde::Serialize;
 use crate::config::Settings;
 use crate::client::{JetstreamClient, BlueskyClient, BlueskyAuthClient};
 use crate::hydration::{Hydrator, TurboCache};
 use crate::storage::{SQLiteStore, RedisStore};
 use crate::models::{
     jetstream::JetstreamMessage,
-    enriched::EnrichedRecord,
     errors::{TurboError, TurboResult},
 };
 
@@ -193,7 +193,7 @@ impl TurboCharger {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TurboStats {
     pub total_records_processed: i64,
     pub cache_user_hits: u64,
@@ -206,7 +206,7 @@ pub struct TurboStats {
     pub redis_version: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct HealthStatus {
     pub healthy: bool,
     pub redis_connected: bool,

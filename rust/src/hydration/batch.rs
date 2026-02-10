@@ -4,7 +4,6 @@ use tracing::{debug, info};
 use crate::models::{
     jetstream::JetstreamMessage,
     enriched::EnrichedRecord,
-    errors::TurboError,
     TurboResult,
 };
 use crate::hydration::Hydrator;
@@ -24,44 +23,49 @@ impl BatchProcessor {
         }
     }
     
-    pub async fn process_stream<S>(&self, mut stream: S) -> TurboResult<impl futures::Stream<Item = TurboResult<EnrichedRecord>>>
+    pub async fn process_stream<S>(&self, mut stream: S) -> TurboResult<Vec<EnrichedRecord>>
     where
         S: futures::Stream<Item = TurboResult<JetstreamMessage>> + Unpin,
     {
-        use futures::stream;
-        
         let mut buffer = Vec::with_capacity(self.batch_size);
+        let mut results = Vec::new();
         let mut last_flush = tokio::time::Instant::now();
         
-        let processed_stream = stream::unfold(buffer, move |mut buffer| async move {
-            // Collect items for the next batch
-            while buffer.len() < self.batch_size && last_flush.elapsed() < self.max_wait_time {
-                match stream.next().await {
-                    Some(Ok(message)) => buffer.push(message),
-                    Some(Err(e)) => return Some((Err(e), buffer)),
-                    None => break,
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(message) => {
+                    buffer.push(message);
+                    
+                    // Flush if batch is full or max wait time reached
+                    if buffer.len() >= self.batch_size || last_flush.elapsed() >= self.max_wait_time {
+                        let batch = std::mem::take(&mut buffer);
+                        match self.hydrator.hydrate_batch(batch).await {
+                            Ok(processed) => {
+                                debug!("Processed batch of {} records", processed.len());
+                                results.extend(processed);
+                            }
+                            Err(e) => return Err(e),
+                        }
+                        last_flush = tokio::time::Instant::now();
+                    }
                 }
+                Err(e) => return Err(e),
             }
-            
-            if buffer.is_empty() {
-                return None;
-            }
-            
-            // Process the batch
-            let current_batch = std::mem::take(&mut buffer);
-            last_flush = tokio::time::Instant::now();
-            
-            match self.hydrator.hydrate_batch(current_batch).await {
-                Ok(processed) => {
-                    debug!("Processed batch of {} records", processed.len());
-                    Some((Ok(futures::stream::iter(processed)), buffer))
-                }
-                Err(e) => Some((Err(e), buffer)),
-            }
-        })
-        .flatten();
+        }
         
-        Ok(processed_stream)
+        // Process remaining items in buffer
+        if !buffer.is_empty() {
+            match self.hydrator.hydrate_batch(buffer).await {
+                Ok(processed) => {
+                    debug!("Processed final batch of {} records", processed.len());
+                    results.extend(processed);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        
+        info!("Total processed {} records", results.len());
+        Ok(results)
     }
     
     pub fn get_batch_size(&self) -> usize {

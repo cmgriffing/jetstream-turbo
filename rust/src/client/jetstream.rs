@@ -23,45 +23,45 @@ impl JetstreamClient {
             reconnect_delay: Duration::from_secs(5),
         }
     }
-    
+
     pub fn with_defaults(endpoints: Vec<String>) -> Self {
         Self::new(endpoints, "app.bsky.feed.post".to_string())
     }
-    
+
     pub async fn stream_messages(&self) -> TurboResult<impl Stream<Item = TurboResult<JetstreamMessage>>> {
         let (tx, rx) = mpsc::unbounded_channel();
-        
+
         // Start the connection loop
         let endpoints = self.endpoints.clone();
         let wanted_collections = self.wanted_collections.clone();
         let max_reconnect_attempts = self.max_reconnect_attempts;
         let reconnect_delay = self.reconnect_delay;
-        
+
         tokio::spawn(async move {
             let mut current_endpoint = 0;
             let mut reconnect_attempts = 0;
-            
+
             loop {
                 let endpoint = &endpoints[current_endpoint];
                 let url = format!(
                     "wss://{}/subscribe?wantedCollections={}",
                     endpoint, wanted_collections
                 );
-                
+
                 info!("Connecting to Jetstream endpoint: {}", endpoint);
-                
+
                 match connect_async(&url).await {
                     Ok((ws_stream, _)) => {
                         info!("Successfully connected to {}", endpoint);
                         reconnect_attempts = 0; // Reset on successful connection
-                        
-                            let (_, read) = ws_stream.split();
-                        
+
+                            let (_, mut read) = ws_stream.split();
+
                         // Process messages
                         while let Some(msg_result) = read.next().await {
                             match msg_result {
                                 Ok(Message::Text(text)) => {
-                                    match self.parse_message(&text) {
+                                    match parse_message(&text) {
                                         Ok(message) => {
                                             if tx.send(Ok(message)).is_err() {
                                                 info!("Receiver dropped, stopping stream");
@@ -87,6 +87,10 @@ impl JetstreamClient {
                                     info!("WebSocket connection closed by server");
                                     break;
                                 }
+                                Ok(Message::Frame(_)) => {
+                                    // Ignore raw frames
+                                    debug!("Received raw frame (ignoring)");
+                                }
                                 Err(e) => {
                                     error!("WebSocket error: {}", e);
                                     break;
@@ -96,7 +100,7 @@ impl JetstreamClient {
                     }
                     Err(e) => {
                         error!("Failed to connect to {}: {}", endpoint, e);
-                        
+
                         reconnect_attempts += 1;
                         if reconnect_attempts >= max_reconnect_attempts {
                             error!("Max reconnection attempts reached");
@@ -109,7 +113,7 @@ impl JetstreamClient {
                         }
                     }
                 }
-                
+
                 // Try next endpoint or wait before retry
                 current_endpoint = (current_endpoint + 1) % endpoints.len();
                 if endpoints.len() == 1 {
@@ -120,25 +124,29 @@ impl JetstreamClient {
                 }
             }
         });
-        
+
         Ok(UnboundedReceiverStream::new(rx))
     }
-    
-    fn parse_message(&self, text: &str) -> TurboResult<JetstreamMessage> {
-        let message: JetstreamMessage = serde_json::from_str(text)
-            .map_err(|e| TurboError::JsonDeserialization(e.into()))?;
-        
-        // Validate required fields
-        if message.did.is_empty() {
-            return Err(TurboError::InvalidMessage("DID is empty".to_string()));
-        }
-        
-        if message.seq == 0 {
-            return Err(TurboError::InvalidMessage("Sequence number is zero".to_string()));
-        }
-        
-        Ok(message)
+
+    pub fn parse_message(&self, text: &str) -> TurboResult<JetstreamMessage> {
+        parse_message(text)
     }
+}
+
+fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
+    let message: JetstreamMessage = serde_json::from_str(text)
+        .map_err(|e| TurboError::JsonSerialization(e))?;
+
+    // Validate required fields
+    if message.did.is_empty() {
+        return Err(TurboError::InvalidMessage("DID is empty".to_string()));
+    }
+
+    if message.seq == 0 {
+        return Err(TurboError::InvalidMessage("Sequence number is zero".to_string()));
+    }
+
+    Ok(message)
 }
 
 #[cfg(test)]

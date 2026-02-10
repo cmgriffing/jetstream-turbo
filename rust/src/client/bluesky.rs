@@ -3,24 +3,27 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
+use std::num::NonZeroU32;
 use governor::{Quota, RateLimiter};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use crate::models::{
-    bluesky::{BlueskyProfile, BlueskyPost, GetProfileResponse, GetProfilesResponse, GetPostResponse},
+    bluesky::{BlueskyProfile, BlueskyPost, GetProfilesResponse, GetPostResponse},
     errors::{TurboError, TurboResult},
 };
 
 pub struct BlueskyClient {
     http_client: Client,
     session_strings: Arc<RwLock<Vec<String>>>,
-    rate_limiter: Arc<RateLimiter<governor::state::direct::DirectStateHandle, governor::clock::DefaultClock>>,
+    rate_limiter: Arc<RateLimiter<governor::state::NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>>,
     api_base_url: String,
     max_retries: u32,
     retry_delay_ms: u64,
+    retry_delay: Duration,
 }
 
 impl BlueskyClient {
     pub fn new(session_strings: Vec<String>) -> Self {
+        let quota = Quota::per_minute(NonZeroU32::new(60).unwrap());
         Self {
             http_client: Client::builder()
                 .timeout(Duration::from_secs(30))
@@ -28,10 +31,11 @@ impl BlueskyClient {
                 .build()
                 .expect("Failed to create HTTP client"),
             session_strings: Arc::new(RwLock::new(session_strings)),
-            rate_limiter: Arc::new(RateLimiter::direct(Quota::per_minute(60))), // 60 requests per minute
+            rate_limiter: Arc::new(RateLimiter::direct(quota)), // 60 requests per minute
             api_base_url: "https://bsky.social/xrpc".to_string(),
             max_retries: 3,
             retry_delay_ms: 200,
+            retry_delay: Duration::from_millis(200),
         }
     }
     
@@ -111,7 +115,7 @@ impl BlueskyClient {
             
             attempt += 1;
             if attempt <= self.max_retries {
-                tokio::time::sleep(self.retry_delay * (attempt as u64)).await;
+                tokio::time::sleep(self.retry_delay * attempt).await;
             }
         }
     }
@@ -206,11 +210,11 @@ impl BlueskyClient {
             
             attempt += 1;
             if attempt <= self.max_retries {
-                tokio::time::sleep(self.retry_delay * (attempt as u64)).await;
+                tokio::time::sleep(self.retry_delay * attempt).await;
             }
         }
     }
-    
+
     async fn get_session_string(&self) -> TurboResult<String> {
         let sessions = self.session_strings.read().await;
         
@@ -238,7 +242,7 @@ impl BlueskyClient {
             reply: response.reply.map(|r| serde_json::from_value(r).ok()).flatten(),
             facets: response.record
                 .get("facets")
-                .and_then(|v| serde_json::from_value(v).ok()),
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
             labels: response.labels,
             like_count: response.like_count,
             repost_count: response.repost_count,

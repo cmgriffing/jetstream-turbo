@@ -52,8 +52,8 @@ pub struct TaskPermit {
 
 impl Drop for TaskPermit {
     fn drop(&mut self) {
-        let current = self.current_tasks.try_write().unwrap();
-        let count = *current - 1;
+        let mut current = self.current_tasks.try_write().unwrap();
+        let count = (*current).saturating_sub(1);
         *current = count;
         debug!("Released task permit, current tasks: {}", count);
     }
