@@ -3,7 +3,6 @@ use axum::{
     http::StatusCode,
     response::Json,
     routing::{get, Router},
-    Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

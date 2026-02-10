@@ -38,7 +38,7 @@ rust/
 │   ├── storage/                 # Storage layer
 │   │   ├── mod.rs
 │   │   ├── sqlite.rs             # SQLite database with connection pooling
-│   │   ├── s3.rs                 # AWS S3 archiving
+│   │   ├── sqlite.rs             # SQLite database storage
 │   │   ├── redis.rs              # Redis stream producer
 │   │   └── rotation.rs           # Database rotation management
 │   ├── turbocharger/            # Main orchestration
@@ -92,7 +92,7 @@ rust/
 
 5. **Storage Layer**
    - SQLite with connection pooling and prepared statements
-   - AWS S3 integration with compression and archiving
+   - SQLite database storage with connection pooling
    - Redis stream producer with trimming capabilities
    - Automated database rotation with cleanup
 
@@ -158,9 +158,8 @@ rust/
 - **HTTP:** Axum 0.7 + Reqwest 0.12
 - **Database:** SQLx 0.8 (SQLite)
 - **Caching:** DashMap 6.1 + LRU 0.12
-- **Serialization:** Serde + simd-json
-- **AWS:** AWS SDK 1.47
-- **Redis:** Redis-rs 0.26
+    - **Serialization:** Serde + simd-json
+    - **Redis:** Redis-rs 0.26
 - **Observability:** Tracing + Metrics
 
 ### Performance Features

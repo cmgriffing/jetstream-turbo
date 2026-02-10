@@ -44,8 +44,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Storage
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid"] }
-aws-sdk-s3 = "1.47"
-aws-config = "1.5"
 redis = { version = "0.26", features = ["tokio-comp", "connection-manager"] }
 
 # Caching and utilities

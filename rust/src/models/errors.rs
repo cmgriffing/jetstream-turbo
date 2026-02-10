@@ -32,15 +32,6 @@ pub enum TurboError {
     #[error("SQLite database error: {0}")]
     Database(#[from] sqlx::Error),
 
-    #[error("S3 operation failed: {0}")]
-    S3Operation(
-        #[from]
-        aws_sdk_s3::error::SdkError<
-            aws_sdk_s3::operation::put_object::PutObjectError,
-            aws_sdk_http::endpoint::Resolver,
-        >,
-    ),
-
     #[error("Redis operation failed: {0}")]
     RedisOperation(#[from] redis::RedisError),
 
@@ -93,7 +84,6 @@ impl TurboError {
             TurboError::HttpRequest(_)
                 | TurboError::RateLimitExceeded
                 | TurboError::Database(_)
-                | TurboError::S3Operation(_)
                 | TurboError::RedisOperation(_)
                 | TurboError::WebSocketConnection(_)
                 | TurboError::Timeout(_)

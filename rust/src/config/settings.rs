@@ -23,8 +23,6 @@ pub struct Settings {
 
     // Storage Configuration
     pub db_dir: String,
-    pub s3_bucket: String,
-    pub s3_region: String,
     pub rotation_minutes: u64,
 
     // HTTP Server Configuration
@@ -57,8 +55,6 @@ impl Default for Settings {
             stream_name_redis: "hydrated_jetstream".to_string(),
             trim_maxlen: Some(100),
             db_dir: "data_store".to_string(),
-            s3_bucket: "graze-turbo-01".to_string(),
-            s3_region: "us-east-1".to_string(),
             rotation_minutes: 1,
             http_port: 8080,
             batch_size: 10,

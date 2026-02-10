@@ -6,7 +6,7 @@ use tracing::{error, info, warn};
 use crate::config::Settings;
 use crate::client::{JetstreamClient, BlueskyClient, BlueskyAuthClient};
 use crate::hydration::{Hydrator, TurboCache};
-use crate::storage::{SQLiteStore, S3Store, RedisStore};
+use crate::storage::{SQLiteStore, RedisStore};
 use crate::models::{
     jetstream::JetstreamMessage,
     enriched::EnrichedRecord,
@@ -20,7 +20,6 @@ pub struct TurboCharger {
     auth_client: BlueskyAuthClient,
     hydrator: Hydrator,
     sqlite_store: SQLiteStore,
-    s3_store: S3Store,
     redis_store: RedisStore,
     semaphore: Arc<Semaphore>,
 }
@@ -51,10 +50,6 @@ impl TurboCharger {
         
         // Initialize storage
         let sqlite_store = SQLiteStore::new(&settings.db_dir).await?;
-        let s3_store = S3Store::new(
-            settings.s3_bucket.clone(),
-            settings.s3_region.clone(),
-        ).await?;
         
         let redis_store = RedisStore::new(
             &settings.redis_url,
@@ -74,7 +69,6 @@ impl TurboCharger {
             auth_client,
             hydrator,
             sqlite_store,
-            s3_store,
             redis_store,
             semaphore,
         })
