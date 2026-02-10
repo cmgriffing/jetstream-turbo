@@ -37,6 +37,7 @@ pub struct Settings {
 
     // Retry Configuration
     pub max_retries: u32,
+    #[serde(skip)]
     pub retry_base_delay: Duration,
 
     // Metrics Configuration
@@ -90,6 +91,15 @@ impl Settings {
 
         if let Ok(password) = std::env::var("BLUESKY_APP_PASSWORD") {
             settings.set("bluesky_app_password", password)?;
+        }
+
+        if let Ok(collections) = std::env::var("WANTED_COLLECTIONS") {
+            settings.set("wanted_collections", collections)?;
+        }
+
+        if let Ok(hosts) = std::env::var("JETSTREAM_HOSTS") {
+            let hosts: Vec<String> = serde_json::from_str(&hosts)?;
+            settings.set("jetstream_hosts", hosts)?;
         }
 
         let settings: Settings = settings.try_deserialize()?;
