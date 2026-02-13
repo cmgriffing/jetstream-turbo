@@ -6,10 +6,18 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AuthResponse {
+    #[serde(rename = "accessJwt")]
     pub access_jwt: String,
+    #[serde(rename = "refreshJwt")]
     pub refresh_jwt: String,
     pub handle: String,
     pub did: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default, rename = "emailConfirmed")]
+    pub email_confirmed: Option<bool>,
+    #[serde(default)]
+    pub active: Option<bool>,
 }
 
 pub struct BlueskyAuthClient {
@@ -60,7 +68,26 @@ impl BlueskyAuthClient {
                 Ok(resp) => {
                     match resp.status() {
                         reqwest::StatusCode::OK => {
-                            let auth_response: AuthResponse = resp.json().await?;
+                            let body_text = resp.text().await?;
+                            debug!("Auth response body: {}", body_text);
+                            
+                            let auth_response: AuthResponse = match serde_json::from_str(&body_text) {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    error!("Failed to parse auth response: {}. Body: {}", e, body_text);
+                                    return Err(TurboError::InvalidApiResponse(format!(
+                                        "Failed to parse auth response: {}. Response: {}", e, body_text
+                                    )));
+                                }
+                            };
+                            
+                            if auth_response.access_jwt.is_empty() {
+                                error!("Auth response missing access_jwt. Full response: {:?}", auth_response);
+                                return Err(TurboError::InvalidApiResponse(
+                                    "Auth response missing access_jwt field".to_string()
+                                ));
+                            }
+                            
                             info!("Successfully authenticated with Bluesky as {}", auth_response.handle);
                             
                             // Return session string in the format expected by BlueskyClient

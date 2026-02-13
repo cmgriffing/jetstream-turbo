@@ -49,7 +49,8 @@ impl TurboCharger {
         let hydrator = Hydrator::new(cache, bluesky_client.clone());
         
         // Initialize storage
-        let sqlite_store = SQLiteStore::new(&settings.db_dir).await?;
+        let db_path = format!("{}/jetstream.db", settings.db_dir);
+        let sqlite_store = SQLiteStore::new(&db_path).await?;
         
         let redis_store = RedisStore::new(
             &settings.redis_url,
