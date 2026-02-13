@@ -19,7 +19,7 @@ tokio-util = "0.7"
 clap = { version = "4.5", features = ["derive"] }
 
 # HTTP and WebSocket
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", features = ["aws_lc_rs"] }

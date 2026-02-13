@@ -10,6 +10,8 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
+const REQUESTS_PER_SECOND: u32 = 6;
+
 pub struct BlueskyClient {
     http_client: Client,
     session_strings: Arc<RwLock<Vec<String>>>,
@@ -29,7 +31,7 @@ pub struct BlueskyClient {
 
 impl BlueskyClient {
     pub fn new(session_strings: Vec<String>) -> Self {
-        let quota = Quota::per_minute(NonZeroU32::new(60).unwrap());
+        let quota = Quota::per_second(NonZeroU32::new(REQUESTS_PER_SECOND).unwrap());
         Self {
             http_client: Client::builder()
                 .timeout(Duration::from_secs(30))
@@ -37,7 +39,7 @@ impl BlueskyClient {
                 .build()
                 .expect("Failed to create HTTP client"),
             session_strings: Arc::new(RwLock::new(session_strings)),
-            rate_limiter: Arc::new(RateLimiter::direct(quota)), // 60 requests per minute
+            rate_limiter: Arc::new(RateLimiter::direct(quota)), // ~6 requests per second
             api_base_url: "https://bsky.social/xrpc".to_string(),
             max_retries: 3,
             retry_delay_ms: 200,

@@ -1,13 +1,15 @@
 use crate::models::errors::{TurboError, TurboResult};
 use crate::turbocharger::{HealthStatus, TurboCharger, TurboStats};
 use axum::{
-    extract::{Query, State},
+    extract::{Query, State, ws::{Message, WebSocket, WebSocketUpgrade}},
     http::StatusCode,
     response::Json,
     routing::{get, Router},
 };
+use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tracing::info;
 
 #[derive(Deserialize)]
@@ -38,6 +40,7 @@ pub fn create_router(turbocharger: Arc<TurboCharger>) -> Router {
         .route("/health", get(health_check))
         .route("/stats", get(get_stats))
         .route("/metrics", get(get_metrics))
+        .route("/ws", get(ws_handler))
         .with_state(turbocharger)
 }
 
@@ -79,6 +82,41 @@ async fn get_metrics() -> &'static str {
     # HELP jetstream_turbo_cache_hit_rate Cache hit rate\n\
     # TYPE jetstream_turbo_cache_hit_rate gauge\n\
     jetstream_turbo_cache_hit_rate 0.0\n"
+}
+
+async fn ws_handler(
+    State(turbocharger): State<Arc<TurboCharger>>,
+    ws: WebSocketUpgrade,
+) -> axum::response::Response {
+    ws.on_upgrade(move |socket| handle_websocket(socket, turbocharger.subscribe()))
+}
+
+async fn handle_websocket(socket: WebSocket, mut broadcast_rx: broadcast::Receiver<crate::models::enriched::EnrichedRecord>) {
+    let (mut sender, mut socket_rx) = socket.split();
+
+    loop {
+        tokio::select! {
+            msg = broadcast_rx.recv() => {
+                match msg {
+                    Ok(record) => {
+                        if let Ok(json) = serde_json::to_string(&record) {
+                            if sender.send(Message::Text(json)).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            msg = socket_rx.next() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 pub async fn create_server(port: u16, turbocharger: Arc<TurboCharger>) -> TurboResult<()> {

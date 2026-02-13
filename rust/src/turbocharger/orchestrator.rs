@@ -5,12 +5,13 @@ use crate::models::{
     errors::{TurboError, TurboResult},
     jetstream::JetstreamMessage,
 };
+use crate::models::enriched::EnrichedRecord;
 use crate::storage::{RedisStore, SQLiteStore};
 use futures::StreamExt;
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Semaphore;
+use tokio::sync::{broadcast, Semaphore};
 use tracing::{error, info};
 
 pub struct TurboCharger {
@@ -22,6 +23,7 @@ pub struct TurboCharger {
     sqlite_store: SQLiteStore,
     redis_store: RedisStore,
     semaphore: Arc<Semaphore>,
+    broadcast_sender: broadcast::Sender<EnrichedRecord>,
 }
 
 impl TurboCharger {
@@ -68,6 +70,9 @@ impl TurboCharger {
         // Initialize semaphore for concurrency control
         let semaphore = Arc::new(Semaphore::new(settings.max_concurrent_requests));
 
+        // Initialize broadcast channel
+        let (broadcast_sender, _) = broadcast::channel(1000);
+
         info!("TurboCharger initialized successfully");
 
         Ok(Self {
@@ -79,6 +84,7 @@ impl TurboCharger {
             sqlite_store,
             redis_store,
             semaphore,
+            broadcast_sender,
         })
     }
 
@@ -151,6 +157,9 @@ impl TurboCharger {
         // Publish to Redis stream
         let _message_id = self.redis_store.publish_record(&enriched).await?;
 
+        // Broadcast to WebSocket subscribers
+        let _ = self.broadcast_sender.send(enriched);
+
         Ok(())
     }
 
@@ -201,6 +210,10 @@ impl TurboCharger {
             sqlite_available: sqlite_count.is_some(),
             session_count: self.bluesky_client.get_session_count().await,
         })
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<EnrichedRecord> {
+        self.broadcast_sender.subscribe()
     }
 }
 
