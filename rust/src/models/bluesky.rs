@@ -9,9 +9,12 @@ pub struct BlueskyProfile {
     pub description: Option<String>,
     pub avatar: Option<String>,
     pub banner: Option<String>,
-    pub followers_count: u64,
-    pub follows_count: u64,
-    pub posts_count: u64,
+    #[serde(default)]
+    pub followers_count: Option<u64>,
+    #[serde(default)]
+    pub follows_count: Option<u64>,
+    #[serde(default)]
+    pub posts_count: Option<u64>,
     pub indexed_at: Option<DateTime<Utc>>,
     pub created_at: Option<DateTime<Utc>>,
     pub labels: Option<Vec<Label>>,
@@ -127,9 +130,12 @@ pub struct ActorProfile {
     pub description: Option<String>,
     pub avatar: Option<String>,
     pub banner: Option<String>,
-    pub followers_count: u64,
-    pub follows_count: u64,
-    pub posts_count: u64,
+    #[serde(default)]
+    pub followers_count: Option<u64>,
+    #[serde(default)]
+    pub follows_count: Option<u64>,
+    #[serde(default)]
+    pub posts_count: Option<u64>,
     pub indexed_at: Option<DateTime<Utc>>,
     pub labels: Option<Vec<Label>>,
 }
@@ -152,9 +158,12 @@ pub struct GetProfileResponse {
     pub description: Option<String>,
     pub avatar: Option<String>,
     pub banner: Option<String>,
-    pub followers_count: u64,
-    pub follows_count: u64,
-    pub posts_count: u64,
+    #[serde(default)]
+    pub followers_count: Option<u64>,
+    #[serde(default)]
+    pub follows_count: Option<u64>,
+    #[serde(default)]
+    pub posts_count: Option<u64>,
     pub indexed_at: Option<String>,
     pub created_at: Option<String>,
     pub labels: Option<Vec<Label>>,

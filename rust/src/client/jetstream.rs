@@ -1,11 +1,11 @@
+use crate::models::{errors::TurboError, jetstream::JetstreamMessage, TurboResult};
 use futures::{Stream, StreamExt};
 use std::time::Duration;
-use tokio::time::sleep;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio::sync::mpsc;
+use tokio::time::sleep;
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
-use crate::models::{jetstream::JetstreamMessage, errors::TurboError, TurboResult};
 
 pub struct JetstreamClient {
     endpoints: Vec<String>,
@@ -28,7 +28,9 @@ impl JetstreamClient {
         Self::new(endpoints, "app.bsky.feed.post".to_string())
     }
 
-    pub async fn stream_messages(&self) -> TurboResult<impl Stream<Item = TurboResult<JetstreamMessage>>> {
+    pub async fn stream_messages(
+        &self,
+    ) -> TurboResult<impl Stream<Item = TurboResult<JetstreamMessage>>> {
         let (tx, rx) = mpsc::unbounded_channel();
 
         // Start the connection loop
@@ -43,9 +45,8 @@ impl JetstreamClient {
 
             loop {
                 let endpoint = &endpoints[current_endpoint];
-                let url = format!(
-                    "wss://{endpoint}/subscribe?wantedCollections={wanted_collections}"
-                );
+                let url =
+                    format!("wss://{endpoint}/subscribe?wantedCollections={wanted_collections}");
 
                 info!("Connecting to Jetstream endpoint: {}", endpoint);
 
@@ -54,7 +55,7 @@ impl JetstreamClient {
                         info!("Successfully connected to {}", endpoint);
                         reconnect_attempts = 0; // Reset on successful connection
 
-                            let (_, mut read) = ws_stream.split();
+                        let (_, mut read) = ws_stream.split();
 
                         // Process messages
                         while let Some(msg_result) = read.next().await {
@@ -69,7 +70,11 @@ impl JetstreamClient {
                                             }
                                         }
                                         Err(e) => {
-                                            warn!("Failed to parse message: {:?}. Raw: {}", e, &text[..text.len().min(200)]);
+                                            warn!(
+                                                "Failed to parse message: {:?}. Raw: {}",
+                                                e,
+                                                &text[..text.len().min(200)]
+                                            );
                                             // Continue processing other messages
                                         }
                                     }
@@ -104,9 +109,12 @@ impl JetstreamClient {
                         reconnect_attempts += 1;
                         if reconnect_attempts >= max_reconnect_attempts {
                             error!("Max reconnection attempts reached");
-                            if tx.send(Err(TurboError::WebSocketConnection(format!(
-                                "Failed to connect after {max_reconnect_attempts} attempts"
-                            )))).is_err() {
+                            if tx
+                                .send(Err(TurboError::WebSocketConnection(format!(
+                                    "Failed to connect after {max_reconnect_attempts} attempts"
+                                ))))
+                                .is_err()
+                            {
                                 return;
                             }
                             break;
@@ -117,7 +125,10 @@ impl JetstreamClient {
                 // Try next endpoint or wait before retry
                 current_endpoint = (current_endpoint + 1) % endpoints.len();
                 if endpoints.len() == 1 {
-                    info!("Waiting {} seconds before reconnection attempt", reconnect_delay.as_secs());
+                    info!(
+                        "Waiting {} seconds before reconnection attempt",
+                        reconnect_delay.as_secs()
+                    );
                     sleep(reconnect_delay).await;
                 } else {
                     sleep(Duration::from_secs(1)).await;
@@ -134,8 +145,8 @@ impl JetstreamClient {
 }
 
 fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
-    let message: JetstreamMessage = serde_json::from_str(text)
-        .map_err(TurboError::JsonSerialization)?;
+    let message: JetstreamMessage =
+        serde_json::from_str(text).map_err(TurboError::JsonSerialization)?;
 
     // Validate required fields
     if message.did.is_empty() {
@@ -148,30 +159,30 @@ fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_jetstream_client_creation() {
         let endpoints = vec![
             "jetstream1.us-east.bsky.network".to_string(),
             "jetstream2.us-east.bsky.network".to_string(),
         ];
-        
+
         let client = JetstreamClient::new(endpoints.clone(), "app.bsky.feed.post".to_string());
         assert_eq!(client.endpoints, endpoints);
         assert_eq!(client.wanted_collections, "app.bsky.feed.post");
     }
-    
+
     #[test]
     fn test_jetstream_client_with_defaults() {
         let endpoints = vec!["jetstream1.us-east.bsky.network".to_string()];
         let client = JetstreamClient::with_defaults(endpoints);
         assert_eq!(client.wanted_collections, "app.bsky.feed.post");
     }
-    
+
     #[test]
     fn test_message_parsing() {
         let client = JetstreamClient::with_defaults(vec!["test.bsky.network".to_string()]);
-        
+
         let valid_json = r#"
         {
             "did": "did:plc:test",
@@ -195,23 +206,23 @@ mod tests {
             }
         }
         "#;
-        
+
         let result = client.parse_message(valid_json);
         assert!(result.is_ok());
-        
+
         let message = result.unwrap();
         assert_eq!(message.did, "did:plc:test");
         assert_eq!(message.seq, 12345);
     }
-    
+
     #[test]
     fn test_invalid_message_parsing() {
         let client = JetstreamClient::with_defaults(vec!["test.bsky.network".to_string()]);
-        
+
         let invalid_json = r#"{ "invalid": "json" }"#;
         let result = client.parse_message(invalid_json);
         assert!(result.is_err());
-        
+
         let empty_did = r#"
         {
             "did": "",

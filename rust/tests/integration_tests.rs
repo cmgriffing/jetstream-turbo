@@ -1,14 +1,14 @@
 #[cfg(test)]
 mod tests {
+    use jetstream_turbo::client::{BlueskyAuthClient, JetstreamClient};
     use jetstream_turbo::config::Settings;
     use jetstream_turbo::hydration::TurboCache;
-    use jetstream_turbo::client::{JetstreamClient, BlueskyAuthClient};
-    use jetstream_turbo::models::{jetstream::JetstreamMessage, bluesky::BlueskyProfile};
-    use wiremock::{MockServer, Mock, ResponseTemplate};
-    use wiremock::matchers::{method, path};
-    use tempfile::TempDir;
+    use jetstream_turbo::models::{bluesky::BlueskyProfile, jetstream::JetstreamMessage};
     use std::time::Duration;
-    
+    use tempfile::TempDir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
     #[tokio::test]
     async fn test_configuration_loading() {
         // Test default configuration
@@ -17,11 +17,11 @@ mod tests {
         assert_eq!(settings.batch_size, 10);
         assert!(settings.jetstream_hosts.len() > 0);
     }
-    
+
     #[tokio::test]
     async fn test_bluesky_auth_integration() {
         let mock_server = MockServer::start().await;
-        
+
         Mock::given(method("POST"))
             .and(path("/com.atproto.server.createSession"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -32,22 +32,22 @@ mod tests {
             })))
             .mount(&mock_server)
             .await;
-        
+
         let client = BlueskyAuthClient::new(
             "test.bsky.social".to_string(),
             "test-app-password".to_string(),
         );
-        
+
         let session = client.authenticate().await.unwrap();
         assert!(session.contains("test_jwt_token"));
         assert!(session.contains("bsky.social"));
     }
-    
+
     #[tokio::test]
     async fn test_jetstream_client_message_parsing() {
         let endpoints = vec!["test.bsky.network".to_string()];
         let client = JetstreamClient::new(endpoints, "app.bsky.feed.post".to_string());
-        
+
         let valid_json = r#"
         {
             "did": "did:plc:test",
@@ -71,19 +71,19 @@ mod tests {
             }
         }
         "#;
-        
+
         let result = client.parse_message(valid_json);
         assert!(result.is_ok());
-        
+
         let message = result.unwrap();
         assert_eq!(message.did, "did:plc:test");
         assert_eq!(message.seq, 12345);
     }
-    
+
     #[tokio::test]
     async fn test_cache_performance() {
         let cache = TurboCache::new(10000, 10000);
-        
+
         let profile = BlueskyProfile {
             did: "did:plc:test".to_string(),
             handle: "test.bsky.social".to_string(),
@@ -98,40 +98,39 @@ mod tests {
             created_at: None,
             labels: None,
         };
-        
+
         // Benchmark cache operations
         let start = std::time::Instant::now();
-        
+
         for i in 0..10000 {
-            cache.set_user_profile(
-                format!("did:plc:test{}", i),
-                profile.clone()
-            ).await;
+            cache
+                .set_user_profile(format!("did:plc:test{}", i), profile.clone())
+                .await;
         }
-        
+
         let set_time = start.elapsed();
-        
+
         let start = std::time::Instant::now();
-        
+
         for i in 0..10000 {
             let _result = cache.get_user_profile(&format!("did:plc:test{}", i)).await;
         }
-        
+
         let get_time = start.elapsed();
-        
+
         println!("Cache set time for 10k items: {:?}", set_time);
         println!("Cache get time for 10k items: {:?}", get_time);
-        
+
         // Verify cache hit rates
         let (user_hit_rate, post_hit_rate) = cache.get_hit_rates().await;
         assert_eq!(user_hit_rate, 1.0); // All should be hits
         assert_eq!(post_hit_rate, 0.0); // No post operations
-        
+
         // Performance assertions (these should be very fast)
         assert!(set_time.as_millis() < 1000); // Less than 1 second
-        assert!(get_time.as_millis() < 500);  // Less than 500ms
+        assert!(get_time.as_millis() < 500); // Less than 500ms
     }
-    
+
     #[tokio::test]
     async fn test_message_extraction() {
         let message_json = r#"
@@ -174,67 +173,65 @@ mod tests {
             }
         }
         "#;
-        
+
         let message: JetstreamMessage = serde_json::from_str(message_json).unwrap();
-        
+
         // Test message extraction
         assert_eq!(message.extract_did(), "did:plc:alice");
         assert_eq!(
             message.extract_at_uri(),
             Some("at://did:plc:alice/app.bsky.feed.post/3jk7v7mjpxq3y")
         );
-        
+
         // Test DID extraction from mentions
         let mentioned_dids = message.extract_mentioned_dids();
         assert!(mentioned_dids.contains(&"did:plc:bob"));
         assert!(!mentioned_dids.is_empty());
     }
-    
+
     #[tokio::test]
     async fn test_end_to_end_scenario() {
         // This test simulates a mini end-to-end flow
-        
+
         // 1. Setup cache
         let cache = TurboCache::new(1000, 1000);
-        
+
         // 2. Simulate message reception
-        let messages = vec![
-            JetstreamMessage {
-                did: "did:plc:user1".to_string(),
+        let messages = vec![JetstreamMessage {
+            did: "did:plc:user1".to_string(),
+            seq: 1,
+            time_us: 1704067200000000,
+            commit: jetstream_turbo::models::jetstream::CommitData {
                 seq: 1,
+                rebase: false,
                 time_us: 1704067200000000,
-                commit: jetstream_turbo::models::jetstream::CommitData {
-                    seq: 1,
-                    rebase: false,
-                    time_us: 1704067200000000,
-                    operation: jetstream_turbo::models::jetstream::Operation::Create {
-                        record: jetstream_turbo::models::jetstream::Record {
-                            uri: "at://did:plc:user1/app.bsky.feed.post/1".to_string(),
-                            cid: "cid1".to_string(),
-                            author: "did:plc:user1".to_string(),
-                            r#type: "app.bsky.feed.post".to_string(),
-                            created_at: chrono::Utc::now(),
-                            fields: serde_json::json!({"text": "Hello world"}),
-                            embed: None,
-                            labels: None,
-                            langs: None,
-                            reply: None,
-                            tags: None,
-                            facets: None,
-                            collections: None,
-                        }
-                    }
-                }
-            }
-        ];
-        
+                operation: jetstream_turbo::models::jetstream::Operation::Create {
+                    record: jetstream_turbo::models::jetstream::Record {
+                        uri: "at://did:plc:user1/app.bsky.feed.post/1".to_string(),
+                        cid: "cid1".to_string(),
+                        author: "did:plc:user1".to_string(),
+                        r#type: "app.bsky.feed.post".to_string(),
+                        created_at: chrono::Utc::now(),
+                        fields: serde_json::json!({"text": "Hello world"}),
+                        embed: None,
+                        labels: None,
+                        langs: None,
+                        reply: None,
+                        tags: None,
+                        facets: None,
+                        collections: None,
+                    },
+                },
+            },
+        }];
+
         // 3. Process messages and simulate hydration
         for message in messages {
             let author_did = message.extract_did();
-            
+
             // Check if we have the author profile cached
             let profile = cache.get_user_profile(author_did).await;
-            
+
             if profile.is_none() {
                 // Simulate API call and cache result
                 let new_profile = BlueskyProfile {
@@ -251,16 +248,21 @@ mod tests {
                     created_at: None,
                     labels: None,
                 };
-                
-                cache.set_user_profile(author_did.to_string(), new_profile).await;
+
+                cache
+                    .set_user_profile(author_did.to_string(), new_profile)
+                    .await;
             }
         }
-        
+
         // 4. Verify results
         let final_profile = cache.get_user_profile("did:plc:user1").await;
         assert!(final_profile.is_some());
-        assert_eq!(final_profile.unwrap().display_name, Some("User 1".to_string()));
-        
+        assert_eq!(
+            final_profile.unwrap().display_name,
+            Some("User 1".to_string())
+        );
+
         // 5. Check metrics
         let metrics = cache.get_metrics().await;
         assert!(metrics.user_hits > 0);

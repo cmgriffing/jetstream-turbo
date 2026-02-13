@@ -1,10 +1,10 @@
+use anyhow::Result;
 use clap::Parser;
+use jetstream_turbo_rs::config::Settings;
+use jetstream_turbo_rs::server::create_server;
+use jetstream_turbo_rs::turbocharger::TurboCharger;
 use std::env;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use jetstream_turbo_rs::config::Settings;
-use jetstream_turbo_rs::turbocharger::TurboCharger;
-use jetstream_turbo_rs::server::create_server;
-use anyhow::Result;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -48,18 +48,22 @@ async fn main() -> Result<()> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
-    
+
     let args = Args::parse();
-    
+
     // Initialize tracing
     init_tracing(&args.log_level)?;
-    
+
     // Load configuration
     let settings = Settings::from_env()?;
-    
+
     tracing::info!("Starting jetstream-turbo v{}", env!("CARGO_PKG_VERSION"));
-    tracing::info!("Configuration loaded: modulo={}, shard={}", args.modulo, args.shard);
-    
+    tracing::info!(
+        "Configuration loaded: modulo={}, shard={}",
+        args.modulo,
+        args.shard
+    );
+
     // Create turbocharger
     let turbocharger = TurboCharger::new(settings.clone(), args.modulo, args.shard).await?;
     let turbocharger = std::sync::Arc::new(turbocharger);
@@ -77,7 +81,7 @@ async fn main() -> Result<()> {
             tracing::error!("Server failed: {}", e);
         }
     });
-    
+
     // Wait for either task to complete
     tokio::select! {
         _ = turbocharger_handle => {
@@ -87,18 +91,18 @@ async fn main() -> Result<()> {
             tracing::info!("Server task completed");
         }
     }
-    
+
     Ok(())
 }
 
 fn init_tracing(log_level: &str) -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
-    
+
     tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer().json())
         .init();
-    
+
     Ok(())
 }

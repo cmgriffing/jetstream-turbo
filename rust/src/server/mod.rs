@@ -1,5 +1,7 @@
+use crate::models::errors::{TurboError, TurboResult};
+use crate::turbocharger::{HealthStatus, TurboCharger, TurboStats};
 use axum::{
-    extract::{State, Query},
+    extract::{Query, State},
     http::StatusCode,
     response::Json,
     routing::{get, Router},
@@ -7,8 +9,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::info;
-use crate::turbocharger::{TurboCharger, TurboStats, HealthStatus};
-use crate::models::errors::{TurboError, TurboResult};
 
 #[derive(Deserialize)]
 pub struct StatsQuery {
@@ -41,10 +41,17 @@ pub fn create_router(turbocharger: Arc<TurboCharger>) -> Router {
         .with_state(turbocharger)
 }
 
-async fn health_check(State(turbocharger): State<Arc<TurboCharger>>) -> Result<Json<HealthResponse>, StatusCode> {
+async fn health_check(
+    State(turbocharger): State<Arc<TurboCharger>>,
+) -> Result<Json<HealthResponse>, StatusCode> {
     match turbocharger.health_check().await {
         Ok(status) => Ok(Json(HealthResponse {
-            status: if status.healthy { "healthy" } else { "unhealthy" }.to_string(),
+            status: if status.healthy {
+                "healthy"
+            } else {
+                "unhealthy"
+            }
+            .to_string(),
             data: status,
         })),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -80,7 +87,8 @@ pub async fn create_server(port: u16, turbocharger: Arc<TurboCharger>) -> TurboR
         .route("/", get(|| async { "jetstream-turbo API server" }))
         .route("/ready", get(|| async { "OK" }));
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
+        .await
         .map_err(TurboError::Io)?;
 
     info!("Starting HTTP server on port {}", port);

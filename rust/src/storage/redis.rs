@@ -1,12 +1,12 @@
-use not_redis::Client as NotRedisClient;
-use serde_json;
-use tokio::sync::Mutex;
-use std::sync::Arc;
-use tracing::{debug, error, info};
 use crate::models::{
     enriched::EnrichedRecord,
     errors::{TurboError, TurboResult},
 };
+use not_redis::Client as NotRedisClient;
+use serde_json;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tracing::{debug, error, info};
 
 pub struct RedisStore {
     client: Arc<Mutex<NotRedisClient>>,
@@ -15,7 +15,11 @@ pub struct RedisStore {
 }
 
 impl RedisStore {
-    pub async fn new(_redis_url: &str, stream_name: String, max_length: Option<usize>) -> TurboResult<Self> {
+    pub async fn new(
+        _redis_url: &str,
+        stream_name: String,
+        max_length: Option<usize>,
+    ) -> TurboResult<Self> {
         info!("Connecting to not_redis with stream: {}", stream_name);
 
         let client = NotRedisClient::new();
@@ -69,7 +73,10 @@ impl RedisStore {
             message_ids.push(message_id);
         }
 
-        info!("Published batch of {} records to not_redis stream", records.len());
+        info!(
+            "Published batch of {} records to not_redis stream",
+            records.len()
+        );
         Ok(message_ids)
     }
 
@@ -132,7 +139,8 @@ pub struct StreamInfo {
 }
 
 fn generate_message_id(record: &EnrichedRecord) -> String {
-    format!("{}-{}",
+    format!(
+        "{}-{}",
         record.processed_at.timestamp_millis(),
         record.message.seq.unwrap_or(0)
     )
@@ -142,7 +150,7 @@ fn generate_message_id(record: &EnrichedRecord) -> String {
 mod tests {
     use super::*;
     use crate::models::enriched::ProcessingMetrics;
-    
+
     #[test]
     fn test_generate_message_id() {
         let record = EnrichedRecord {
@@ -169,9 +177,9 @@ mod tests {
                             tags: None,
                             facets: None,
                             collections: None,
-                        }
-                    }
-                }
+                        },
+                    },
+                },
             },
             hydrated_metadata: crate::models::enriched::HydratedMetadata::default(),
             processed_at: chrono::Utc::now(),
@@ -183,7 +191,7 @@ mod tests {
                 cache_misses: 2,
             },
         };
-        
+
         let message_id = generate_message_id(&record);
         assert!(message_id.contains('-'));
         assert_eq!(message_id.split('-').count(), 2);
