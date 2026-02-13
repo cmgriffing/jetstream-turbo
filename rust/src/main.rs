@@ -7,14 +7,37 @@ use jetstream_turbo_rs::server::create_server;
 use anyhow::Result;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(
+    author,
+    version,
+    about = "Turbocharged Jetstream messages - hydrates referenced objects and stores to SQLite",
+    long_about = r#"
+Turbocharged Jetstream messages - hydrates referenced objects and stores to SQLite.
+
+SETUP:
+    1. Copy .env.example to .env
+    2. Set BLUESKY_HANDLE and BLUESKY_APP_PASSWORD in .env
+       (Get an app password at: https://bsky.app/settings/app-passwords)
+    3. Run: cargo run
+
+EXAMPLES:
+    cargo run
+    cargo run -- --log-level debug
+    cargo run -- --modulo 4 --shard 0
+
+For more information, see README.md
+"#
+)]
 struct Args {
+    /// Shard modulo for distributed processing (0 = single instance)
     #[arg(short, long, default_value_t = 0)]
     modulo: u32,
-    
+
+    /// Shard index (0 to modulo-1) for this instance
     #[arg(short, long, default_value_t = 0)]
     shard: u32,
-    
+
+    /// Log level: trace, debug, info, warn, error
     #[arg(long, default_value = "info")]
     log_level: String,
 }

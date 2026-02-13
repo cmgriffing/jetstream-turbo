@@ -112,15 +112,33 @@ impl Settings {
 
     fn validate(&self) -> Result<()> {
         if self.stream_name.is_empty() {
-            anyhow::bail!("STREAM_NAME environment variable is required");
+            anyhow::bail!(
+                "STREAM_NAME environment variable is required\n\n\
+                To set up:\n\
+                1. Copy .env.example to .env\n\
+                2. Set STREAM_NAME in .env (e.g., STREAM_NAME=hydrated_jetstream)"
+            );
         }
 
         if self.bluesky_handle.is_empty() {
-            anyhow::bail!("BLUESKY_HANDLE environment variable is required");
+            anyhow::bail!(
+                "BLUESKY_HANDLE environment variable is required\n\n\
+                To set up:\n\
+                1. Copy .env.example to .env\n\
+                2. Set BLUESKY_HANDLE in .env (e.g., BLUESKY_HANDLE=yourname.bsky.social)\n\n\
+                Get your handle from your Bluesky profile."
+            );
         }
 
         if self.bluesky_app_password.is_empty() {
-            anyhow::bail!("BLUESKY_APP_PASSWORD environment variable is required");
+            anyhow::bail!(
+                "BLUESKY_APP_PASSWORD environment variable is required\n\n\
+                To set up:\n\
+                1. Go to https://bsky.app/settings/app-passwords\n\
+                2. Create a new app password\n\
+                3. Copy .env.example to .env\n\
+                4. Set BLUESKY_APP_PASSWORD in .env"
+            );
         }
 
         if self.batch_size == 0 {

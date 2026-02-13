@@ -4,6 +4,46 @@
 
 Successfully created a comprehensive Rust implementation of jetstream-turbo, a high-performance system for processing Bluesky Jetstream firehose data with hydration and multi-tier storage.
 
+## 🚀 Quick Start (Local Development)
+
+### Prerequisites
+
+- Rust 1.88.0 (see `rust-toolchain.toml`)
+- Redis (for local development)
+
+### Setup
+
+1. **Copy environment file:**
+   ```bash
+   cp .env.example .env
+   ```
+
+2. **Configure required environment variables in `.env`:**
+   - `BLUESKY_HANDLE` - Your Bluesky handle (e.g., `yourname.bsky.social`)
+   - `BLUESKY_APP_PASSWORD` - Create one at https://bsky.app/settings/app-passwords
+   - `STREAM_NAME` - Name for your data stream (e.g., `hydrated_jetstream`)
+
+3. **Run the application:**
+   ```bash
+   cargo run
+   ```
+
+   Or with options:
+   ```bash
+   cargo run -- --log-level debug
+   ```
+
+4. **Verify it's working:**
+   ```bash
+   curl http://localhost:8080/health
+   ```
+
+### Docker Alternative
+
+```bash
+docker-compose up -d
+```
+
 ## 📁 Project Structure
 
 ```
