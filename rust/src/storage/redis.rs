@@ -33,15 +33,15 @@ impl RedisStore {
     pub async fn publish_record(&self, record: &EnrichedRecord) -> TurboResult<String> {
         let message_json = serde_json::to_string(record)?;
         let message_id = generate_message_id(record);
-        let at_uri = record.get_at_uri().unwrap_or("");
-        let did = record.get_did();
+        let at_uri = record.get_at_uri().unwrap_or_default();
+        let did = record.get_did().to_string();
         let hydrated_at = record.processed_at.to_rfc3339();
 
         let values = vec![
             ("at_uri", at_uri),
             ("did", did),
-            ("message", &message_json),
-            ("hydrated_at", &hydrated_at),
+            ("message", message_json),
+            ("hydrated_at", hydrated_at),
         ];
 
         let mut client = self.client.lock().await;
@@ -132,9 +132,9 @@ pub struct StreamInfo {
 }
 
 fn generate_message_id(record: &EnrichedRecord) -> String {
-    format!("{}-{}", 
+    format!("{}-{}",
         record.processed_at.timestamp_millis(),
-        record.message.seq
+        record.message.seq.unwrap_or(0)
     )
 }
 

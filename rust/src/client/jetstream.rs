@@ -60,6 +60,7 @@ impl JetstreamClient {
                         while let Some(msg_result) = read.next().await {
                             match msg_result {
                                 Ok(Message::Text(text)) => {
+                                    debug!("Received message: {}", text);
                                     match parse_message(&text) {
                                         Ok(message) => {
                                             if tx.send(Ok(message)).is_err() {
@@ -68,7 +69,7 @@ impl JetstreamClient {
                                             }
                                         }
                                         Err(e) => {
-                                            warn!("Failed to parse message: {:?}", e);
+                                            warn!("Failed to parse message: {:?}. Raw: {}", e, &text[..text.len().min(200)]);
                                             // Continue processing other messages
                                         }
                                     }
@@ -139,10 +140,6 @@ fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
     // Validate required fields
     if message.did.is_empty() {
         return Err(TurboError::InvalidMessage("DID is empty".to_string()));
-    }
-
-    if message.seq == 0 {
-        return Err(TurboError::InvalidMessage("Sequence number is zero".to_string()));
     }
 
     Ok(message)

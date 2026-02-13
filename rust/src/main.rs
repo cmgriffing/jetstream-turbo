@@ -21,6 +21,11 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install rustls crypto provider
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+    
     let args = Args::parse();
     
     // Initialize tracing

@@ -14,8 +14,7 @@ pub struct EnrichedRecord {
     pub metrics: ProcessingMetrics,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HydratedMetadata {
     /// Author profile information
     pub author_profile: Option<BlueskyProfile>,
@@ -92,7 +91,7 @@ impl EnrichedRecord {
         }
     }
 
-    pub fn get_at_uri(&self) -> Option<&str> {
+    pub fn get_at_uri(&self) -> Option<String> {
         self.message.extract_at_uri()
     }
 
@@ -101,13 +100,11 @@ impl EnrichedRecord {
     }
 
     pub fn get_text(&self) -> Option<&str> {
-        match &self.message.commit.operation {
-            crate::models::jetstream::Operation::Create { record }
-            | crate::models::jetstream::Operation::Update { record } => {
-                record.fields.get("text").and_then(|v| v.as_str())
-            }
-            crate::models::jetstream::Operation::Delete => None,
-        }
+        self.message
+            .commit
+            .as_ref()
+            .and_then(|c| c.record.as_ref())
+            .and_then(|r| r.get("text").and_then(|v| v.as_str()))
     }
 
     pub fn calculate_cache_hit_rate(&mut self) {
@@ -133,50 +130,61 @@ impl HydratedMetadata {
         }
     }
 
-    pub fn extract_content_features(
-        &mut self,
-        text: &str,
-        facets: &Option<Vec<crate::models::jetstream::Facet>>,
-    ) {
+    pub fn extract_content_features(&mut self, text: &str, record: &Option<serde_json::Value>) {
         // Reset arrays
         self.hashtags.clear();
         self.urls.clear();
         self.mentions.clear();
 
         // Extract from facets
-        if let Some(facets) = facets {
-            for facet in facets {
-                let (start, end) = (facet.index.byte_start, facet.index.byte_end);
+        if let Some(record) = record {
+            if let Some(facets) = record.get("facets").and_then(|f| f.as_array()) {
+                for facet in facets {
+                    let index = facet.get("index");
+                    let start = index
+                        .and_then(|i| i.get("byteStart").and_then(|v| v.as_u64()))
+                        .unwrap_or(0) as u32;
+                    let end = index
+                        .and_then(|i| i.get("byteEnd").and_then(|v| v.as_u64()))
+                        .unwrap_or(0) as u32;
 
-                for feature in &facet.features {
-                    match feature.r#type.as_str() {
-                        "app.bsky.richtext.facet#tag" => {
-                            if let (Some(start_usize), Some(end_usize)) =
-                                (start.try_into().ok(), end.try_into().ok())
-                            {
-                                if let Some(hashtag) = text.get(start_usize..end_usize) {
-                                    self.hashtags
-                                        .push(hashtag.trim_start_matches('#').to_lowercase());
+                    if let Some(features) = facet.get("features").and_then(|f| f.as_array()) {
+                        for feature in features {
+                            let feature_type =
+                                feature.get("$type").and_then(|t| t.as_str()).unwrap_or("");
+                            match feature_type {
+                                "app.bsky.richtext.facet#tag" => {
+                                    if let (Some(start_usize), Some(end_usize)) =
+                                        (start.try_into().ok(), end.try_into().ok())
+                                    {
+                                        if let Some(hashtag) = text.get(start_usize..end_usize) {
+                                            self.hashtags.push(
+                                                hashtag.trim_start_matches('#').to_lowercase(),
+                                            );
+                                        }
+                                    }
                                 }
+                                "app.bsky.richtext.facet#link" => {
+                                    if let Some(uri) = feature.get("uri").and_then(|u| u.as_str()) {
+                                        if uri.starts_with("http") {
+                                            self.urls.push(uri.to_string());
+                                        }
+                                    }
+                                }
+                                "app.bsky.richtext.facet#mention" => {
+                                    if let Some(did) = feature.get("did").and_then(|d| d.as_str()) {
+                                        self.mentions.push(Mention {
+                                            did: did.to_string(),
+                                            handle: None,
+                                            display_name: None,
+                                            start_byte: start,
+                                            end_byte: end,
+                                        });
+                                    }
+                                }
+                                _ => {}
                             }
                         }
-                        "app.bsky.richtext.facet#link" => {
-                            if let Some(uri) = feature.uri.strip_prefix("http") {
-                                self.urls.push(uri.to_string());
-                            }
-                        }
-                        "app.bsky.richtext.facet#mention" => {
-                            if let Some(did) = &feature.did {
-                                self.mentions.push(Mention {
-                                    did: did.clone(),
-                                    handle: None,
-                                    display_name: None,
-                                    start_byte: start,
-                                    end_byte: end,
-                                });
-                            }
-                        }
-                        _ => {}
                     }
                 }
             }
@@ -184,40 +192,26 @@ impl HydratedMetadata {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::jetstream::{CommitData, Operation, Record};
+    use crate::models::jetstream::CommitData;
     use serde_json::json;
 
     #[test]
     fn test_enriched_record_creation() {
         let message = JetstreamMessage {
             did: "did:plc:test".to_string(),
-            seq: 12345,
-            time_us: 1640995200000000,
+            time_us: Some(1640995200000000),
+            seq: Some(12345),
+            kind: "commit".to_string(),
             commit: CommitData {
-                seq: 12345,
-                rebase: false,
-                time_us: 1640995200000000,
-                operation: Operation::Create {
-                    record: Record {
-                        uri: "at://did:plc:test/app.bsky.feed.post/test".to_string(),
-                        cid: "bafyrei".to_string(),
-                        author: "did:plc:test".to_string(),
-                        r#type: "app.bsky.feed.post".to_string(),
-                        created_at: Utc::now(),
-                        fields: json!({"text": "Hello world"}),
-                        embed: None,
-                        labels: None,
-                        langs: None,
-                        reply: None,
-                        tags: None,
-                        facets: None,
-                        collections: None,
-                    },
-                },
+                rev: Some("test-rev".to_string()),
+                operation_type: "create".to_string(),
+                collection: Some("app.bsky.feed.post".to_string()),
+                rkey: Some("test123".to_string()),
+                record: Some(json!({"text": "Hello world"})),
+                cid: Some("bafyrei".to_string()),
             },
         };
 
@@ -230,29 +224,16 @@ mod tests {
     fn test_cache_hit_rate_calculation() {
         let mut enriched = EnrichedRecord::new(JetstreamMessage {
             did: "did:plc:test".to_string(),
-            seq: 12345,
-            time_us: 1640995200000000,
+            time_us: Some(1640995200000000),
+            seq: Some(12345),
+            kind: "commit".to_string(),
             commit: CommitData {
-                seq: 12345,
-                rebase: false,
-                time_us: 1640995200000000,
-                operation: Operation::Create {
-                    record: Record {
-                        uri: "at://did:plc:test/app.bsky.feed.post/test".to_string(),
-                        cid: "bafyrei".to_string(),
-                        author: "did:plc:test".to_string(),
-                        r#type: "app.bsky.feed.post".to_string(),
-                        created_at: Utc::now(),
-                        fields: json!({"text": "Hello"}),
-                        embed: None,
-                        labels: None,
-                        langs: None,
-                        reply: None,
-                        tags: None,
-                        facets: None,
-                        collections: None,
-                    },
-                },
+                rev: Some("test-rev".to_string()),
+                operation_type: "create".to_string(),
+                collection: Some("app.bsky.feed.post".to_string()),
+                rkey: Some("test123".to_string()),
+                record: Some(json!({"text": "Hello"})),
+                cid: Some("bafyrei".to_string()),
             },
         });
 
