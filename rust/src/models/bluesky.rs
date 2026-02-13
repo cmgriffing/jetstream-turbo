@@ -229,6 +229,11 @@ impl From<GetProfileResponse> for BlueskyProfile {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct GetPostsBulkResponse {
+    pub posts: Vec<GetPostsResponse>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

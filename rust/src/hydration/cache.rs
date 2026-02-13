@@ -1,22 +1,18 @@
 use crate::models::bluesky::{BlueskyPost, BlueskyProfile};
 use dashmap::DashMap;
-use lru::LruCache;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::RwLock;
 use tracing::{debug, trace};
 
-/// Thread-safe LRU cache for Turbo data
 #[derive(Clone)]
 pub struct TurboCache {
-    /// User profiles cache
-    users: Arc<RwLock<LruCache<String, BlueskyProfile>>>,
-    /// Post cache
-    posts: Arc<RwLock<LruCache<String, BlueskyPost>>>,
-    /// DashMap for concurrent access when needed
-    concurrent_users: Arc<DashMap<String, BlueskyProfile>>,
-    concurrent_posts: Arc<DashMap<String, BlueskyPost>>,
-    /// Cache metrics
+    user_cache: Arc<DashMap<String, BlueskyProfile>>,
+    post_cache: Arc<DashMap<String, BlueskyPost>>,
+    user_cache_size: usize,
+    post_cache_size: usize,
+    user_count: Arc<AtomicUsize>,
+    post_count: Arc<AtomicUsize>,
     metrics: Arc<RwLock<CacheMetrics>>,
 }
 
@@ -33,40 +29,21 @@ pub struct CacheMetrics {
 impl TurboCache {
     pub fn new(user_cache_size: usize, post_cache_size: usize) -> Self {
         Self {
-            users: Arc::new(RwLock::new(LruCache::new(
-                std::num::NonZeroUsize::new(user_cache_size).unwrap(),
-            ))),
-            posts: Arc::new(RwLock::new(LruCache::new(
-                std::num::NonZeroUsize::new(post_cache_size).unwrap(),
-            ))),
-            concurrent_users: Arc::new(DashMap::new()),
-            concurrent_posts: Arc::new(DashMap::new()),
+            user_cache: Arc::new(DashMap::new()),
+            post_cache: Arc::new(DashMap::new()),
+            user_cache_size,
+            post_cache_size,
+            user_count: Arc::new(AtomicUsize::new(0)),
+            post_count: Arc::new(AtomicUsize::new(0)),
             metrics: Arc::new(RwLock::new(CacheMetrics::default())),
         }
     }
 
-    /// Get user profile from cache, returns None if not found
     pub async fn get_user_profile(&self, did: &str) -> Option<BlueskyProfile> {
-        // Try concurrent cache first for faster access
-        if let Some(profile) = self.concurrent_users.get(did) {
+        if let Some(profile) = self.user_cache.get(did) {
             self.update_metrics(|m| m.user_hits += 1).await;
             trace!("Cache hit for user profile: {}", did);
             return Some(profile.clone());
-        }
-
-        // Fall back to LRU cache
-        {
-            let mut users = self.users.write().await;
-            if let Some(profile) = users.get(did) {
-                self.update_metrics(|m| m.user_hits += 1).await;
-
-                // Also store in concurrent cache for faster access
-                self.concurrent_users
-                    .insert(did.to_string(), profile.clone());
-
-                trace!("Cache hit for user profile: {}", did);
-                return Some(profile.clone());
-            }
         }
 
         self.update_metrics(|m| m.user_misses += 1).await;
@@ -74,54 +51,53 @@ impl TurboCache {
         None
     }
 
-    /// Get multiple user profiles from cache
     pub async fn get_user_profiles(&self, dids: &[String]) -> Vec<Option<BlueskyProfile>> {
         let mut results = Vec::with_capacity(dids.len());
-
         for did in dids {
-            let profile = self.get_user_profile(did).await;
-            results.push(profile);
+            results.push(self.get_user_profile(did).await);
         }
-
         results
     }
 
-    /// Store user profile in cache
     pub async fn set_user_profile(&self, did: String, profile: BlueskyProfile) {
-        {
-            let mut users = self.users.write().await;
-            if let Some(_evicted) = users.put(did.clone(), profile.clone()) {
-                self.update_metrics(|m| m.cache_evictions += 1).await;
-            }
+        let current_count = self.user_count.load(Ordering::Relaxed);
+
+        if current_count >= self.user_cache_size {
+            self.evict_oldest_users(100);
         }
 
-        // Also store in concurrent cache
-        self.concurrent_users.insert(did.clone(), profile);
+        if self.user_cache.insert(did.clone(), profile).is_none() {
+            self.user_count.fetch_add(1, Ordering::Relaxed);
+        }
 
         debug!("Cached user profile: {}", did);
     }
 
-    /// Get post from cache, returns None if not found
+    fn evict_oldest_users(&self, count: usize) {
+        let evict_count = count.min(self.user_cache.len());
+        if evict_count == 0 {
+            return;
+        }
+
+        let keys: Vec<String> = self
+            .user_cache
+            .iter()
+            .take(evict_count)
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in keys {
+            if self.user_cache.remove(&key).is_some() {
+                self.user_count.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+    }
+
     pub async fn get_post(&self, uri: &str) -> Option<BlueskyPost> {
-        // Try concurrent cache first
-        if let Some(post) = self.concurrent_posts.get(uri) {
+        if let Some(post) = self.post_cache.get(uri) {
             self.update_metrics(|m| m.post_hits += 1).await;
             trace!("Cache hit for post: {}", uri);
             return Some(post.clone());
-        }
-
-        // Fall back to LRU cache
-        {
-            let mut posts = self.posts.write().await;
-            if let Some(post) = posts.get(uri) {
-                self.update_metrics(|m| m.post_hits += 1).await;
-
-                // Also store in concurrent cache
-                self.concurrent_posts.insert(uri.to_string(), post.clone());
-
-                trace!("Cache hit for post: {}", uri);
-                return Some(post.clone());
-            }
         }
 
         self.update_metrics(|m| m.post_misses += 1).await;
@@ -129,109 +105,75 @@ impl TurboCache {
         None
     }
 
-    /// Get multiple posts from cache
     pub async fn get_posts(&self, uris: &[String]) -> Vec<Option<BlueskyPost>> {
         let mut results = Vec::with_capacity(uris.len());
-
         for uri in uris {
-            let post = self.get_post(uri).await;
-            results.push(post);
+            results.push(self.get_post(uri).await);
         }
-
         results
     }
 
-    /// Store post in cache
     pub async fn set_post(&self, uri: String, post: BlueskyPost) {
-        {
-            let mut posts = self.posts.write().await;
-            if let Some(_evicted) = posts.put(uri.clone(), post.clone()) {
-                self.update_metrics(|m| m.cache_evictions += 1).await;
-            }
+        let current_count = self.post_count.load(Ordering::Relaxed);
+
+        if current_count >= self.post_cache_size {
+            self.evict_oldest_posts(100);
         }
 
-        // Also store in concurrent cache
-        self.concurrent_posts.insert(uri.clone(), post);
+        if self.post_cache.insert(uri.clone(), post).is_none() {
+            self.post_count.fetch_add(1, Ordering::Relaxed);
+        }
 
         debug!("Cached post: {}", uri);
     }
 
-    /// Check which user profiles are cached
+    fn evict_oldest_posts(&self, count: usize) {
+        let evict_count = count.min(self.post_cache.len());
+        if evict_count == 0 {
+            return;
+        }
+
+        let keys: Vec<String> = self
+            .post_cache
+            .iter()
+            .take(evict_count)
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in keys {
+            if self.post_cache.remove(&key).is_some() {
+                self.post_count.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+    }
+
     pub async fn check_user_profiles_cached(&self, dids: &[String]) -> Vec<bool> {
         dids.iter()
-            .map(|did| {
-                self.concurrent_users.contains_key(did) || self.users.blocking_read().contains(did)
-            })
+            .map(|did| self.user_cache.contains_key(did))
             .collect()
     }
 
-    /// Check which posts are cached
     pub async fn check_posts_cached(&self, uris: &[String]) -> Vec<bool> {
         uris.iter()
-            .map(|uri| {
-                self.concurrent_posts.contains_key(uri) || self.posts.blocking_read().contains(uri)
-            })
+            .map(|uri| self.post_cache.contains_key(uri))
             .collect()
     }
 
-    /// Get cache metrics
     pub async fn get_metrics(&self) -> CacheMetrics {
         self.metrics.read().await.clone()
     }
 
-    /// Clear all caches
     pub async fn clear(&self) {
-        {
-            let mut users = self.users.write().await;
-            users.clear();
-        }
-        {
-            let mut posts = self.posts.write().await;
-            posts.clear();
-        }
-
-        self.concurrent_users.clear();
-        self.concurrent_posts.clear();
-
+        self.user_cache.clear();
+        self.post_cache.clear();
+        self.user_count.store(0, Ordering::Relaxed);
+        self.post_count.store(0, Ordering::Relaxed);
         debug!("Cleared all caches");
     }
 
-    /// Cleanup old entries from concurrent caches
-    pub async fn cleanup_concurrent(&self, _max_age: Duration) {
-        let _now = Instant::now();
-
-        // Note: DashMap doesn't store creation time, so we implement a simple cleanup
-        // by moving items back to LRU cache periodically
-        let user_keys: Vec<String> = self
-            .concurrent_users
-            .iter()
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        for key in user_keys {
-            if let Some((_, profile)) = self.concurrent_users.remove(&key) {
-                let mut users = self.users.write().await;
-                let _ = users.put(key, profile);
-            }
-        }
-
-        let post_keys: Vec<String> = self
-            .concurrent_posts
-            .iter()
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        for key in post_keys {
-            if let Some((_, post)) = self.concurrent_posts.remove(&key) {
-                let mut posts = self.posts.write().await;
-                let _ = posts.put(key, post);
-            }
-        }
-
-        debug!("Cleaned up concurrent caches");
+    pub async fn cleanup_concurrent(&self, _max_age: std::time::Duration) {
     }
 
-    /// Get cache hit rates
     pub async fn get_hit_rates(&self) -> (f64, f64) {
         let metrics = self.metrics.read().await;
 
@@ -268,11 +210,9 @@ mod tests {
     async fn test_user_profile_cache() {
         let cache = TurboCache::new(100, 100);
 
-        // Test cache miss
         let result = cache.get_user_profile("did:plc:test").await;
         assert!(result.is_none());
 
-        // Test cache set and hit
         let profile = BlueskyProfile {
             did: "did:plc:test".to_string(),
             handle: "test.bsky.social".to_string(),
@@ -296,7 +236,6 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(result.unwrap().did, "did:plc:test");
 
-        // Test metrics
         let metrics = cache.get_metrics().await;
         assert_eq!(metrics.user_hits, 1);
         assert_eq!(metrics.user_misses, 1);
@@ -334,7 +273,6 @@ mod tests {
             reply_count: None,
         };
 
-        // Test cache set and hit
         cache
             .set_post(
                 "at://did:plc:test/app.bsky.feed.post/test".to_string(),
@@ -348,7 +286,6 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(result.unwrap().text, "Hello world");
 
-        // Test metrics
         let metrics = cache.get_metrics().await;
         assert_eq!(metrics.post_hits, 1);
         assert_eq!(metrics.post_misses, 1);
@@ -358,9 +295,8 @@ mod tests {
     async fn test_hit_rates() {
         let cache = TurboCache::new(10, 10);
 
-        // Generate some cache activity
-        cache.get_user_profile("did:plc:test1").await; // miss
-        cache.get_user_profile("did:plc:test2").await; // miss
+        cache.get_user_profile("did:plc:test1").await;
+        cache.get_user_profile("did:plc:test2").await;
 
         let profile = BlueskyProfile {
             did: "did:plc:test1".to_string(),
@@ -380,10 +316,10 @@ mod tests {
         cache
             .set_user_profile("did:plc:test1".to_string(), profile)
             .await;
-        cache.get_user_profile("did:plc:test1").await; // hit
+        cache.get_user_profile("did:plc:test1").await;
 
         let (user_hit_rate, post_hit_rate) = cache.get_hit_rates().await;
-        assert_eq!(user_hit_rate, 0.5); // 1 hit, 1 miss = 50%
-        assert_eq!(post_hit_rate, 0.0); // 0 hits, 0 misses = 0%
+        assert_eq!(user_hit_rate, 0.5);
+        assert_eq!(post_hit_rate, 0.0);
     }
 }

@@ -1,5 +1,5 @@
 use crate::models::{
-    bluesky::{BlueskyPost, BlueskyProfile, GetPostResponse, GetProfilesResponse},
+    bluesky::{BlueskyPost, BlueskyProfile, GetPostsBulkResponse, GetProfilesResponse},
     errors::{TurboError, TurboResult},
 };
 use governor::{Quota, RateLimiter};
@@ -147,45 +147,34 @@ impl BlueskyClient {
     }
 
     pub async fn bulk_fetch_posts(&self, uris: &[String]) -> TurboResult<Vec<Option<BlueskyPost>>> {
-        let mut posts: Vec<Option<BlueskyPost>> = Vec::with_capacity(uris.len());
+        if uris.is_empty() {
+            return Ok(vec![]);
+        }
 
-        // Process in chunks of 25 (Bluesky API limit)
+        let mut all_posts: Vec<Option<BlueskyPost>> = Vec::with_capacity(uris.len());
+
         for chunk in uris.chunks(25) {
-            let chunk_posts = self.fetch_posts_batch(chunk).await?;
-            posts.extend(chunk_posts);
+            let chunk_posts = self.fetch_posts_bulk(chunk).await?;
+            all_posts.extend(chunk_posts);
         }
 
-        Ok(posts)
+        Ok(all_posts)
     }
 
-    async fn fetch_posts_batch(&self, uris: &[String]) -> TurboResult<Vec<Option<BlueskyPost>>> {
-        let mut posts: Vec<Option<BlueskyPost>> = Vec::with_capacity(uris.len());
-
-        // Bluesky doesn't have a bulk post endpoint, so we fetch them individually
-        // with proper rate limiting
-        for uri in uris {
-            let post = self.fetch_single_post(uri).await?;
-            posts.push(post);
-        }
-
-        Ok(posts)
-    }
-
-    async fn fetch_single_post(&self, uri: &str) -> TurboResult<Option<BlueskyPost>> {
-        let url = format!("{}/app.bsky.feed.getPostThread", self.api_base_url);
+    async fn fetch_posts_bulk(&self, uris: &[String]) -> TurboResult<Vec<Option<BlueskyPost>>> {
+        let url = format!("{}/app.bsky.feed.getPosts", self.api_base_url);
 
         let session_string = self.get_session_string().await?;
 
         let mut attempt = 0;
         loop {
-            // Rate limit check
             self.rate_limiter.until_ready().await;
 
             let response = self
                 .http_client
                 .get(&url)
                 .header("Authorization", format!("Bearer {session_string}"))
-                .query(&[("uri", uri)])
+                .query(&[("uris", uris.join(","))])
                 .send()
                 .await;
 
@@ -194,32 +183,25 @@ impl BlueskyClient {
                     match resp.status() {
                         StatusCode::OK => {
                             let body = resp.text().await?;
-                            debug!("Thread response: {}", &body[..body.len().min(500)]);
-                            let thread_response: serde_json::Value = serde_json::from_str(&body)
+                            debug!("Posts response: {}", &body[..body.len().min(500)]);
+                            let posts_response: GetPostsBulkResponse = serde_json::from_str(&body)
                                 .map_err(|e| {
                                     error!(
-                                        "Failed to parse thread: {} - body: {}",
+                                        "Failed to parse posts: {} - body: {}",
                                         e,
                                         &body[..body.len().min(500)]
                                     );
-                                    TurboError::InvalidApiResponse(format!(
-                                        "Failed to decode: {}",
-                                        e
-                                    ))
+                                    TurboError::InvalidApiResponse(format!("Failed to decode: {}", e))
                                 })?;
 
-                            // Extract the post from thread structure
-                            if let Some(post_data) = thread_response.get("thread") {
-                                if let Some(post_obj) = post_data.get("post") {
-                                    let post_response: GetPostResponse =
-                                        serde_json::from_value(post_obj.clone())?;
-                                    return Ok(Some(self.convert_post_response(post_response)));
+                            let mut results = vec![None; uris.len()];
+                            for post_response in posts_response.posts {
+                                if let Some(uri) = uris.iter().position(|u| u == &post_response.uri) {
+                                    results[uri] = Some(self.convert_bulk_post_response(post_response));
                                 }
                             }
-                            return Ok(None);
-                        }
-                        StatusCode::NOT_FOUND => {
-                            return Ok(None);
+
+                            return Ok(results);
                         }
                         StatusCode::TOO_MANY_REQUESTS => {
                             warn!("Rate limited, waiting before retry");
@@ -255,21 +237,7 @@ impl BlueskyClient {
         }
     }
 
-    async fn get_session_string(&self) -> TurboResult<String> {
-        let sessions = self.session_strings.read().await;
-
-        if sessions.is_empty() {
-            return Err(TurboError::PermissionDenied(
-                "No valid session strings available".to_string(),
-            ));
-        }
-
-        // Round-robin through session strings
-        // In a more sophisticated implementation, we could track which sessions are healthy
-        Ok(sessions[0].clone())
-    }
-
-    fn convert_post_response(&self, response: GetPostResponse) -> BlueskyPost {
+    fn convert_bulk_post_response(&self, response: crate::models::bluesky::GetPostsResponse) -> BlueskyPost {
         BlueskyPost {
             uri: response.uri,
             cid: response.cid,
@@ -280,7 +248,7 @@ impl BlueskyClient {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            created_at: chrono::Utc::now(), // Should parse from record
+            created_at: chrono::Utc::now(),
             embed: response.embed.and_then(|e| serde_json::from_value(e).ok()),
             reply: response.reply.and_then(|r| serde_json::from_value(r).ok()),
             facets: response
@@ -292,6 +260,18 @@ impl BlueskyClient {
             repost_count: response.repost_count,
             reply_count: response.reply_count,
         }
+    }
+
+    async fn get_session_string(&self) -> TurboResult<String> {
+        let sessions = self.session_strings.read().await;
+
+        if sessions.is_empty() {
+            return Err(TurboError::PermissionDenied(
+                "No valid session strings available".to_string(),
+            ));
+        }
+
+        Ok(sessions[0].clone())
     }
 
     pub async fn refresh_sessions(&self, new_sessions: Vec<String>) {
