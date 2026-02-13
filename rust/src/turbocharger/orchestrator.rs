@@ -1,11 +1,11 @@
 use crate::client::{BlueskyAuthClient, BlueskyClient, JetstreamClient};
 use crate::config::Settings;
 use crate::hydration::{Hydrator, TurboCache};
+use crate::models::enriched::EnrichedRecord;
 use crate::models::{
     errors::{TurboError, TurboResult},
     jetstream::JetstreamMessage,
 };
-use crate::models::enriched::EnrichedRecord;
 use crate::storage::{RedisStore, SQLiteStore};
 use futures::StreamExt;
 use serde::Serialize;
@@ -75,7 +75,7 @@ impl TurboCharger {
 
         // Initialize semaphore for concurrency control
         let semaphore = Arc::new(Semaphore::new(
-            settings.max_concurrent_requests.max(1) as usize,
+            settings.max_concurrent_requests.max(1) as usize
         ));
 
         // Initialize broadcast channel
@@ -115,7 +115,7 @@ impl TurboCharger {
                             if self.should_process_message(&message) {
                                 buffer.push(message);
                             }
-                            
+
                             if buffer.len() >= BATCH_SIZE {
                                 let batch = buffer.drain(..).collect::<Vec<_>>();
                                 self.spawn_batch_processing(batch);
@@ -172,7 +172,9 @@ impl TurboCharger {
                 redis_store,
                 broadcast_sender,
                 batch,
-            ).await {
+            )
+            .await
+            {
                 Ok(count) => {
                     debug!("Processed batch of {} messages", count);
                 }
@@ -184,10 +186,7 @@ impl TurboCharger {
         });
     }
 
-    async fn process_batch(
-        &self,
-        batch: Vec<JetstreamMessage>,
-    ) -> TurboResult<usize> {
+    async fn process_batch(&self, batch: Vec<JetstreamMessage>) -> TurboResult<usize> {
         let permit = self.semaphore.acquire().await.unwrap();
         let count = Self::process_batch_internal(
             self.hydrator.clone(),
@@ -195,7 +194,8 @@ impl TurboCharger {
             Arc::clone(&self.redis_store),
             self.broadcast_sender.clone(),
             batch,
-        ).await?;
+        )
+        .await?;
         drop(permit);
         Ok(count)
     }

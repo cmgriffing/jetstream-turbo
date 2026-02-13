@@ -1,7 +1,7 @@
 use crate::models::bluesky::{BlueskyPost, BlueskyProfile};
 use dashmap::DashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, trace};
 
@@ -171,8 +171,7 @@ impl TurboCache {
         debug!("Cleared all caches");
     }
 
-    pub async fn cleanup_concurrent(&self, _max_age: std::time::Duration) {
-    }
+    pub async fn cleanup_concurrent(&self, _max_age: std::time::Duration) {}
 
     pub async fn get_hit_rates(&self) -> (f64, f64) {
         let metrics = self.metrics.read().await;
@@ -273,7 +272,9 @@ mod tests {
             reply_count: None,
         };
 
-        cache.get_post("at://did:plc:test/app.bsky.feed.post/notfound").await;
+        cache
+            .get_post("at://did:plc:test/app.bsky.feed.post/notfound")
+            .await;
 
         cache
             .set_post(

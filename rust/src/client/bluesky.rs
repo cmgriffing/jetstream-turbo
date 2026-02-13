@@ -179,49 +179,47 @@ impl BlueskyClient {
                 .await;
 
             match response {
-                Ok(resp) => {
-                    match resp.status() {
-                        StatusCode::OK => {
-                            let body = resp.text().await?;
-                            debug!("Posts response: {}", &body[..body.len().min(500)]);
-                            let posts_response: GetPostsBulkResponse = serde_json::from_str(&body)
-                                .map_err(|e| {
-                                    error!(
-                                        "Failed to parse posts: {} - body: {}",
-                                        e,
-                                        &body[..body.len().min(500)]
-                                    );
-                                    TurboError::InvalidApiResponse(format!("Failed to decode: {}", e))
-                                })?;
+                Ok(resp) => match resp.status() {
+                    StatusCode::OK => {
+                        let body = resp.text().await?;
+                        debug!("Posts response: {}", &body[..body.len().min(500)]);
+                        let posts_response: GetPostsBulkResponse = serde_json::from_str(&body)
+                            .map_err(|e| {
+                                error!(
+                                    "Failed to parse posts: {} - body: {}",
+                                    e,
+                                    &body[..body.len().min(500)]
+                                );
+                                TurboError::InvalidApiResponse(format!("Failed to decode: {}", e))
+                            })?;
 
-                            let mut results = vec![None; uris.len()];
-                            for post_response in posts_response.posts {
-                                if let Some(uri) = uris.iter().position(|u| u == &post_response.uri) {
-                                    results[uri] = Some(self.convert_bulk_post_response(post_response));
-                                }
+                        let mut results = vec![None; uris.len()];
+                        for post_response in posts_response.posts {
+                            if let Some(uri) = uris.iter().position(|u| u == &post_response.uri) {
+                                results[uri] = Some(self.convert_bulk_post_response(post_response));
                             }
+                        }
 
-                            return Ok(results);
-                        }
-                        StatusCode::TOO_MANY_REQUESTS => {
-                            warn!("Rate limited, waiting before retry");
-                            tokio::time::sleep(self.retry_delay * 2).await;
-                        }
-                        StatusCode::UNAUTHORIZED => {
-                            error!("Unauthorized - session may be invalid: {}", session_string);
-                            return Err(TurboError::PermissionDenied(
-                                "Invalid session token".to_string(),
-                            ));
-                        }
-                        status => {
-                            let error_text = resp.text().await.unwrap_or_default();
-                            error!("API error {}: {}", status, error_text);
-                            return Err(TurboError::InvalidApiResponse(format!(
-                                "Status {status}: {error_text}"
-                            )));
-                        }
+                        return Ok(results);
                     }
-                }
+                    StatusCode::TOO_MANY_REQUESTS => {
+                        warn!("Rate limited, waiting before retry");
+                        tokio::time::sleep(self.retry_delay * 2).await;
+                    }
+                    StatusCode::UNAUTHORIZED => {
+                        error!("Unauthorized - session may be invalid: {}", session_string);
+                        return Err(TurboError::PermissionDenied(
+                            "Invalid session token".to_string(),
+                        ));
+                    }
+                    status => {
+                        let error_text = resp.text().await.unwrap_or_default();
+                        error!("API error {}: {}", status, error_text);
+                        return Err(TurboError::InvalidApiResponse(format!(
+                            "Status {status}: {error_text}"
+                        )));
+                    }
+                },
                 Err(e) => {
                     error!("HTTP request failed: {}", e);
                     if attempt >= self.max_retries {
@@ -237,7 +235,10 @@ impl BlueskyClient {
         }
     }
 
-    fn convert_bulk_post_response(&self, response: crate::models::bluesky::GetPostsResponse) -> BlueskyPost {
+    fn convert_bulk_post_response(
+        &self,
+        response: crate::models::bluesky::GetPostsResponse,
+    ) -> BlueskyPost {
         BlueskyPost {
             uri: response.uri,
             cid: response.cid,

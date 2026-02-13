@@ -105,7 +105,9 @@ impl Hydrator {
             if uncached_dids.is_empty() {
                 return Ok(vec![]);
             }
-            self.bluesky_client.bulk_fetch_profiles(&uncached_dids).await
+            self.bluesky_client
+                .bulk_fetch_profiles(&uncached_dids)
+                .await
         };
 
         let posts_future = async {
@@ -145,10 +147,7 @@ impl Hydrator {
         Ok(results)
     }
 
-    async fn hydrate_messages(
-        &self,
-        messages: Vec<JetstreamMessage>,
-    ) -> Vec<EnrichedRecord> {
+    async fn hydrate_messages(&self, messages: Vec<JetstreamMessage>) -> Vec<EnrichedRecord> {
         let mut results = Vec::with_capacity(messages.len());
 
         for message in messages {

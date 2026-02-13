@@ -1,7 +1,10 @@
 use crate::models::errors::{TurboError, TurboResult};
 use crate::turbocharger::{HealthStatus, TurboCharger, TurboStats};
 use axum::{
-    extract::{Query, State, ws::{Message, WebSocket, WebSocketUpgrade}},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Query, State,
+    },
     http::StatusCode,
     response::Json,
     routing::{get, Router},
@@ -91,7 +94,10 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| handle_websocket(socket, turbocharger.subscribe()))
 }
 
-async fn handle_websocket(socket: WebSocket, mut broadcast_rx: broadcast::Receiver<crate::models::enriched::EnrichedRecord>) {
+async fn handle_websocket(
+    socket: WebSocket,
+    mut broadcast_rx: broadcast::Receiver<crate::models::enriched::EnrichedRecord>,
+) {
     let (mut sender, mut socket_rx) = socket.split();
 
     loop {
