@@ -7,6 +7,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, trace};
 
 /// Thread-safe LRU cache for Turbo data
+#[derive(Clone)]
 pub struct TurboCache {
     /// User profiles cache
     users: Arc<RwLock<LruCache<String, BlueskyProfile>>>,

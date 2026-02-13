@@ -12,7 +12,11 @@ use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Semaphore};
-use tracing::{error, info};
+use tokio::time::interval;
+use tracing::{debug, error, info};
+
+const BATCH_SIZE: usize = 10;
+const MAX_WAIT_TIME_MS: u64 = 100;
 
 pub struct TurboCharger {
     settings: Settings,
@@ -20,8 +24,8 @@ pub struct TurboCharger {
     bluesky_client: Arc<BlueskyClient>,
     auth_client: BlueskyAuthClient,
     hydrator: Hydrator,
-    sqlite_store: SQLiteStore,
-    redis_store: RedisStore,
+    sqlite_store: Arc<SQLiteStore>,
+    redis_store: Arc<RedisStore>,
     semaphore: Arc<Semaphore>,
     broadcast_sender: broadcast::Sender<EnrichedRecord>,
 }
@@ -58,17 +62,21 @@ impl TurboCharger {
 
         // Initialize storage
         let db_path = format!("{}/jetstream.db", settings.db_dir);
-        let sqlite_store = SQLiteStore::new(&db_path).await?;
+        let sqlite_store = Arc::new(SQLiteStore::new(&db_path).await?);
 
-        let redis_store = RedisStore::new(
-            &settings.redis_url,
-            settings.stream_name_redis.clone(),
-            settings.trim_maxlen,
-        )
-        .await?;
+        let redis_store = Arc::new(
+            RedisStore::new(
+                &settings.redis_url,
+                settings.stream_name_redis.clone(),
+                settings.trim_maxlen,
+            )
+            .await?,
+        );
 
         // Initialize semaphore for concurrency control
-        let semaphore = Arc::new(Semaphore::new(settings.max_concurrent_requests));
+        let semaphore = Arc::new(Semaphore::new(
+            settings.max_concurrent_requests.max(1) as usize,
+        ));
 
         // Initialize broadcast channel
         let (broadcast_sender, _) = broadcast::channel(1000);
@@ -93,43 +101,45 @@ impl TurboCharger {
 
         let message_stream = self.jetstream_client.stream_messages().await?;
 
-        let mut processed_count = 0u64;
         let mut last_stats = std::time::Instant::now();
+        let mut buffer: Vec<JetstreamMessage> = Vec::with_capacity(BATCH_SIZE);
+        let mut flush_interval = interval(Duration::from_millis(MAX_WAIT_TIME_MS));
 
         tokio::pin!(message_stream);
 
-        while let Some(result) = message_stream.next().await {
-            match result {
-                Ok(message) => {
-                    // Apply sharding filter if specified
-                    if self.should_process_message(&message) {
-                        let permit = self.semaphore.acquire().await.unwrap();
-
-                        match self.process_message(message).await {
-                            Ok(_) => {
-                                processed_count += 1;
+        loop {
+            tokio::select! {
+                result = message_stream.next() => {
+                    match result {
+                        Some(Ok(message)) => {
+                            if self.should_process_message(&message) {
+                                buffer.push(message);
                             }
-                            Err(e) => {
-                                error!("Failed to process message: {}", e);
+                            
+                            if buffer.len() >= BATCH_SIZE {
+                                let batch = buffer.drain(..).collect::<Vec<_>>();
+                                self.spawn_batch_processing(batch);
                             }
                         }
-
-                        drop(permit);
+                        Some(Err(e)) => {
+                            error!("Error receiving message from Jetstream: {}", e);
+                        }
+                        None => break,
                     }
                 }
-                Err(e) => {
-                    error!("Error receiving message from Jetstream: {}", e);
-                    // Continue processing other messages
+                _ = flush_interval.tick() => {
+                    if !buffer.is_empty() {
+                        let batch = buffer.drain(..).collect::<Vec<_>>();
+                        self.spawn_batch_processing(batch);
+                    }
                 }
             }
 
-            // Print stats every 30 seconds
             if last_stats.elapsed() >= Duration::from_secs(30) {
                 let (user_hit_rate, post_hit_rate) =
                     self.hydrator.get_cache().get_hit_rates().await;
                 info!(
-                    "Processed {} messages. Cache hit rates: users={:.2}%, posts={:.2}%",
-                    processed_count,
+                    "Cache hit rates: users={:.2}%, posts={:.2}%",
                     user_hit_rate * 100.0,
                     post_hit_rate * 100.0
                 );
@@ -138,29 +148,75 @@ impl TurboCharger {
             }
         }
 
+        if !buffer.is_empty() {
+            let batch = buffer;
+            self.process_batch(batch).await?;
+        }
+
         error!("Jetstream stream ended unexpectedly");
         Err(TurboError::Internal("Jetstream stream ended".to_string()))
     }
 
-    async fn process_message(&self, message: JetstreamMessage) -> TurboResult<()> {
-        // Only process create operations (skip updates and deletes for now)
-        if !message.is_create_operation() {
-            return Ok(());
+    fn spawn_batch_processing(&self, batch: Vec<JetstreamMessage>) {
+        let hydrator = self.hydrator.clone();
+        let sqlite_store = Arc::clone(&self.sqlite_store);
+        let redis_store = Arc::clone(&self.redis_store);
+        let broadcast_sender = self.broadcast_sender.clone();
+        let semaphore = self.semaphore.clone();
+
+        tokio::spawn(async move {
+            let permit = semaphore.acquire().await.unwrap();
+            match Self::process_batch_internal(
+                hydrator,
+                sqlite_store,
+                redis_store,
+                broadcast_sender,
+                batch,
+            ).await {
+                Ok(count) => {
+                    debug!("Processed batch of {} messages", count);
+                }
+                Err(e) => {
+                    error!("Batch processing failed: {}", e);
+                }
+            }
+            drop(permit);
+        });
+    }
+
+    async fn process_batch(
+        &self,
+        batch: Vec<JetstreamMessage>,
+    ) -> TurboResult<usize> {
+        let permit = self.semaphore.acquire().await.unwrap();
+        let count = Self::process_batch_internal(
+            self.hydrator.clone(),
+            Arc::clone(&self.sqlite_store),
+            Arc::clone(&self.redis_store),
+            self.broadcast_sender.clone(),
+            batch,
+        ).await?;
+        drop(permit);
+        Ok(count)
+    }
+
+    async fn process_batch_internal(
+        hydrator: Hydrator,
+        sqlite_store: Arc<SQLiteStore>,
+        redis_store: Arc<RedisStore>,
+        broadcast_sender: broadcast::Sender<EnrichedRecord>,
+        batch: Vec<JetstreamMessage>,
+    ) -> TurboResult<usize> {
+        let enriched_records = hydrator.hydrate_batch(batch).await?;
+        let count = enriched_records.len();
+
+        for enriched in enriched_records {
+            let _record_id = sqlite_store.store_record(&enriched).await?;
+            let _message_id = redis_store.publish_record(&enriched).await?;
+            let _ = broadcast_sender.send(enriched);
         }
 
-        // Hydrate the message
-        let enriched = self.hydrator.hydrate_message(message).await?;
-
-        // Store in SQLite
-        let _record_id = self.sqlite_store.store_record(&enriched).await?;
-
-        // Publish to Redis stream
-        let _message_id = self.redis_store.publish_record(&enriched).await?;
-
-        // Broadcast to WebSocket subscribers
-        let _ = self.broadcast_sender.send(enriched);
-
-        Ok(())
+        Ok(count)
     }
 
     fn should_process_message(&self, _message: &JetstreamMessage) -> bool {

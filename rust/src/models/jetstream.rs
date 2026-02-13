@@ -104,6 +104,38 @@ impl JetstreamMessage {
         mentioned_dids.dedup();
         mentioned_dids
     }
+
+    pub fn extract_post_uris(&self) -> Vec<String> {
+        let mut uris = Vec::new();
+
+        if let Some(commit) = &self.commit {
+            if let Some(record) = &commit.record {
+                if let Some(reply) = record.get("reply") {
+                    if let Some(parent) = reply.get("parent") {
+                        if let Some(uri) = parent.get("uri").and_then(|u| u.as_str()) {
+                            uris.push(uri.to_string());
+                        }
+                    }
+                    if let Some(root) = reply.get("root") {
+                        if let Some(uri) = root.get("uri").and_then(|u| u.as_str()) {
+                            uris.push(uri.to_string());
+                        }
+                    }
+                }
+
+                if let Some(embed) = record.get("embed") {
+                    if let Some(embed_record) = embed.get("record") {
+                        if let Some(uri) = embed_record.get("uri").and_then(|u| u.as_str()) {
+                            uris.push(uri.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        uris.dedup();
+        uris
+    }
 }
 
 #[cfg(test)]

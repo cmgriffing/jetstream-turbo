@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info};
 
+#[derive(Clone)]
 pub struct Hydrator {
     cache: TurboCache,
     bluesky_client: Arc<BlueskyClient>,
@@ -66,36 +67,57 @@ impl Hydrator {
         messages: Vec<JetstreamMessage>,
     ) -> TurboResult<Vec<EnrichedRecord>> {
         let start_time = Instant::now();
-        let mut results = Vec::with_capacity(messages.len());
 
-        // Collect all unique DIDs that need fetching
         let mut unique_dids = std::collections::HashSet::new();
+        let mut unique_uris = std::collections::HashSet::new();
+
         for message in &messages {
             unique_dids.insert(message.extract_did().to_string());
             for did in message.extract_mentioned_dids() {
                 unique_dids.insert(did.to_string());
             }
-        }
-
-        let dids: Vec<String> = unique_dids.into_iter().collect();
-
-        // Check which profiles are already cached
-        let cached_flags = self.cache.check_user_profiles_cached(&dids).await;
-        let mut uncached_dids = Vec::new();
-
-        for (did, is_cached) in dids.iter().zip(cached_flags) {
-            if !is_cached {
-                uncached_dids.push(did.clone());
+            for uri in message.extract_post_uris() {
+                unique_uris.insert(uri);
             }
         }
 
-        // Bulk fetch uncached profiles
-        if !uncached_dids.is_empty() {
-            let profiles = self
-                .bluesky_client
-                .bulk_fetch_profiles(&uncached_dids)
-                .await?;
+        let dids: Vec<String> = unique_dids.into_iter().collect();
+        let uris: Vec<String> = unique_uris.into_iter().collect();
 
+        let cached_profile_flags = self.cache.check_user_profiles_cached(&dids).await;
+        let cached_post_flags = self.cache.check_posts_cached(&uris).await;
+
+        let uncached_dids: Vec<String> = dids
+            .iter()
+            .zip(cached_profile_flags)
+            .filter(|(_, is_cached)| !*is_cached)
+            .map(|(did, _)| did.clone())
+            .collect();
+
+        let uncached_uris: Vec<String> = uris
+            .iter()
+            .zip(cached_post_flags)
+            .filter(|(_, is_cached)| !*is_cached)
+            .map(|(uri, _)| uri.clone())
+            .collect();
+
+        let profiles_future = async {
+            if uncached_dids.is_empty() {
+                return Ok(vec![]);
+            }
+            self.bluesky_client.bulk_fetch_profiles(&uncached_dids).await
+        };
+
+        let posts_future = async {
+            if uncached_uris.is_empty() {
+                return Ok(vec![]);
+            }
+            self.bluesky_client.bulk_fetch_posts(&uncached_uris).await
+        };
+
+        let (profiles_result, posts_result) = tokio::join!(profiles_future, posts_future);
+
+        if let Ok(profiles) = profiles_result {
             for (did, maybe_profile) in uncached_dids.iter().zip(profiles) {
                 if let Some(profile) = maybe_profile {
                     self.cache.set_user_profile(did.clone(), profile).await;
@@ -103,11 +125,15 @@ impl Hydrator {
             }
         }
 
-        // Hydrate each message
-        for message in messages {
-            let enriched = self.hydrate_message(message).await?;
-            results.push(enriched);
+        if let Ok(posts) = posts_result {
+            for (uri, maybe_post) in uncached_uris.iter().zip(posts) {
+                if let Some(post) = maybe_post {
+                    self.cache.set_post(uri.clone(), post).await;
+                }
+            }
         }
+
+        let results = self.hydrate_messages(messages).await;
 
         let elapsed = start_time.elapsed();
         info!(
@@ -117,6 +143,24 @@ impl Hydrator {
         );
 
         Ok(results)
+    }
+
+    async fn hydrate_messages(
+        &self,
+        messages: Vec<JetstreamMessage>,
+    ) -> Vec<EnrichedRecord> {
+        let mut results = Vec::with_capacity(messages.len());
+
+        for message in messages {
+            match self.hydrate_message(message).await {
+                Ok(enriched) => results.push(enriched),
+                Err(e) => {
+                    debug!("Failed to hydrate message: {}", e);
+                }
+            }
+        }
+
+        results
     }
 
     pub fn get_cache(&self) -> &TurboCache {
