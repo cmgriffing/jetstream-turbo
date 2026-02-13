@@ -2,10 +2,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, Semaphore};
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 pub struct ClientPool<T> {
     clients: Arc<RwLock<Vec<PooledClient<T>>>>,
+    #[allow(dead_code)]
     max_size: usize,
     semaphore: Arc<Semaphore>,
     client_factory: Arc<dyn Fn() -> T + Send + Sync>,

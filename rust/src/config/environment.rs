@@ -2,7 +2,7 @@
 use std::env;
 
 pub fn get_required_env(key: &str) -> Result<String, anyhow::Error> {
-    env::var(key).map_err(|_| anyhow::anyhow!("Required environment variable {} is not set", key))
+    env::var(key).map_err(|_| anyhow::anyhow!("Required environment variable {key} is not set"))
 }
 
 pub fn get_optional_env(key: &str) -> Option<String> {

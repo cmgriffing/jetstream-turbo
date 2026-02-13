@@ -17,6 +17,7 @@ pub struct BlueskyClient {
     rate_limiter: Arc<RateLimiter<governor::state::NotKeyed, governor::state::InMemoryState, governor::clock::DefaultClock>>,
     api_base_url: String,
     max_retries: u32,
+    #[allow(dead_code)]
     retry_delay_ms: u64,
     retry_delay: Duration,
 }
@@ -68,7 +69,7 @@ impl BlueskyClient {
             
             let response = self.http_client
                 .post(&url)
-                .header("Authorization", format!("Bearer {}", session_string))
+                .header("Authorization", format!("Bearer {session_string}"))
                 .json(&request_body)
                 .send()
                 .await;
@@ -100,7 +101,7 @@ impl BlueskyClient {
                             let error_text = resp.text().await.unwrap_or_default();
                             error!("API error {}: {}", status, error_text);
                             return Err(TurboError::InvalidApiResponse(format!(
-                                "Status {}: {}", status, error_text
+                                "Status {status}: {error_text}"
                             )));
                         }
                     }
@@ -160,7 +161,7 @@ impl BlueskyClient {
             
             let response = self.http_client
                 .post(&url)
-                .header("Authorization", format!("Bearer {}", session_string))
+                .header("Authorization", format!("Bearer {session_string}"))
                 .json(&request_body)
                 .send()
                 .await;
@@ -195,7 +196,7 @@ impl BlueskyClient {
                             let error_text = resp.text().await.unwrap_or_default();
                             error!("API error {}: {}", status, error_text);
                             return Err(TurboError::InvalidApiResponse(format!(
-                                "Status {}: {}", status, error_text
+                                "Status {status}: {error_text}"
                             )));
                         }
                     }
@@ -238,8 +239,8 @@ impl BlueskyClient {
                 .unwrap_or("")
                 .to_string(),
             created_at: chrono::Utc::now(), // Should parse from record
-            embed: response.embed.map(|e| serde_json::from_value(e).ok()).flatten(),
-            reply: response.reply.map(|r| serde_json::from_value(r).ok()).flatten(),
+            embed: response.embed.and_then(|e| serde_json::from_value(e).ok()),
+            reply: response.reply.and_then(|r| serde_json::from_value(r).ok()),
             facets: response.record
                 .get("facets")
                 .and_then(|v| serde_json::from_value(v.clone()).ok()),

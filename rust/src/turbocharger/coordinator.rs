@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::debug;
 
 /// Task coordinator for managing concurrent operations
 pub struct TaskCoordinator {

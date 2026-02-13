@@ -53,7 +53,7 @@ async fn health_check(State(turbocharger): State<Arc<TurboCharger>>) -> Result<J
 
 async fn get_stats(
     State(turbocharger): State<Arc<TurboCharger>>,
-    Query(query): Query<StatsQuery>,
+    Query(_query): Query<StatsQuery>,
 ) -> Result<Json<StatsResponse>, StatusCode> {
     match turbocharger.get_stats().await {
         Ok(stats) => Ok(Json(StatsResponse {
@@ -80,14 +80,14 @@ pub async fn create_server(port: u16, turbocharger: Arc<TurboCharger>) -> TurboR
         .route("/", get(|| async { "jetstream-turbo API server" }))
         .route("/ready", get(|| async { "OK" }));
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await
-        .map_err(|e| TurboError::Io(e))?;
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await
+        .map_err(TurboError::Io)?;
 
     info!("Starting HTTP server on port {}", port);
 
     axum::serve(listener, app)
         .await
-        .map_err(|e| TurboError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| TurboError::Io(std::io::Error::other(e)))?;
 
     Ok(())
 }

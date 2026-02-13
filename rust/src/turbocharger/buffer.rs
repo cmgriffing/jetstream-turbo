@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
 use crate::models::jetstream::JetstreamMessage;
 
 pub struct MessageBuffer {

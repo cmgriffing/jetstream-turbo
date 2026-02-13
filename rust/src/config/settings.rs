@@ -75,33 +75,33 @@ impl Settings {
     pub fn from_env() -> Result<Self> {
         dotenvy::dotenv().ok();
 
-        let mut settings = config::Config::builder()
+        let mut builder = config::Config::builder()
             .add_source(config::Config::try_from(&Settings::default())?)
-            .add_source(config::Environment::with_prefix("TURBO").separator("__"))
-            .build()?;
+            .add_source(config::Environment::with_prefix("TURBO").separator("__"));
 
         // Handle nested environment variables for special cases
         if let Ok(stream_name) = std::env::var("STREAM_NAME") {
-            settings.set("stream_name", stream_name)?;
+            builder = builder.set_override("stream_name", stream_name)?;
         }
 
         if let Ok(handle) = std::env::var("BLUESKY_HANDLE") {
-            settings.set("bluesky_handle", handle)?;
+            builder = builder.set_override("bluesky_handle", handle)?;
         }
 
         if let Ok(password) = std::env::var("BLUESKY_APP_PASSWORD") {
-            settings.set("bluesky_app_password", password)?;
+            builder = builder.set_override("bluesky_app_password", password)?;
         }
 
         if let Ok(collections) = std::env::var("WANTED_COLLECTIONS") {
-            settings.set("wanted_collections", collections)?;
+            builder = builder.set_override("wanted_collections", collections)?;
         }
 
         if let Ok(hosts) = std::env::var("JETSTREAM_HOSTS") {
             let hosts: Vec<String> = serde_json::from_str(&hosts)?;
-            settings.set("jetstream_hosts", hosts)?;
+            builder = builder.set_override("jetstream_hosts", hosts)?;
         }
 
+        let settings = builder.build()?;
         let settings: Settings = settings.try_deserialize()?;
 
         // Validate required settings

@@ -1,9 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use chrono::{DateTime, Utc};
-use tokio::time::{interval, sleep};
+use tokio::time::interval;
 use tracing::{debug, error, info, warn};
-use crate::models::errors::{TurboError, TurboResult};
+use crate::models::errors::TurboResult;
 
 pub struct DatabaseRotator {
     db_dir: PathBuf,
@@ -67,7 +66,7 @@ impl DatabaseRotator {
             .unwrap()
             .as_secs();
         
-        let new_db_name = format!("jetstream_{}.db", timestamp);
+        let new_db_name = format!("jetstream_{timestamp}.db");
         let new_db_path = db_dir.join(&new_db_name);
         
         info!("Creating new database: {}", new_db_name);
@@ -188,7 +187,7 @@ impl DatabaseRotator {
             .unwrap()
             .as_secs();
         
-        self.db_dir.join(format!("jetstream_{}.db", timestamp))
+        self.db_dir.join(format!("jetstream_{timestamp}.db"))
     }
     
     pub async fn ensure_directory_exists(&self) -> TurboResult<()> {

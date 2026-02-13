@@ -26,10 +26,10 @@ impl Default for RetryConfig {
 /// Retry with exponential backoff
 pub async fn retry_with_backoff<F, T, E>(
     config: RetryConfig,
-    operation: F,
+    mut operation: F,
 ) -> TurboResult<T>
 where
-    F: Fn() -> Result<T, E>,
+    F: FnMut() -> Result<T, E>,
     E: std::fmt::Display,
 {
     let mut last_error = None;
@@ -44,7 +44,7 @@ where
             }
             Err(e) => {
                 warn!("Operation failed on attempt {}: {}", attempt, e);
-                last_error = Some(format!("{}", e));
+                last_error = Some(format!("{e}"));
                 
                 if attempt < config.max_attempts {
                     let delay = calculate_backoff_delay(attempt - 1, &config);
@@ -72,12 +72,13 @@ fn calculate_backoff_delay(attempt: u32, config: &RetryConfig) -> Duration {
 }
 
 /// Simple retry without backoff (immediate retry)
+#[allow(unused_mut)]
 pub async fn retry_immediate<F, T, E>(
     max_attempts: u32,
-    operation: F,
+    mut operation: F,
 ) -> TurboResult<T>
 where
-    F: Fn() -> Result<T, E>,
+    F: FnMut() -> Result<T, E>,
     E: std::fmt::Display,
 {
     let config = RetryConfig {

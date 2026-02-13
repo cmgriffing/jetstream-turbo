@@ -3,9 +3,7 @@ use std::time::Instant;
 use tracing::{debug, info};
 use crate::models::{
     jetstream::JetstreamMessage,
-    enriched::{EnrichedRecord, HydratedMetadata},
-    bluesky::BlueskyProfile,
-    errors::TurboError,
+    enriched::EnrichedRecord,
     TurboResult,
 };
 use crate::hydration::TurboCache;
@@ -33,7 +31,7 @@ impl Hydrator {
         let mentioned_dids = message.extract_mentioned_dids();
         
         // Fetch author profile if not cached
-        if let Some(at_uri) = message.extract_at_uri() {
+        if let Some(_at_uri) = message.extract_at_uri() {
             let mut author_profile = self.cache.get_user_profile(author_did).await;
             
             if author_profile.is_none() {

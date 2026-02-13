@@ -32,7 +32,7 @@ impl RedisStore {
 
     pub async fn publish_record(&self, record: &EnrichedRecord) -> TurboResult<String> {
         let message_json = serde_json::to_string(record)?;
-        let message_id = generate_message_id(&record);
+        let message_id = generate_message_id(record);
         let at_uri = record.get_at_uri().unwrap_or("");
         let did = record.get_did();
         let hydrated_at = record.processed_at.to_rfc3339();
@@ -48,13 +48,13 @@ impl RedisStore {
         let id: String = client
             .xadd(self.stream_name.clone(), Some(&message_id), values)
             .await
-            .map_err(|e| TurboError::RedisOperation(e))?;
+            .map_err(TurboError::RedisOperation)?;
 
         if let Some(max_len) = self.max_length {
             let _: i64 = client
                 .xtrim(self.stream_name.clone(), max_len, false)
                 .await
-                .map_err(|e| TurboError::RedisOperation(e))?;
+                .map_err(TurboError::RedisOperation)?;
         }
 
         debug!("Published record to not_redis stream with ID: {}", id);
@@ -78,7 +78,7 @@ impl RedisStore {
         let stream_length: i64 = client
             .xlen(self.stream_name.clone())
             .await
-            .map_err(|e| TurboError::RedisOperation(e))?;
+            .map_err(TurboError::RedisOperation)?;
 
         let redis_version = "not_redis".to_string();
 
@@ -97,7 +97,7 @@ impl RedisStore {
         let _: i64 = client
             .del(self.stream_name.clone())
             .await
-            .map_err(|e| TurboError::RedisOperation(e))?;
+            .map_err(TurboError::RedisOperation)?;
 
         debug!("Cleared not_redis stream: {}", self.stream_name);
         Ok(())

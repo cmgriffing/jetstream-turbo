@@ -84,7 +84,7 @@ impl BlueskyAuthClient {
                             let error_text = resp.text().await.unwrap_or_default();
                             error!("Bluesky auth error {}: {}", status, error_text);
                             return Err(TurboError::InvalidApiResponse(format!(
-                                "Status {}: {}", status, error_text
+                                "Status {status}: {error_text}"
                             )));
                         }
                     }

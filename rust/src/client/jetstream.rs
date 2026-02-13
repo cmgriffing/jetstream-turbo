@@ -44,8 +44,7 @@ impl JetstreamClient {
             loop {
                 let endpoint = &endpoints[current_endpoint];
                 let url = format!(
-                    "wss://{}/subscribe?wantedCollections={}",
-                    endpoint, wanted_collections
+                    "wss://{endpoint}/subscribe?wantedCollections={wanted_collections}"
                 );
 
                 info!("Connecting to Jetstream endpoint: {}", endpoint);
@@ -105,7 +104,7 @@ impl JetstreamClient {
                         if reconnect_attempts >= max_reconnect_attempts {
                             error!("Max reconnection attempts reached");
                             if tx.send(Err(TurboError::WebSocketConnection(format!(
-                                "Failed to connect after {} attempts", max_reconnect_attempts
+                                "Failed to connect after {max_reconnect_attempts} attempts"
                             )))).is_err() {
                                 return;
                             }
@@ -135,7 +134,7 @@ impl JetstreamClient {
 
 fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
     let message: JetstreamMessage = serde_json::from_str(text)
-        .map_err(|e| TurboError::JsonSerialization(e))?;
+        .map_err(TurboError::JsonSerialization)?;
 
     // Validate required fields
     if message.did.is_empty() {

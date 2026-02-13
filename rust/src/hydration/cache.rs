@@ -4,11 +4,7 @@ use dashmap::DashMap;
 use lru::LruCache;
 use tokio::sync::RwLock;
 use tracing::{debug, trace};
-use crate::models::{
-    bluesky::{BlueskyProfile, BlueskyPost},
-    errors::TurboError,
-    TurboResult,
-};
+use crate::models::bluesky::{BlueskyProfile, BlueskyPost};
 
 /// Thread-safe LRU cache for Turbo data
 pub struct TurboCache {
@@ -201,8 +197,8 @@ impl TurboCache {
     }
     
     /// Cleanup old entries from concurrent caches
-    pub async fn cleanup_concurrent(&self, max_age: Duration) {
-        let now = Instant::now();
+    pub async fn cleanup_concurrent(&self, _max_age: Duration) {
+        let _now = Instant::now();
         
         // Note: DashMap doesn't store creation time, so we implement a simple cleanup
         // by moving items back to LRU cache periodically

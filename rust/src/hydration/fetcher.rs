@@ -1,17 +1,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info};
-use crate::models::{
-    bluesky::{BlueskyProfile, BlueskyPost},
-    errors::TurboError,
-    TurboResult,
-};
+use crate::models::TurboResult;
 use crate::hydration::TurboCache;
 use crate::client::BlueskyClient;
 
 pub struct DataFetcher {
     cache: TurboCache,
     bluesky_client: Arc<BlueskyClient>,
+    #[allow(dead_code)]
     request_timeout: Duration,
 }
 

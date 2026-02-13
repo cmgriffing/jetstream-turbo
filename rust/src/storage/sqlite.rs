@@ -198,7 +198,7 @@ impl SQLiteStore {
         
         let hydrated_at: String = row.try_get("hydrated_at")?;
         let processed_at = DateTime::parse_from_rfc3339(&hydrated_at)
-            .map_err(|e| crate::models::errors::TurboError::InvalidMessage(format!("Date parse error: {}", e)))?
+            .map_err(|e| crate::models::errors::TurboError::InvalidMessage(format!("Date parse error: {e}")))?
             .with_timezone(&Utc);
         
         Ok(EnrichedRecord {

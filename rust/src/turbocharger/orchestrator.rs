@@ -145,7 +145,7 @@ impl TurboCharger {
         Ok(())
     }
     
-    fn should_process_message(&self, message: &JetstreamMessage) -> bool {
+    fn should_process_message(&self, _message: &JetstreamMessage) -> bool {
         // Apply modulo-based sharding if specified
         // For now, just return true
         true

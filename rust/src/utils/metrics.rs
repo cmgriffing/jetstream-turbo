@@ -52,8 +52,7 @@ impl Metrics {
     pub fn get_prometheus_metrics(&self) -> String {
         // This would generate the full Prometheus metrics format
         // Note: metrics types don't implement Display, using placeholder values
-        format!(
-            "# HELP jetstream_turbo_messages_processed_total Total number of messages processed\n\
+        "# HELP jetstream_turbo_messages_processed_total Total number of messages processed\n\
              # TYPE jetstream_turbo_messages_processed_total counter\n\
              jetstream_turbo_messages_processed_total 0\n\
              # HELP jetstream_turbo_messages_failed_total Total number of messages that failed processing\n\
@@ -70,8 +69,7 @@ impl Metrics {
              jetstream_turbo_active_connections 0\n\
              # HELP jetstream_turbo_api_calls_total Total number of API calls\n\
              # TYPE jetstream_turbo_api_calls_total counter\n\
-             jetstream_turbo_api_calls_total 0\n"
-        )
+             jetstream_turbo_api_calls_total 0\n".to_string()
     }
 }
 

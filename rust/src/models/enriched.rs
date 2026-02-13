@@ -15,6 +15,7 @@ pub struct EnrichedRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct HydratedMetadata {
     /// Author profile information
     pub author_profile: Option<BlueskyProfile>,
@@ -183,19 +184,6 @@ impl HydratedMetadata {
     }
 }
 
-impl Default for HydratedMetadata {
-    fn default() -> Self {
-        Self {
-            author_profile: None,
-            mentioned_profiles: Vec::new(),
-            referenced_posts: Vec::new(),
-            hashtags: Vec::new(),
-            urls: Vec::new(),
-            mentions: Vec::new(),
-            detected_language: None,
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
