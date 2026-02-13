@@ -1,16 +1,14 @@
 [workspace]
-members = [
-    "."
-]
+members = ["."]
 
 [package]
-name = "jetstream-turbo"
+name = "jetstream-turbo-rs"
 version = "0.1.0"
 edition = "2021"
-authors = ["Devin Gaffney <devin@graze.social>"]
-description = "Turbocharged Jetstream messages - hydrates referenced objects, stores to SQLite, punches up to S3 for long term storage"
+authors = ["Chris Griffing <cmgriffing@gmail.com>"]
+description = "Turbocharged Jetstream messages - hydrates referenced objects and stores to SQLite"
 license = "MIT"
-repository = "https://github.com/graze-social/jetstream-turbo"
+repository = "https://github.com/messijo/jetstream-turbo-rs"
 
 [dependencies]
 # Async runtime
@@ -43,8 +41,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Storage
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid"] }
-redis = { version = "0.26", features = ["tokio-comp", "connection-manager"] }
+sqlx = { version = "0.8", features = [
+    "runtime-tokio-rustls",
+    "sqlite",
+    "chrono",
+    "uuid",
+] }
+not_redis = "0.2.0"
 
 # Caching and utilities
 lru = "0.12"

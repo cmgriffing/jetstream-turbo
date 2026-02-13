@@ -52,7 +52,7 @@ impl Default for Settings {
             bluesky_app_password: String::new(),
             stream_name: String::new(),
             jetstream_hosts: default_jetstream_hosts(),
-            wanted_collections: "app.bsky.feed.post".to_string(),
+            wanted_collections: default_wanted_collections(),
             redis_url: "redis://localhost:6379".to_string(),
             stream_name_redis: "hydrated_jetstream".to_string(),
             trim_maxlen: Some(100),

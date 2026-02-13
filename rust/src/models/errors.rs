@@ -33,7 +33,7 @@ pub enum TurboError {
     Database(#[from] sqlx::Error),
 
     #[error("Redis operation failed: {0}")]
-    RedisOperation(#[from] redis::RedisError),
+    RedisOperation(#[from] not_redis::RedisError),
 
     // Serialization errors
     #[error("JSON serialization failed: {0}")]

@@ -1,32 +1,30 @@
-use redis::{AsyncCommands, Client as RedisClient, aio::MultiplexedConnection};
+use not_redis::Client as NotRedisClient;
 use serde_json;
+use tokio::sync::Mutex;
+use std::sync::Arc;
 use tracing::{debug, error, info};
 use crate::models::{
     enriched::EnrichedRecord,
     errors::{TurboError, TurboResult},
 };
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 pub struct RedisStore {
-    client: RedisClient,
-    connection: Arc<Mutex<MultiplexedConnection>>,
+    client: Arc<Mutex<NotRedisClient>>,
     stream_name: String,
     max_length: Option<usize>,
 }
 
 impl RedisStore {
-    pub async fn new(redis_url: &str, stream_name: String, max_length: Option<usize>) -> TurboResult<Self> {
-        info!("Connecting to Redis at: {}", redis_url);
+    pub async fn new(_redis_url: &str, stream_name: String, max_length: Option<usize>) -> TurboResult<Self> {
+        info!("Connecting to not_redis with stream: {}", stream_name);
 
-        let client = RedisClient::open(redis_url)?;
-        let connection = client.get_multiplexed_async_connection().await?;
+        let client = NotRedisClient::new();
+        client.start().await;
 
-        info!("Connected to Redis, using stream: {}", stream_name);
+        info!("Connected to not_redis, using stream: {}", stream_name);
 
         Ok(Self {
-            client,
-            connection: Arc::new(Mutex::new(connection)),
+            client: Arc::new(Mutex::new(client)),
             stream_name,
             max_length,
         })
@@ -35,36 +33,32 @@ impl RedisStore {
     pub async fn publish_record(&self, record: &EnrichedRecord) -> TurboResult<String> {
         let message_json = serde_json::to_string(record)?;
         let message_id = generate_message_id(&record);
-        let mut conn = self.connection.lock().await;
+        let at_uri = record.get_at_uri().unwrap_or("");
+        let did = record.get_did();
+        let hydrated_at = record.processed_at.to_rfc3339();
 
-        // Add to Redis stream
-        let _: () = conn
-            .xadd(
-                &self.stream_name,
-                &message_id,
-                &[
-                    ("at_uri", record.get_at_uri().unwrap_or("")),
-                    ("did", record.get_did()),
-                    ("message", &message_json),
-                    ("hydrated_at", &record.processed_at.to_rfc3339()),
-                ]
-            )
+        let values = vec![
+            ("at_uri", at_uri),
+            ("did", did),
+            ("message", &message_json),
+            ("hydrated_at", &hydrated_at),
+        ];
+
+        let mut client = self.client.lock().await;
+        let id: String = client
+            .xadd(self.stream_name.clone(), Some(&message_id), values)
             .await
             .map_err(|e| TurboError::RedisOperation(e))?;
 
-        // Trim stream if max_length is set
         if let Some(max_len) = self.max_length {
-            let _: () = redis::cmd("XTRIM")
-                .arg(&self.stream_name)
-                .arg("MAXLEN")
-                .arg(max_len)
-                .query_async(&mut *conn)
+            let _: i64 = client
+                .xtrim(self.stream_name.clone(), max_len, false)
                 .await
                 .map_err(|e| TurboError::RedisOperation(e))?;
         }
 
-        debug!("Published record to Redis stream with ID: {}", message_id);
-        Ok(message_id)
+        debug!("Published record to not_redis stream with ID: {}", id);
+        Ok(id)
     }
 
     pub async fn publish_batch(&self, records: &[EnrichedRecord]) -> TurboResult<Vec<String>> {
@@ -75,64 +69,46 @@ impl RedisStore {
             message_ids.push(message_id);
         }
 
-        info!("Published batch of {} records to Redis stream", records.len());
+        info!("Published batch of {} records to not_redis stream", records.len());
         Ok(message_ids)
     }
 
     pub async fn get_stream_info(&self) -> TurboResult<StreamInfo> {
-        let mut conn = self.connection.lock().await;
-        
-        // Use redis::cmd for info command
-        let info: String = redis::cmd("INFO")
-            .query_async(&mut *conn)
+        let mut client = self.client.lock().await;
+        let stream_length: i64 = client
+            .xlen(self.stream_name.clone())
             .await
             .map_err(|e| TurboError::RedisOperation(e))?;
 
-        let stream_length: usize = conn
-            .xlen(&self.stream_name)
-            .await
-            .map_err(|e| TurboError::RedisOperation(e))?;
-
-        // Parse redis version from info string
-        let redis_version = info
-            .lines()
-            .find(|line| line.starts_with("redis_version:"))
-            .and_then(|line| line.split(':').nth(1))
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let redis_version = "not_redis".to_string();
 
         Ok(StreamInfo {
             redis_version,
-            stream_length,
+            stream_length: stream_length as usize,
             stream_name: self.stream_name.clone(),
             max_length: self.max_length,
         })
     }
 
     pub async fn clear_stream(&self) -> TurboResult<()> {
-        info!("Clearing Redis stream: {}", self.stream_name);
-        let mut conn = self.connection.lock().await;
+        info!("Clearing not_redis stream: {}", self.stream_name);
+        let mut client = self.client.lock().await;
 
-        let _: () = redis::cmd("DEL")
-            .arg(&self.stream_name)
-            .query_async(&mut *conn)
+        let _: i64 = client
+            .del(self.stream_name.clone())
             .await
             .map_err(|e| TurboError::RedisOperation(e))?;
 
-        debug!("Cleared Redis stream: {}", self.stream_name);
+        debug!("Cleared not_redis stream: {}", self.stream_name);
         Ok(())
     }
 
     pub async fn health_check(&self) -> TurboResult<bool> {
-        let mut conn = self.connection.lock().await;
-        // Use redis::cmd for ping command
-        let result: Result<String, redis::RedisError> = redis::cmd("PING")
-            .query_async(&mut *conn)
-            .await;
-        match result {
+        let mut client = self.client.lock().await;
+        match client.ping().await {
             Ok(_) => Ok(true),
             Err(e) => {
-                error!("Redis health check failed: {}", e);
+                error!("not_redis health check failed: {}", e);
                 Ok(false)
             }
         }
@@ -156,7 +132,6 @@ pub struct StreamInfo {
 }
 
 fn generate_message_id(record: &EnrichedRecord) -> String {
-    // Generate a message ID based on the record's timestamp and sequence
     format!("{}-{}", 
         record.processed_at.timestamp_millis(),
         record.message.seq

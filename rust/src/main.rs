@@ -1,9 +1,9 @@
 use clap::Parser;
 use std::env;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use jetstream_turbo::config::Settings;
-use jetstream_turbo::turbocharger::TurboCharger;
-use jetstream_turbo::server::create_server;
+use jetstream_turbo_rs::config::Settings;
+use jetstream_turbo_rs::turbocharger::TurboCharger;
+use jetstream_turbo_rs::server::create_server;
 use anyhow::Result;
 
 #[derive(Parser, Debug)]
