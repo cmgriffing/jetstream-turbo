@@ -35,8 +35,71 @@ Successfully created a comprehensive Rust implementation of jetstream-turbo, a h
 
 4. **Verify it's working:**
    ```bash
-   curl http://localhost:8080/health
+   curl http://localhost:8080/api/v1/health
    ```
+
+## 📡 API Endpoints
+
+The server runs on port 8080 by default.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Basic server status |
+| `/ready` | GET | Readiness probe |
+| `/api/v1/health` | GET | Health check with system status |
+| `/api/v1/stats` | GET | Processing statistics |
+| `/api/v1/metrics` | GET | Prometheus metrics (stub) |
+
+> **Note:** Most endpoints require the `/api/v1/` prefix. The root `/health` returns 404.
+
+### Example Requests
+
+```bash
+# Basic server status
+curl http://localhost:8080/
+
+# Readiness probe
+curl http://localhost:8080/ready
+
+# Health check
+curl http://localhost:8080/api/v1/health
+
+# Statistics
+curl http://localhost:8080/api/v1/stats
+```
+
+### Response Examples
+
+**Health Response:**
+```json
+{
+  "status": "healthy",
+  "data": {
+    "healthy": true,
+    "redis_connected": true,
+    "sqlite_available": true,
+    "session_count": 1
+  }
+}
+```
+
+**Stats Response:**
+```json
+{
+  "status": "success",
+  "data": {
+    "total_records_processed": 315,
+    "cache_user_hits": 2,
+    "cache_user_misses": 91,
+    "cache_post_hits": 0,
+    "cache_post_misses": 0,
+    "cache_user_hit_rate": 0.02,
+    "cache_post_hit_rate": 0.0,
+    "redis_stream_length": 90,
+    "redis_version": "not_redis"
+  }
+}
+```
 
 ### Docker Alternative
 
