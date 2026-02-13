@@ -5,15 +5,16 @@ use serde::{Deserialize, Serialize};
 pub struct BlueskyProfile {
     pub did: String,
     pub handle: String,
+    #[serde(default, rename = "displayName")]
     pub display_name: Option<String>,
     pub description: Option<String>,
     pub avatar: Option<String>,
     pub banner: Option<String>,
-    #[serde(default)]
+    #[serde(default, rename = "followersCount")]
     pub followers_count: Option<u64>,
-    #[serde(default)]
+    #[serde(default, rename = "followsCount")]
     pub follows_count: Option<u64>,
-    #[serde(default)]
+    #[serde(default, rename = "postsCount")]
     pub posts_count: Option<u64>,
     pub indexed_at: Option<DateTime<Utc>>,
     pub created_at: Option<DateTime<Utc>>,
@@ -237,7 +238,6 @@ pub struct GetPostsBulkResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn test_bluesky_profile_deserialization() {

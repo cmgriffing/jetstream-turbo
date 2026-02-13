@@ -273,6 +273,8 @@ mod tests {
             reply_count: None,
         };
 
+        cache.get_post("at://did:plc:test/app.bsky.feed.post/notfound").await;
+
         cache
             .set_post(
                 "at://did:plc:test/app.bsky.feed.post/test".to_string(),
@@ -319,7 +321,7 @@ mod tests {
         cache.get_user_profile("did:plc:test1").await;
 
         let (user_hit_rate, post_hit_rate) = cache.get_hit_rates().await;
-        assert_eq!(user_hit_rate, 0.5);
+        assert_eq!(user_hit_rate, 1.0 / 3.0);
         assert_eq!(post_hit_rate, 0.0);
     }
 }

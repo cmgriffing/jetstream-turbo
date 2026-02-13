@@ -93,7 +93,7 @@ mod tests {
         let mut call_count = 0;
         let result = retry_with_backoff(RetryConfig::default(), || {
             call_count += 1;
-            Ok("success")
+            Ok::<&str, TurboError>("success")
         })
         .await;
 
@@ -108,9 +108,9 @@ mod tests {
         let result = retry_with_backoff(RetryConfig::default(), || {
             call_count += 1;
             if call_count < 3 {
-                Err("temporary failure")
+                Err(TurboError::Internal("temporary failure".to_string()))
             } else {
-                Ok("success")
+                Ok::<&str, TurboError>("success")
             }
         })
         .await;
@@ -123,14 +123,14 @@ mod tests {
     #[tokio::test]
     async fn test_retry_failure_after_max_attempts() {
         let mut call_count = 0;
-        let result = retry_with_backoff(
+        let result: Result<&str, TurboError> = retry_with_backoff(
             RetryConfig {
                 max_attempts: 2,
                 ..Default::default()
             },
             || {
                 call_count += 1;
-                Err("persistent failure")
+                Err(TurboError::Internal("persistent failure".to_string()))
             },
         )
         .await;

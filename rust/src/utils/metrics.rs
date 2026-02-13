@@ -122,8 +122,8 @@ mod tests {
 
     #[test]
     fn test_operation_timer() {
-        let metrics = Metrics::new();
-        let timer = OperationTimer::new(&metrics);
+        let metrics = Box::leak(Box::new(Metrics::new()));
+        let timer = OperationTimer::new(metrics);
 
         // Simulate some work
         std::thread::sleep(std::time::Duration::from_millis(10));

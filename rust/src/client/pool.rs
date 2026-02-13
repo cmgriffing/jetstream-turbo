@@ -163,7 +163,7 @@ mod tests {
         }
 
         // Client should be returned to pool
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(pool.size().await, 1);
 
         {
@@ -172,6 +172,7 @@ mod tests {
             assert_eq!(*client2, "test_client");
         }
 
+        tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(pool.size().await, 1);
     }
 

@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -59,14 +58,18 @@ impl JetstreamMessage {
                 if let Some(reply) = record.get("reply") {
                     if let Some(parent) = reply.get("parent") {
                         if let Some(uri) = parent.get("uri").and_then(|u| u.as_str()) {
-                            if let Some(did) = uri.split(':').nth(2) {
+                            if let Some(did) =
+                                uri.strip_prefix("at://").and_then(|s| s.split('/').next())
+                            {
                                 mentioned_dids.push(did);
                             }
                         }
                     }
                     if let Some(root) = reply.get("root") {
                         if let Some(uri) = root.get("uri").and_then(|u| u.as_str()) {
-                            if let Some(did) = uri.split(':').nth(2) {
+                            if let Some(did) =
+                                uri.strip_prefix("at://").and_then(|s| s.split('/').next())
+                            {
                                 mentioned_dids.push(did);
                             }
                         }
@@ -91,7 +94,9 @@ impl JetstreamMessage {
                 if let Some(embed) = record.get("embed") {
                     if let Some(embed_record) = embed.get("record") {
                         if let Some(uri) = embed_record.get("uri").and_then(|u| u.as_str()) {
-                            if let Some(did) = uri.split(':').nth(2) {
+                            if let Some(did) =
+                                uri.strip_prefix("at://").and_then(|s| s.split('/').next())
+                            {
                                 mentioned_dids.push(did);
                             }
                         }

@@ -1,11 +1,9 @@
 #[cfg(test)]
 mod tests {
-    use jetstream_turbo::client::{BlueskyAuthClient, JetstreamClient};
-    use jetstream_turbo::config::Settings;
-    use jetstream_turbo::hydration::TurboCache;
-    use jetstream_turbo::models::{bluesky::BlueskyProfile, jetstream::JetstreamMessage};
-    use std::time::Duration;
-    use tempfile::TempDir;
+    use jetstream_turbo_rs::client::{BlueskyAuthClient, JetstreamClient};
+    use jetstream_turbo_rs::config::Settings;
+    use jetstream_turbo_rs::hydration::TurboCache;
+    use jetstream_turbo_rs::models::{bluesky::BlueskyProfile, jetstream::JetstreamMessage};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -33,14 +31,14 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = BlueskyAuthClient::new(
+        let client = BlueskyAuthClient::with_api_url(
             "test.bsky.social".to_string(),
             "test-app-password".to_string(),
+            mock_server.uri(),
         );
 
         let session = client.authenticate().await.unwrap();
         assert!(session.contains("test_jwt_token"));
-        assert!(session.contains("bsky.social"));
     }
 
     #[tokio::test]
@@ -53,20 +51,19 @@ mod tests {
             "did": "did:plc:test",
             "seq": 12345,
             "time_us": 1640995200000000,
+            "kind": "commit",
             "commit": {
-                "seq": 12345,
-                "rebase": false,
-                "time_us": 1640995200000000,
-                "operation": {
-                    "type": "create",
-                    "record": {
-                        "uri": "at://did:plc:test/app.bsky.feed.post/test",
-                        "cid": "bafyrei",
-                        "author": "did:plc:test",
-                        "type": "app.bsky.feed.post",
-                        "createdAt": "2022-01-01T00:00:00.000Z",
-                        "fields": {}
-                    }
+                "rev": "test-rev",
+                "operation": "create",
+                "collection": "app.bsky.feed.post",
+                "rkey": "test",
+                "record": {
+                    "uri": "at://did:plc:test/app.bsky.feed.post/test",
+                    "cid": "bafyrei",
+                    "author": "did:plc:test",
+                    "type": "app.bsky.feed.post",
+                    "createdAt": "2022-01-01T00:00:00.000Z",
+                    "text": "test"
                 }
             }
         }
@@ -77,7 +74,7 @@ mod tests {
 
         let message = result.unwrap();
         assert_eq!(message.did, "did:plc:test");
-        assert_eq!(message.seq, 12345);
+        assert_eq!(message.seq, Some(12345));
     }
 
     #[tokio::test]
@@ -91,9 +88,9 @@ mod tests {
             description: None,
             avatar: None,
             banner: None,
-            followers_count: 1000,
-            follows_count: 500,
-            posts_count: 250,
+            followers_count: Some(1000),
+            follows_count: Some(500),
+            posts_count: Some(250),
             indexed_at: None,
             created_at: None,
             labels: None,
@@ -138,38 +135,32 @@ mod tests {
             "did": "did:plc:alice",
             "seq": 12345678901234567890,
             "time_us": 1704067200000000,
+            "kind": "commit",
             "commit": {
-                "seq": 12345678901234567890,
-                "rebase": false,
-                "time_us": 1704067200000000,
-                "operation": {
-                    "type": "create",
-                    "record": {
-                        "uri": "at://did:plc:alice/app.bsky.feed.post/3jk7v7mjpxq3y",
-                        "cid": "bafyreib5qtxdqevgwz2xcvxfzkbizsu2gswfkcayn3mpfr2a24jkmvotgi",
-                        "author": "did:plc:alice",
-                        "type": "app.bsky.feed.post",
-                        "createdAt": "2024-01-01T00:00:00.000Z",
-                        "fields": {
-                            "text": "Hello @bob.example.com! Check out this post at://did:plc:charlie/app.bsky.feed.post/xyz #test",
-                            "createdAt": "2024-01-01T00:00:00.000Z",
-                            "facets": [
-                                {
-                                    "index": {"byteStart": 6, "byteEnd": 23},
-                                    "features": [{"$type": "app.bsky.richtext.facet#mention", "did": "did:plc:bob"}]
-                                },
-                                {
-                                    "index": {"byteStart": 44, "byteEnd": 97},
-                                    "features": [{"$type": "app.bsky.richtext.facet#link", "uri": "at://did:plc:charlie/app.bsky.feed.post/xyz"}]
-                                },
-                                {
-                                    "index": {"byteStart": 98, "byteEnd": 103},
-                                    "features": [{"$type": "app.bsky.richtext.facet#tag", "tag": "test"}]
-                                }
-                            ]
+                "rev": "test-rev",
+                "operation": "create",
+                "collection": "app.bsky.feed.post",
+                "rkey": "3jk7v7mjpxq3y",
+                "record": {
+                    "$type": "app.bsky.feed.post",
+                    "text": "Hello @bob.example.com! Check out this post at://did:plc:charlie/app.bsky.feed.post/xyz #test",
+                    "createdAt": "2024-01-01T00:00:00.000Z",
+                    "facets": [
+                        {
+                            "index": {"byteStart": 6, "byteEnd": 23},
+                            "features": [{"$type": "app.bsky.richtext.facet#mention", "did": "did:plc:bob"}]
+                        },
+                        {
+                            "index": {"byteStart": 44, "byteEnd": 97},
+                            "features": [{"$type": "app.bsky.richtext.facet#link", "uri": "at://did:plc:charlie/app.bsky.feed.post/xyz"}]
+                        },
+                        {
+                            "index": {"byteStart": 98, "byteEnd": 103},
+                            "features": [{"$type": "app.bsky.richtext.facet#tag", "tag": "test"}]
                         }
-                    }
-                }
+                    ]
+                },
+                "cid": "bafyreib5qtxdqevgwz2xcvxfzkbizsu2gswfkcayn3mpfr2a24jkmvotgi"
             }
         }
         "#;
@@ -180,7 +171,7 @@ mod tests {
         assert_eq!(message.extract_did(), "did:plc:alice");
         assert_eq!(
             message.extract_at_uri(),
-            Some("at://did:plc:alice/app.bsky.feed.post/3jk7v7mjpxq3y")
+            Some("at://did:plc:alice/app.bsky.feed.post/3jk7v7mjpxq3y".to_string())
         );
 
         // Test DID extraction from mentions
@@ -199,30 +190,17 @@ mod tests {
         // 2. Simulate message reception
         let messages = vec![JetstreamMessage {
             did: "did:plc:user1".to_string(),
-            seq: 1,
-            time_us: 1704067200000000,
-            commit: jetstream_turbo::models::jetstream::CommitData {
-                seq: 1,
-                rebase: false,
-                time_us: 1704067200000000,
-                operation: jetstream_turbo::models::jetstream::Operation::Create {
-                    record: jetstream_turbo::models::jetstream::Record {
-                        uri: "at://did:plc:user1/app.bsky.feed.post/1".to_string(),
-                        cid: "cid1".to_string(),
-                        author: "did:plc:user1".to_string(),
-                        r#type: "app.bsky.feed.post".to_string(),
-                        created_at: chrono::Utc::now(),
-                        fields: serde_json::json!({"text": "Hello world"}),
-                        embed: None,
-                        labels: None,
-                        langs: None,
-                        reply: None,
-                        tags: None,
-                        facets: None,
-                        collections: None,
-                    },
-                },
-            },
+            seq: Some(1),
+            time_us: Some(1704067200000000),
+            kind: "commit".to_string(),
+            commit: Some(jetstream_turbo_rs::models::jetstream::CommitData {
+                rev: Some("test-rev".to_string()),
+                operation_type: "create".to_string(),
+                collection: Some("app.bsky.feed.post".to_string()),
+                rkey: Some("1".to_string()),
+                record: Some(serde_json::json!({"text": "Hello world"})),
+                cid: Some("cid1".to_string()),
+            }),
         }];
 
         // 3. Process messages and simulate hydration
@@ -241,9 +219,9 @@ mod tests {
                     description: None,
                     avatar: None,
                     banner: None,
-                    followers_count: 100,
-                    follows_count: 50,
-                    posts_count: 25,
+                    followers_count: Some(100),
+                    follows_count: Some(50),
+                    posts_count: Some(25),
                     indexed_at: None,
                     created_at: None,
                     labels: None,

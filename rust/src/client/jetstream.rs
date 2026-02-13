@@ -188,20 +188,19 @@ mod tests {
             "did": "did:plc:test",
             "seq": 12345,
             "time_us": 1640995200000000,
+            "kind": "commit",
             "commit": {
-                "seq": 12345,
-                "rebase": false,
-                "time_us": 1640995200000000,
-                "operation": {
-                    "type": "create",
-                    "record": {
-                        "uri": "at://did:plc:test/app.bsky.feed.post/test",
-                        "cid": "bafyrei",
-                        "author": "did:plc:test",
-                        "type": "app.bsky.feed.post",
-                        "createdAt": "2022-01-01T00:00:00.000Z",
-                        "fields": {}
-                    }
+                "rev": "test-rev",
+                "operation": "create",
+                "collection": "app.bsky.feed.post",
+                "rkey": "test",
+                "record": {
+                    "uri": "at://did:plc:test/app.bsky.feed.post/test",
+                    "cid": "bafyrei",
+                    "author": "did:plc:test",
+                    "type": "app.bsky.feed.post",
+                    "createdAt": "2022-01-01T00:00:00.000Z",
+                    "fields": {}
                 }
             }
         }
@@ -212,7 +211,7 @@ mod tests {
 
         let message = result.unwrap();
         assert_eq!(message.did, "did:plc:test");
-        assert_eq!(message.seq, 12345);
+        assert_eq!(message.seq, Some(12345));
     }
 
     #[test]
@@ -228,11 +227,11 @@ mod tests {
             "did": "",
             "seq": 12345,
             "time_us": 1640995200000000,
+            "kind": "commit",
             "commit": {
-                "seq": 12345,
-                "rebase": false,
-                "time_us": 1640995200000000,
-                "operation": {}
+                "operation": "create",
+                "collection": "app.bsky.feed.post",
+                "rkey": "test"
             }
         }
         "#;

@@ -50,36 +50,22 @@ impl MessageBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::jetstream::{CommitData, Operation, Record};
-    use chrono::Utc;
+    use crate::models::jetstream::CommitData;
 
     fn create_test_message(seq: u64) -> JetstreamMessage {
         JetstreamMessage {
             did: "did:plc:test".to_string(),
-            seq,
-            time_us: 1640995200000000,
-            commit: CommitData {
-                seq,
-                rebase: false,
-                time_us: 1640995200000000,
-                operation: Operation::Create {
-                    record: Record {
-                        uri: format!("at://did:plc:test/app.bsky.feed.post/{}", seq),
-                        cid: "bafyrei".to_string(),
-                        author: "did:plc:test".to_string(),
-                        r#type: "app.bsky.feed.post".to_string(),
-                        created_at: Utc::now(),
-                        fields: serde_json::json!({"text": format!("Test message {}", seq)}),
-                        embed: None,
-                        labels: None,
-                        langs: None,
-                        reply: None,
-                        tags: None,
-                        facets: None,
-                        collections: None,
-                    },
-                },
-            },
+            seq: Some(seq),
+            time_us: Some(1640995200000000),
+            kind: "commit".to_string(),
+            commit: Some(CommitData {
+                rev: Some("test-rev".to_string()),
+                operation_type: "create".to_string(),
+                collection: Some("app.bsky.feed.post".to_string()),
+                rkey: Some(format!("test-rkey-{}", seq)),
+                record: Some(serde_json::json!({"text": format!("Test message {}", seq)})),
+                cid: Some("bafyrei".to_string()),
+            }),
         }
     }
 

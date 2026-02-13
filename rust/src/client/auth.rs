@@ -31,6 +31,10 @@ pub struct BlueskyAuthClient {
 
 impl BlueskyAuthClient {
     pub fn new(handle: String, app_password: String) -> Self {
+        Self::with_api_url(handle, app_password, "https://bsky.social/xrpc".to_string())
+    }
+
+    pub fn with_api_url(handle: String, app_password: String, api_base_url: String) -> Self {
         Self {
             http_client: Client::builder()
                 .timeout(Duration::from_secs(10))
@@ -39,7 +43,7 @@ impl BlueskyAuthClient {
                 .expect("Failed to create HTTP client"),
             handle,
             app_password,
-            api_base_url: "https://bsky.social/xrpc".to_string(),
+            api_base_url,
             max_retries: 3,
             retry_delay: Duration::from_millis(500),
         }
@@ -164,6 +168,9 @@ mod tests {
             refresh_jwt: "test_refresh_token".to_string(),
             handle: "test.bsky.social".to_string(),
             did: "did:plc:test".to_string(),
+            email: None,
+            email_confirmed: None,
+            active: None,
         };
 
         Mock::given(method("POST"))

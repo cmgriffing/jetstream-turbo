@@ -289,11 +289,11 @@ impl BlueskyClient {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_bluesky_client_creation() {
+    #[tokio::test]
+    async fn test_bluesky_client_creation() {
         let sessions = vec!["session1:::bsky.social".to_string()];
         let client = BlueskyClient::new(sessions);
-        assert_eq!(client.get_session_count().blocking_now(), 1);
+        assert_eq!(client.get_session_count().await, 1);
     }
 
     #[tokio::test]

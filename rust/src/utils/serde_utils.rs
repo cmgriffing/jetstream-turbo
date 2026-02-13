@@ -20,9 +20,11 @@ pub mod json_utils {
 
 /// Utility functions for string handling
 pub mod string_utils {
-    /// Extract DID from AT URI
+    /// Extract DID from AT URI (e.g., "at://did:plc:test/app.bsky.feed.post/abc" -> Some("did:plc:test"))
     pub fn extract_did_from_at_uri(at_uri: &str) -> Option<&str> {
-        at_uri.split(':').next()
+        at_uri
+            .strip_prefix("at://")
+            .and_then(|s| s.split('/').next())
     }
 
     /// Check if string is a valid DID
@@ -63,6 +65,7 @@ pub mod time_utils {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
 
     #[test]
     fn test_json_utils() {

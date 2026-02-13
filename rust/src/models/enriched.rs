@@ -205,14 +205,14 @@ mod tests {
             time_us: Some(1640995200000000),
             seq: Some(12345),
             kind: "commit".to_string(),
-            commit: CommitData {
+            commit: Some(CommitData {
                 rev: Some("test-rev".to_string()),
                 operation_type: "create".to_string(),
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("test123".to_string()),
                 record: Some(json!({"text": "Hello world"})),
                 cid: Some("bafyrei".to_string()),
-            },
+            }),
         };
 
         let enriched = EnrichedRecord::new(message);
@@ -227,14 +227,14 @@ mod tests {
             time_us: Some(1640995200000000),
             seq: Some(12345),
             kind: "commit".to_string(),
-            commit: CommitData {
+            commit: Some(CommitData {
                 rev: Some("test-rev".to_string()),
                 operation_type: "create".to_string(),
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("test123".to_string()),
                 record: Some(json!({"text": "Hello"})),
                 cid: Some("bafyrei".to_string()),
-            },
+            }),
         });
 
         enriched.metrics.cache_hits = 8;
