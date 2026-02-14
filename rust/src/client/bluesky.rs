@@ -44,10 +44,6 @@ impl BlueskyClient {
             .pool_idle_timeout(Duration::from_secs(30))
             .tcp_keepalive(Duration::from_secs(60))
             .tcp_nodelay(true)
-            // HTTP/2 settings
-            .http2_adaptive_window(true)
-            // Connection settings
-            .tcp_keepalive_interval(Some(Duration::from_secs(60)))
             .build()
             .expect("Failed to create HTTP client");
         
