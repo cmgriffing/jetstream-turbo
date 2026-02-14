@@ -11,7 +11,25 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{error, info, trace, warn};
 
-const REQUESTS_PER_SECOND: u32 = 15;
+const REQUESTS_PER_SECOND: u32 = 10;
+
+async fn handle_rate_limit_response(
+    response: &reqwest::Response,
+    attempt: u32,
+    retry_delay: Duration,
+) -> Option<Duration> {
+    if let Some(retry_after) = response.headers().get("retry-after") {
+        if let Ok(value) = retry_after.to_str() {
+            if let Ok(seconds) = value.parse::<u64>() {
+                trace!("Rate limited: Retry-After header suggests {} seconds", seconds);
+                return Some(Duration::from_secs(seconds));
+            }
+        }
+    }
+
+    let backoff_ms = retry_delay.as_millis() as u64 * (2u64.pow(attempt.min(5)));
+    Some(Duration::from_millis(backoff_ms))
+}
 
 pub struct BlueskyClient {
     http_client: Client,
@@ -50,7 +68,7 @@ impl BlueskyClient {
         Self {
             http_client,
             session_strings: Arc::new(RwLock::new(session_strings)),
-            rate_limiter: Arc::new(RateLimiter::direct(quota)), // ~6 requests per second
+            rate_limiter: Arc::new(RateLimiter::direct(quota)),
             api_base_url: "https://bsky.social/xrpc".to_string(),
             max_retries: 3,
             retry_delay_ms: 200,
@@ -125,7 +143,11 @@ impl BlueskyClient {
                         return Ok(result);
                     }
                     StatusCode::TOO_MANY_REQUESTS => {
-                        warn!("Rate limited, waiting before retry");
+                        warn!("Rate limited (profiles), waiting before retry");
+                        if let Some(wait_time) = handle_rate_limit_response(&resp, attempt, self.retry_delay).await {
+                            tokio::time::sleep(wait_time).await;
+                            continue;
+                        }
                         tokio::time::sleep(self.retry_delay * 2).await;
                     }
                     StatusCode::UNAUTHORIZED => {
@@ -247,7 +269,11 @@ impl BlueskyClient {
                         return Ok(results);
                     }
                     StatusCode::TOO_MANY_REQUESTS => {
-                        warn!("Rate limited, waiting before retry");
+                        warn!("Rate limited (posts), waiting before retry");
+                        if let Some(wait_time) = handle_rate_limit_response(&resp, attempt, self.retry_delay).await {
+                            tokio::time::sleep(wait_time).await;
+                            continue;
+                        }
                         tokio::time::sleep(self.retry_delay * 2).await;
                     }
                     StatusCode::UNAUTHORIZED => {
