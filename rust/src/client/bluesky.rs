@@ -33,12 +33,26 @@ pub struct BlueskyClient {
 impl BlueskyClient {
     pub fn new(session_strings: Vec<String>) -> Self {
         let quota = Quota::per_second(NonZeroU32::new(REQUESTS_PER_SECOND).unwrap());
+        
+        // Configure HTTP client with connection pooling for optimal performance
+        let http_client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
+            .user_agent("jetstream-turbo/0.1.0")
+            // Connection pool settings
+            .pool_max_idle_per_host(10)
+            .pool_idle_timeout(Duration::from_secs(30))
+            .tcp_keepalive(Duration::from_secs(60))
+            .tcp_nodelay(true)
+            // HTTP/2 settings
+            .http2_adaptive_window(true)
+            // Connection settings
+            .tcp_keepalive_interval(Some(Duration::from_secs(60)))
+            .build()
+            .expect("Failed to create HTTP client");
+        
         Self {
-            http_client: Client::builder()
-                .timeout(Duration::from_secs(30))
-                .user_agent("jetstream-turbo/0.1.0")
-                .build()
-                .expect("Failed to create HTTP client"),
+            http_client,
             session_strings: Arc::new(RwLock::new(session_strings)),
             rate_limiter: Arc::new(RateLimiter::direct(quota)), // ~6 requests per second
             api_base_url: "https://bsky.social/xrpc".to_string(),
