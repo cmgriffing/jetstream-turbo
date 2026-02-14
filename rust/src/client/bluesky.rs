@@ -160,8 +160,17 @@ impl BlueskyClient {
 
         let filtered_count = uris.len() - valid_uris.len();
         if filtered_count > 0 {
-            warn!("Filtered {} invalid URIs out of {}", filtered_count, uris.len());
-            debug!("Invalid URIs: {:?}", uris.iter().filter(|u| !is_valid_at_uri(u)).collect::<Vec<_>>());
+            warn!(
+                "Filtered {} invalid URIs out of {}",
+                filtered_count,
+                uris.len()
+            );
+            debug!(
+                "Invalid URIs: {:?}",
+                uris.iter()
+                    .filter(|u| !is_valid_at_uri(u))
+                    .collect::<Vec<_>>()
+            );
         }
 
         if valid_uris.is_empty() {
