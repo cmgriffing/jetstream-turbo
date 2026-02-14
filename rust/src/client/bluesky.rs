@@ -187,11 +187,17 @@ impl BlueskyClient {
         loop {
             self.rate_limiter.until_ready().await;
 
+            // Build query parameters for URIs (separate params, not comma-joined)
+            let mut query_params: Vec<(&str, &str)> = Vec::new();
+            for uri in uris {
+                query_params.push(("uris", uri));
+            }
+
             let response = self
                 .http_client
                 .get(&url)
                 .header("Authorization", format!("Bearer {session_string}"))
-                .query(&[("uris", uris.join(","))])
+                .query(&query_params)
                 .send()
                 .await;
 
