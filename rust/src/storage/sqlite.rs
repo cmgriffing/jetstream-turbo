@@ -1,5 +1,6 @@
 use crate::models::{enriched::EnrichedRecord, TurboResult};
 use chrono::{DateTime, Utc};
+use simd_json::to_string as simd_json_to_string;
 use sqlx::{sqlite::SqliteConnectOptions, sqlite::SqliteJournalMode, Row, SqlitePool};
 use std::path::Path;
 use tracing::{info, trace};
@@ -96,8 +97,8 @@ impl SQLiteStore {
     pub async fn store_record(&self, record: &EnrichedRecord) -> TurboResult<i64> {
         let now = Utc::now();
 
-        let message_json = serde_json::to_value(&record.message)?;
-        let metadata_json = serde_json::to_value(&record.hydrated_metadata)?;
+        let message_json = simd_json_to_string(&record.message).unwrap();
+        let metadata_json = simd_json_to_string(&record.hydrated_metadata).unwrap();
 
         let result = sqlx::query(
             r#"
@@ -111,8 +112,8 @@ impl SQLiteStore {
         .bind(record.get_at_uri())
         .bind(record.get_did())
         .bind(record.message.time_us.map(|t| t as i64))
-        .bind(message_json.to_string())
-        .bind(metadata_json.to_string())
+        .bind(message_json)
+        .bind(metadata_json)
         .bind(record.processed_at.to_rfc3339())
         .bind(now.to_rfc3339())
         .bind(record.metrics.hydration_time_ms as i64)
@@ -133,54 +134,48 @@ impl SQLiteStore {
             return Ok(vec![]);
         }
 
-        // Use a transaction for better performance - much faster than individual inserts
-        let mut ids = Vec::with_capacity(records.len());
-
-        // Begin transaction
         let mut tx = self.pool.begin().await?;
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
 
-        // Pre-serialize JSON once per record
-        let prepared_records: Vec<_> = records
-            .iter()
-            .map(|record| {
-                let message_json = serde_json::to_value(&record.message).ok();
-                let metadata_json = serde_json::to_value(&record.hydrated_metadata).ok();
-                (record, message_json, metadata_json)
-            })
-            .collect();
+        let insert_sql = r#"
+            INSERT INTO records (
+                at_uri, did, time_us, message, message_metadata,
+                created_at, hydrated_at, hydration_time_ms,
+                api_calls_count, cache_hit_rate, cache_hits, cache_misses
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#;
 
-        for (record, message_json, metadata_json) in prepared_records {
-            let now = Utc::now();
+        let mut last_id = 0i64;
 
-            let result = sqlx::query(
-                r#"
-                INSERT INTO records (
-                    at_uri, did, time_us, message, message_metadata,
-                    created_at, hydrated_at, hydration_time_ms,
-                    api_calls_count, cache_hit_rate, cache_hits, cache_misses
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                "#,
-            )
-            .bind(record.get_at_uri())
-            .bind(record.get_did())
-            .bind(record.message.time_us.map(|t| t as i64))
-            .bind(message_json.as_ref().map(|v| v.to_string()))
-            .bind(metadata_json.as_ref().map(|v| v.to_string()))
-            .bind(record.processed_at.to_rfc3339())
-            .bind(now.to_rfc3339())
-            .bind(record.metrics.hydration_time_ms as i64)
-            .bind(record.metrics.api_calls_count as i64)
-            .bind(record.metrics.cache_hit_rate)
-            .bind(record.metrics.cache_hits as i64)
-            .bind(record.metrics.cache_misses as i64)
-            .execute(&mut *tx)
-            .await?;
+        for record in records {
+            let message_json = simd_json_to_string(&record.message).unwrap();
+            let metadata_json = simd_json_to_string(&record.hydrated_metadata).unwrap();
 
-            ids.push(result.last_insert_rowid());
+            let result = sqlx::query(insert_sql)
+                .bind(record.get_at_uri())
+                .bind(record.get_did())
+                .bind(record.message.time_us.map(|t| t as i64))
+                .bind(message_json)
+                .bind(metadata_json)
+                .bind(record.processed_at.to_rfc3339())
+                .bind(&now_str)
+                .bind(record.metrics.hydration_time_ms as i64)
+                .bind(record.metrics.api_calls_count as i64)
+                .bind(record.metrics.cache_hit_rate)
+                .bind(record.metrics.cache_hits as i64)
+                .bind(record.metrics.cache_misses as i64)
+                .execute(&mut *tx)
+                .await?;
+
+            last_id = result.last_insert_rowid();
         }
 
-        // Commit transaction - this is much faster than auto-commit per row
         tx.commit().await?;
+
+        let ids: Vec<i64> = (0..records.len())
+            .map(|i| last_id - (records.len() - 1 - i) as i64)
+            .collect();
 
         trace!("Stored batch of {} records", records.len());
         Ok(ids)
