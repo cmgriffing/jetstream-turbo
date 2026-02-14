@@ -1,6 +1,7 @@
 use crate::models::{bluesky::BlueskyProfile, jetstream::JetstreamMessage};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrichedRecord {
@@ -17,9 +18,9 @@ pub struct EnrichedRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HydratedMetadata {
     /// Author profile information
-    pub author_profile: Option<BlueskyProfile>,
+    pub author_profile: Option<Arc<BlueskyProfile>>,
     /// Profiles of mentioned users
-    pub mentioned_profiles: Vec<BlueskyProfile>,
+    pub mentioned_profiles: Vec<Arc<BlueskyProfile>>,
     /// Referenced posts (replies, quotes)
     pub referenced_posts: Vec<ReferencedPost>,
     /// Extracted hashtags
@@ -118,7 +119,7 @@ impl EnrichedRecord {
 }
 
 impl HydratedMetadata {
-    pub fn add_mentioned_profile(&mut self, profile: BlueskyProfile) {
+    pub fn add_mentioned_profile(&mut self, profile: Arc<BlueskyProfile>) {
         if !self.mentioned_profiles.iter().any(|p| p.did == profile.did) {
             self.mentioned_profiles.push(profile);
         }

@@ -101,7 +101,7 @@ mod tests {
 
         for i in 0..10000 {
             cache
-                .set_user_profile(format!("did:plc:test{}", i), profile.clone())
+                .set_user_profile(format!("did:plc:test{}", i), std::sync::Arc::new(profile.clone()))
                 .await;
         }
 
@@ -228,7 +228,7 @@ mod tests {
                 };
 
                 cache
-                    .set_user_profile(author_did.to_string(), new_profile)
+                    .set_user_profile(author_did.to_string(), std::sync::Arc::new(new_profile))
                     .await;
             }
         }

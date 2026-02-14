@@ -47,7 +47,7 @@ impl DataFetcher {
 
             for (did, maybe_profile) in chunk.iter().zip(profiles) {
                 if let Some(profile) = maybe_profile {
-                    self.cache.set_user_profile(did.clone(), profile).await;
+                    self.cache.set_user_profile(did.clone(), Arc::new(profile)).await;
                     fetched_count += 1;
                 }
             }
@@ -83,7 +83,7 @@ impl DataFetcher {
 
             for (uri, maybe_post) in chunk.iter().zip(posts) {
                 if let Some(post) = maybe_post {
-                    self.cache.set_post(uri.clone(), post).await;
+                    self.cache.set_post(uri.clone(), Arc::new(post)).await;
                     fetched_count += 1;
                 }
             }

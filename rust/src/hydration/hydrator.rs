@@ -38,9 +38,10 @@ impl Hydrator {
                     .await?;
 
                 if let Some(profile) = profiles.into_iter().next().flatten() {
-                    author_profile = Some(profile.clone());
+                    let profile_arc = Arc::new(profile);
+                    author_profile = Some(Arc::clone(&profile_arc));
                     self.cache
-                        .set_user_profile(author_did.to_string(), profile)
+                        .set_user_profile(author_did.to_string(), profile_arc)
                         .await;
                 }
             }
@@ -122,7 +123,7 @@ impl Hydrator {
         if let Ok(profiles) = profiles_result {
             for (did, maybe_profile) in uncached_dids.iter().zip(profiles) {
                 if let Some(profile) = maybe_profile {
-                    self.cache.set_user_profile(did.clone(), profile).await;
+                    self.cache.set_user_profile(did.clone(), Arc::new(profile)).await;
                 }
             }
         }
@@ -130,7 +131,7 @@ impl Hydrator {
         if let Ok(posts) = posts_result {
             for (uri, maybe_post) in uncached_uris.iter().zip(posts) {
                 if let Some(post) = maybe_post {
-                    self.cache.set_post(uri.clone(), post).await;
+                    self.cache.set_post(uri.clone(), Arc::new(post)).await;
                 }
             }
         }
