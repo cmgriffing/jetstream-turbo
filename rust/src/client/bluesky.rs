@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{error, info, trace, warn};
 
-const REQUESTS_PER_SECOND: u32 = 10;
+const REQUESTS_PER_SECOND_MS: u64 = 1000 / 10;
 
 async fn handle_rate_limit_response(
     response: &reqwest::Response,
@@ -21,7 +21,10 @@ async fn handle_rate_limit_response(
     if let Some(retry_after) = response.headers().get("retry-after") {
         if let Ok(value) = retry_after.to_str() {
             if let Ok(seconds) = value.parse::<u64>() {
-                trace!("Rate limited: Retry-After header suggests {} seconds", seconds);
+                trace!(
+                    "Rate limited: Retry-After header suggests {} seconds",
+                    seconds
+                );
                 return Some(Duration::from_secs(seconds));
             }
         }
@@ -50,8 +53,10 @@ pub struct BlueskyClient {
 
 impl BlueskyClient {
     pub fn new(session_strings: Vec<String>) -> Self {
-        let quota = Quota::per_second(NonZeroU32::new(REQUESTS_PER_SECOND).unwrap());
-        
+        let quota = Quota::with_period(Duration::from_millis(REQUESTS_PER_SECOND_MS))
+            .expect("Valid quota")
+            .allow_burst(NonZeroU32::new(1).unwrap());
+
         // Configure HTTP client with connection pooling for optimal performance
         let http_client = Client::builder()
             .timeout(Duration::from_secs(30))
@@ -64,7 +69,7 @@ impl BlueskyClient {
             .tcp_nodelay(true)
             .build()
             .expect("Failed to create HTTP client");
-        
+
         Self {
             http_client,
             session_strings: Arc::new(RwLock::new(session_strings)),
@@ -144,7 +149,9 @@ impl BlueskyClient {
                     }
                     StatusCode::TOO_MANY_REQUESTS => {
                         warn!("Rate limited (profiles), waiting before retry");
-                        if let Some(wait_time) = handle_rate_limit_response(&resp, attempt, self.retry_delay).await {
+                        if let Some(wait_time) =
+                            handle_rate_limit_response(&resp, attempt, self.retry_delay).await
+                        {
                             tokio::time::sleep(wait_time).await;
                             continue;
                         }
@@ -270,7 +277,9 @@ impl BlueskyClient {
                     }
                     StatusCode::TOO_MANY_REQUESTS => {
                         warn!("Rate limited (posts), waiting before retry");
-                        if let Some(wait_time) = handle_rate_limit_response(&resp, attempt, self.retry_delay).await {
+                        if let Some(wait_time) =
+                            handle_rate_limit_response(&resp, attempt, self.retry_delay).await
+                        {
                             tokio::time::sleep(wait_time).await;
                             continue;
                         }
