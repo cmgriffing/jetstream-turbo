@@ -128,11 +128,15 @@ impl TurboCache {
     }
 
     pub async fn check_user_profiles_cached(&self, dids: &[String]) -> Vec<bool> {
-        dids.iter().map(|did| self.user_cache.contains_key(did)).collect()
+        dids.iter()
+            .map(|did| self.user_cache.contains_key(did))
+            .collect()
     }
 
     pub async fn check_posts_cached(&self, uris: &[String]) -> Vec<bool> {
-        uris.iter().map(|uri| self.post_cache.contains_key(uri)).collect()
+        uris.iter()
+            .map(|uri| self.post_cache.contains_key(uri))
+            .collect()
     }
 
     pub async fn get_metrics(&self) -> CacheMetricsSnapshot {

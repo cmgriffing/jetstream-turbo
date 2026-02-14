@@ -289,10 +289,8 @@ fn bench_sqlite_operations(c: &mut Criterion) {
     c.bench_function("sqlite_store_record", |b| {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        
-        let store = rt.block_on(async {
-            SQLiteStore::new(&db_path).await.unwrap()
-        });
+
+        let store = rt.block_on(async { SQLiteStore::new(&db_path).await.unwrap() });
 
         let message = create_test_message(0);
         let record = EnrichedRecord {
@@ -318,10 +316,8 @@ fn bench_sqlite_operations(c: &mut Criterion) {
     c.bench_function("sqlite_batch_store", |b| {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
-        
-        let store = rt.block_on(async {
-            SQLiteStore::new(&db_path).await.unwrap()
-        });
+
+        let store = rt.block_on(async { SQLiteStore::new(&db_path).await.unwrap() });
 
         let records: Vec<EnrichedRecord> = (0..100)
             .map(|i| {
@@ -359,10 +355,8 @@ fn bench_sqlite_operations(c: &mut Criterion) {
             |b, &batch_size| {
                 let temp_dir = TempDir::new().unwrap();
                 let db_path = temp_dir.path().join("test.db");
-                
-                let store = rt.block_on(async {
-                    SQLiteStore::new(&db_path).await.unwrap()
-                });
+
+                let store = rt.block_on(async { SQLiteStore::new(&db_path).await.unwrap() });
 
                 let records: Vec<EnrichedRecord> = (0..batch_size)
                     .map(|i| {
@@ -407,7 +401,7 @@ fn bench_enriched_record_creation(c: &mut Criterion) {
     c.bench_function("enriched_record_with_profile", |b| {
         let message = create_test_message(0);
         let profile = Arc::new(create_test_profile(0));
-        
+
         b.iter(|| {
             let mut record = EnrichedRecord::new(message.clone());
             record.hydrated_metadata.author_profile = Some(profile.clone());
@@ -421,7 +415,7 @@ fn bench_enriched_record_creation(c: &mut Criterion) {
     c.bench_function("enriched_record_extract_uris", |b| {
         let message = create_test_message(0);
         let record = EnrichedRecord::new(message);
-        
+
         b.iter(|| {
             let _at_uri = record.get_at_uri();
             let _did = record.get_did();
@@ -431,12 +425,10 @@ fn bench_enriched_record_creation(c: &mut Criterion) {
 }
 
 fn bench_batch_operations(c: &mut Criterion) {
-
     c.bench_function("batch_message_creation", |b| {
         b.iter(|| {
-            let messages: Vec<JetstreamMessage> = (0..100)
-                .map(|i| create_test_message(i))
-                .collect();
+            let messages: Vec<JetstreamMessage> =
+                (0..100).map(|i| create_test_message(i)).collect();
             let _count = messages.len();
         });
     });
@@ -472,13 +464,10 @@ fn bench_batch_operations(c: &mut Criterion) {
             batch_size,
             |b, &batch_size| {
                 b.iter(|| {
-                    let profiles: Vec<BlueskyProfile> = (0..batch_size)
-                        .map(|i| create_test_profile(i))
-                        .collect();
-                    let _arc_profiles: Vec<Arc<BlueskyProfile>> = profiles
-                        .into_iter()
-                        .map(|p| Arc::new(p))
-                        .collect();
+                    let profiles: Vec<BlueskyProfile> =
+                        (0..batch_size).map(|i| create_test_profile(i)).collect();
+                    let _arc_profiles: Vec<Arc<BlueskyProfile>> =
+                        profiles.into_iter().map(|p| Arc::new(p)).collect();
                 });
             },
         );
