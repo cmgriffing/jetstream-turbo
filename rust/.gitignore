@@ -22,3 +22,5 @@ target
 
 .env
 .sqlx
+data_store/**
+
