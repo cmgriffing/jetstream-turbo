@@ -12,3 +12,4 @@ harness = false
 criterion = { version = "0.5", features = ["html_reports"] }
 tokio = { version = "1.40", features = ["full"] }
 jetstream-turbo = { path = ".." }
+tempfile = "3.12"

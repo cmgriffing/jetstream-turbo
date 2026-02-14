@@ -1,0 +1,101 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+  REGRESSION_THRESHOLD: 2.0
+
+jobs:
+  benchmark:
+    name: Run Benchmarks
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashDeps }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashDeps }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashDeps }}
+
+      - name: Run benchmarks
+        run: |
+          cargo bench --bench hydration_benchmark
+
+      - name: Compare with baseline
+        id: compare
+        run: |
+          cd scripts/benchmarks
+          chmod +x check.sh
+          ./check.sh
+        continue-on-error: true
+
+      - name: Update baselines on main branch
+        if: github.ref == 'refs/heads/main' && steps.compare.outcome == 'success'
+        run: |
+          cd scripts/benchmarks
+          chmod +x update.sh
+          ./update.sh
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add benches/baselines/
+          git commit -m "Update benchmark baselines" || true
+
+      - name: Post regression comment on PR
+        if: github.event_name == 'pull_request' && steps.compare.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execSync } = require('child_process');
+            const fs = require('fs');
+            
+            let comment = '## ⚠️ Benchmark Regression Detected\n\n';
+            comment += 'The following benchmarks have regressed beyond the ' + process.env.REGRESSION_THRESHOLD + '% threshold:\n\n';
+            
+            // Try to get detailed comparison
+            try {
+              const output = execSync('./scripts/benchmarks/check.sh 2>&1', { encoding: 'utf8' });
+              const lines = output.split('\n').filter(l => l.includes('[REGRESSION]'));
+              for (const line of lines) {
+                comment += '- ' + line.replace('[REGRESSION]', '').trim() + '\n';
+              }
+            } catch (e) {}
+            
+            comment += '\n**Action Required:**\n';
+            comment += '- If this regression is intentional, update baselines with `./scripts/benchmarks/update.sh`\n';
+            comment += '- If unintended, please investigate and fix the performance regression\n';
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      - name: Fail on regression
+        if: steps.compare.outcome == 'failure'
+        run: exit 1
