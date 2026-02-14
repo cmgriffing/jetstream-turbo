@@ -82,7 +82,7 @@ mod tests {
         let cache = TurboCache::new(10000, 10000);
 
         let profile = BlueskyProfile {
-            did: "did:plc:test".to_string(),
+            did: "did:plc:test".into(),
             handle: "test.bsky.social".to_string(),
             display_name: Some("Test User".to_string()),
             description: None,
@@ -213,7 +213,7 @@ mod tests {
             if profile.is_none() {
                 // Simulate API call and cache result
                 let new_profile = BlueskyProfile {
-                    did: author_did.to_string(),
+                    did: author_did.into(),
                     handle: format!("{}.bsky.social", &author_did[9..13]), // Extract part for demo
                     display_name: Some("User 1".to_string()),
                     description: None,

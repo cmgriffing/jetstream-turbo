@@ -1,9 +1,26 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::sync::Arc;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+fn serialize_did<S>(did: &Arc<str>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(did)
+}
+
+fn deserialize_did<'de, D>(deserializer: D) -> Result<Arc<str>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s: String = Deserialize::deserialize(deserializer)?;
+    Ok(Arc::from(s))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlueskyProfile {
-    pub did: String,
+    #[serde(serialize_with = "serialize_did", deserialize_with = "deserialize_did")]
+    pub did: Arc<str>,
     pub handle: String,
     #[serde(default, rename = "displayName")]
     pub display_name: Option<String>,
@@ -125,7 +142,8 @@ pub struct Label {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ActorProfile {
-    pub did: String,
+    #[serde(serialize_with = "serialize_did", deserialize_with = "deserialize_did")]
+    pub did: Arc<str>,
     pub handle: String,
     pub display_name: Option<String>,
     pub description: Option<String>,
@@ -153,7 +171,8 @@ pub struct ActorDefs {
 // API Request/Response Types
 #[derive(Debug, Clone, Deserialize)]
 pub struct GetProfileResponse {
-    pub did: String,
+    #[serde(deserialize_with = "deserialize_did")]
+    pub did: Arc<str>,
     pub handle: String,
     pub display_name: Option<String>,
     pub description: Option<String>,
@@ -254,7 +273,7 @@ mod tests {
         "#;
 
         let profile: BlueskyProfile = serde_json::from_str(json_str).unwrap();
-        assert_eq!(profile.did, "did:plc:test");
+        assert_eq!(profile.did.as_ref(), "did:plc:test");
         assert_eq!(profile.handle, "test.bsky.social");
         assert_eq!(profile.display_name, Some("Test User".to_string()));
     }

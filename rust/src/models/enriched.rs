@@ -1,7 +1,22 @@
 use crate::models::{bluesky::BlueskyProfile, jetstream::JetstreamMessage};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::Arc;
+
+fn serialize_arc_str<S>(value: &Arc<str>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(value)
+}
+
+fn deserialize_arc_str<'de, D>(deserializer: D) -> Result<Arc<str>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s: String = Deserialize::deserialize(deserializer)?;
+    Ok(Arc::from(s))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrichedRecord {
@@ -38,7 +53,11 @@ pub struct ReferencedPost {
     pub uri: String,
     pub cid: String,
     pub text: String,
-    pub author_did: String,
+    #[serde(
+        serialize_with = "serialize_arc_str",
+        deserialize_with = "deserialize_arc_str"
+    )]
+    pub author_did: Arc<str>,
     pub author_handle: Option<String>,
     pub created_at: DateTime<Utc>,
     pub reply_count: Option<u64>,
@@ -48,7 +67,11 @@ pub struct ReferencedPost {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mention {
-    pub did: String,
+    #[serde(
+        serialize_with = "serialize_arc_str",
+        deserialize_with = "deserialize_arc_str"
+    )]
+    pub did: Arc<str>,
     pub handle: Option<String>,
     pub display_name: Option<String>,
     pub start_byte: u32,
@@ -175,7 +198,7 @@ impl HydratedMetadata {
                                 "app.bsky.richtext.facet#mention" => {
                                     if let Some(did) = feature.get("did").and_then(|d| d.as_str()) {
                                         self.mentions.push(Mention {
-                                            did: did.to_string(),
+                                            did: did.into(),
                                             handle: None,
                                             display_name: None,
                                             start_byte: start,

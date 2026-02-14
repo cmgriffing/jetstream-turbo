@@ -1,3 +1,4 @@
+pub mod interned_string;
 pub mod logging;
 pub mod metrics;
 pub mod retry;

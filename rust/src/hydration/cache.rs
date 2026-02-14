@@ -217,7 +217,7 @@ mod tests {
         assert!(result.is_none());
 
         let profile = BlueskyProfile {
-            did: "did:plc:test".to_string(),
+            did: "did:plc:test".into(),
             handle: "test.bsky.social".to_string(),
             display_name: Some("Test User".to_string()),
             description: None,
@@ -237,7 +237,7 @@ mod tests {
 
         let result = cache.get_user_profile("did:plc:test").await;
         assert!(result.is_some());
-        assert_eq!(result.unwrap().did, "did:plc:test");
+        assert_eq!(result.unwrap().did.as_ref(), "did:plc:test");
 
         let metrics = cache.get_metrics().await;
         assert_eq!(metrics.user_hits, 1);
@@ -252,7 +252,7 @@ mod tests {
             uri: "at://did:plc:test/app.bsky.feed.post/test".to_string(),
             cid: "bafyrei".to_string(),
             author: BlueskyProfile {
-                did: "did:plc:test".to_string(),
+                did: "did:plc:test".into(),
                 handle: "test.bsky.social".to_string(),
                 display_name: None,
                 description: None,
@@ -306,7 +306,7 @@ mod tests {
         cache.get_user_profile("did:plc:test2").await;
 
         let profile = BlueskyProfile {
-            did: "did:plc:test1".to_string(),
+            did: "did:plc:test1".into(),
             handle: "test1.bsky.social".to_string(),
             display_name: None,
             description: None,

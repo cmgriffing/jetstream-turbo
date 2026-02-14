@@ -1,6 +1,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use jetstream_turbo_rs::hydration::TurboCache;
 use jetstream_turbo_rs::models::bluesky::BlueskyProfile;
+use std::sync::Arc;
 
 fn bench_cache_operations(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -10,7 +11,7 @@ fn bench_cache_operations(c: &mut Criterion) {
             rt.block_on(async {
                 let cache = TurboCache::new(10000, 10000);
                 let profile = BlueskyProfile {
-                    did: "did:plc:test".to_string(),
+                    did: "did:plc:test".into(),
                     handle: "test.bsky.social".to_string(),
                     display_name: Some("Test User".to_string()),
                     description: None,
@@ -26,7 +27,7 @@ fn bench_cache_operations(c: &mut Criterion) {
 
                 for i in 0..1000 {
                     cache
-                        .set_user_profile(format!("did:plc:test{}", i), profile.clone())
+                        .set_user_profile(format!("did:plc:test{}", i), Arc::new(profile.clone()))
                         .await;
                 }
             });
@@ -37,7 +38,7 @@ fn bench_cache_operations(c: &mut Criterion) {
         let cache = rt.block_on(async {
             let cache = TurboCache::new(10000, 10000);
             let profile = BlueskyProfile {
-                did: "did:plc:test".to_string(),
+                did: "did:plc:test".into(),
                 handle: "test.bsky.social".to_string(),
                 display_name: Some("Test User".to_string()),
                 description: None,
@@ -54,7 +55,7 @@ fn bench_cache_operations(c: &mut Criterion) {
             // Pre-populate cache
             for i in 0..1000 {
                 cache
-                    .set_user_profile(format!("did:plc:test{}", i), profile.clone())
+                    .set_user_profile(format!("did:plc:test{}", i), Arc::new(profile.clone()))
                     .await;
             }
 
@@ -81,7 +82,7 @@ fn bench_cache_operations(c: &mut Criterion) {
                     rt.block_on(async {
                         let cache = TurboCache::new(cache_size, cache_size);
                         let profile = BlueskyProfile {
-                            did: "did:plc:test".to_string(),
+                            did: "did:plc:test".into(),
                             handle: "test.bsky.social".to_string(),
                             display_name: Some("Test User".to_string()),
                             description: None,
@@ -98,7 +99,7 @@ fn bench_cache_operations(c: &mut Criterion) {
                         // Fill cache halfway
                         for i in 0..(cache_size / 2) {
                             cache
-                                .set_user_profile(format!("did:plc:test{}", i), profile.clone())
+                                .set_user_profile(format!("did:plc:test{}", i), Arc::new(profile.clone()))
                                 .await;
                         }
 
