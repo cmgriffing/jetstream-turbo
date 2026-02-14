@@ -1,4 +1,4 @@
-use crate::client::BlueskyClient;
+use crate::client::BlueskyClientPool;
 use crate::hydration::TurboCache;
 use crate::models::{enriched::EnrichedRecord, jetstream::JetstreamMessage, TurboResult};
 use std::sync::Arc;
@@ -8,14 +8,14 @@ use tracing::{info, trace};
 #[derive(Clone)]
 pub struct Hydrator {
     cache: TurboCache,
-    bluesky_client: Arc<BlueskyClient>,
+    bluesky_client_pool: Arc<BlueskyClientPool>,
 }
 
 impl Hydrator {
-    pub fn new(cache: TurboCache, bluesky_client: Arc<BlueskyClient>) -> Self {
+    pub fn new(cache: TurboCache, bluesky_client_pool: Arc<BlueskyClientPool>) -> Self {
         Self {
             cache,
-            bluesky_client,
+            bluesky_client_pool,
         }
     }
 
@@ -32,8 +32,8 @@ impl Hydrator {
             let mut author_profile = self.cache.get_user_profile(author_did).await;
 
             if author_profile.is_none() {
-                let profiles = self
-                    .bluesky_client
+                let client = self.bluesky_client_pool.get_client().await;
+                let profiles = client
                     .bulk_fetch_profiles(&[author_did.to_string()])
                     .await?;
 
@@ -106,16 +106,16 @@ impl Hydrator {
             if uncached_dids.is_empty() {
                 return Ok(vec![]);
             }
-            self.bluesky_client
-                .bulk_fetch_profiles(&uncached_dids)
-                .await
+            let client = self.bluesky_client_pool.get_client().await;
+            client.bulk_fetch_profiles(&uncached_dids).await
         };
 
         let posts_future = async {
             if uncached_uris.is_empty() {
                 return Ok(vec![]);
             }
-            self.bluesky_client.bulk_fetch_posts(&uncached_uris).await
+            let client = self.bluesky_client_pool.get_client().await;
+            client.bulk_fetch_posts(&uncached_uris).await
         };
 
         let (profiles_result, posts_result) = tokio::join!(profiles_future, posts_future);

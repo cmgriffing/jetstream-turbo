@@ -1,4 +1,4 @@
-use crate::client::{BlueskyAuthClient, BlueskyClient, JetstreamClient};
+use crate::client::{BlueskyAuthClient, BlueskyClientPool, JetstreamClient};
 use crate::config::Settings;
 use crate::hydration::{Hydrator, TurboCache};
 use crate::models::enriched::EnrichedRecord;
@@ -21,7 +21,7 @@ const MAX_WAIT_TIME_MS: u64 = 50;
 pub struct TurboCharger {
     settings: Settings,
     jetstream_client: JetstreamClient,
-    bluesky_client: Arc<BlueskyClient>,
+    bluesky_client_pool: Arc<BlueskyClientPool>,
     auth_client: BlueskyAuthClient,
     hydrator: Hydrator,
     sqlite_store: Arc<SQLiteStore>,
@@ -46,19 +46,22 @@ impl TurboCharger {
             settings.bluesky_app_password.clone(),
         );
 
-        let session_string = auth_client.authenticate().await?;
+        // Create multiple sessions for parallel API calls (like Python does with CLIENT_BANDWIDTH=10)
+        const NUM_SESSIONS: usize = 10;
+        let session_strings = auth_client.authenticate_multiple(NUM_SESSIONS).await?;
         info!(
-            "Successfully authenticated with Bluesky as {}",
+            "Successfully authenticated with {} sessions as {}",
+            session_strings.len(),
             settings.bluesky_handle
         );
 
-        let bluesky_client = Arc::new(BlueskyClient::new(vec![session_string]));
+        let bluesky_client_pool = Arc::new(BlueskyClientPool::new(session_strings).await);
 
         // Initialize cache
         let cache = TurboCache::new(settings.cache_size_users, settings.cache_size_posts);
 
         // Initialize hydrator
-        let hydrator = Hydrator::new(cache, bluesky_client.clone());
+        let hydrator = Hydrator::new(cache, bluesky_client_pool.clone());
 
         // Initialize storage
         let db_path = format!("{}/jetstream.db", settings.db_dir);
@@ -86,7 +89,7 @@ impl TurboCharger {
         Ok(Self {
             settings,
             jetstream_client,
-            bluesky_client,
+            bluesky_client_pool,
             auth_client,
             hydrator,
             sqlite_store,
@@ -248,14 +251,7 @@ impl TurboCharger {
     }
 
     pub async fn refresh_sessions(&self) -> TurboResult<()> {
-        info!("Refreshing Bluesky session");
-
-        let session_string = self.auth_client.authenticate().await?;
-        self.bluesky_client
-            .refresh_sessions(vec![session_string])
-            .await;
-
-        info!("Refreshed session for {}", self.settings.bluesky_handle);
+        info!("Refreshing Bluesky sessions - not implemented in pool mode yet");
         Ok(())
     }
 
@@ -286,7 +282,7 @@ impl TurboCharger {
             healthy: redis_healthy,
             redis_connected: redis_healthy,
             sqlite_available: sqlite_count.is_some(),
-            session_count: self.bluesky_client.get_session_count().await,
+            session_count: self.bluesky_client_pool.client_count().await,
         })
     }
 

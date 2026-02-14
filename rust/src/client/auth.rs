@@ -151,6 +151,28 @@ impl BlueskyAuthClient {
             Err(_) => Ok(false),
         }
     }
+
+    /// Authenticate multiple times to create multiple session tokens
+    /// This allows parallel requests up to the session count * rate limit
+    pub async fn authenticate_multiple(&self, count: usize) -> TurboResult<Vec<String>> {
+        let mut sessions = Vec::with_capacity(count);
+        
+        for i in 0..count {
+            tracing::info!("Creating session {}/{}", i + 1, count);
+            match self.authenticate().await {
+                Ok(session) => sessions.push(session),
+                Err(e) => {
+                    tracing::warn!("Failed to create session {}/{}: {}", i + 1, count, e);
+                    if sessions.is_empty() {
+                        return Err(e);
+                    }
+                    break;
+                }
+            }
+        }
+        
+        Ok(sessions)
+    }
 }
 
 #[cfg(test)]
