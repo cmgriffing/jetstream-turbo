@@ -1,3 +1,4 @@
+use crate::utils::serde_utils::string_utils::is_valid_at_uri;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -118,12 +119,16 @@ impl JetstreamMessage {
                 if let Some(reply) = record.get("reply") {
                     if let Some(parent) = reply.get("parent") {
                         if let Some(uri) = parent.get("uri").and_then(|u| u.as_str()) {
-                            uris.push(uri.to_string());
+                            if !uri.is_empty() && is_valid_at_uri(uri) {
+                                uris.push(uri.to_string());
+                            }
                         }
                     }
                     if let Some(root) = reply.get("root") {
                         if let Some(uri) = root.get("uri").and_then(|u| u.as_str()) {
-                            uris.push(uri.to_string());
+                            if !uri.is_empty() && is_valid_at_uri(uri) {
+                                uris.push(uri.to_string());
+                            }
                         }
                     }
                 }
@@ -131,7 +136,9 @@ impl JetstreamMessage {
                 if let Some(embed) = record.get("embed") {
                     if let Some(embed_record) = embed.get("record") {
                         if let Some(uri) = embed_record.get("uri").and_then(|u| u.as_str()) {
-                            uris.push(uri.to_string());
+                            if !uri.is_empty() && is_valid_at_uri(uri) {
+                                uris.push(uri.to_string());
+                            }
                         }
                     }
                 }

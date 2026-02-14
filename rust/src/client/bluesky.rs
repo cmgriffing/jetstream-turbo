@@ -178,6 +178,8 @@ impl BlueskyClient {
                 .send()
                 .await;
 
+            debug!("Fetching posts for URIs: {:?}", uris);
+
             match response {
                 Ok(resp) => match resp.status() {
                     StatusCode::OK => {

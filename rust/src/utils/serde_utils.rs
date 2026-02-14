@@ -32,6 +32,11 @@ pub mod string_utils {
         did.starts_with("did:plc:") && did.len() > 10
     }
 
+    /// Check if string is a valid AT-URI
+    pub fn is_valid_at_uri(uri: &str) -> bool {
+        uri.starts_with("at://") && uri.split('/').count() >= 4
+    }
+
     /// Truncate string with ellipsis
     pub fn truncate_with_ellipsis(s: &str, max_len: usize) -> String {
         if s.len() <= max_len {
@@ -92,6 +97,18 @@ mod tests {
 
         assert!(string_utils::is_valid_did("did:plc:abcdef123456"));
         assert!(!string_utils::is_valid_did("invalid:did"));
+
+        assert!(string_utils::is_valid_at_uri(
+            "at://did:plc:test/app.bsky.feed.post/abc"
+        ));
+        assert!(string_utils::is_valid_at_uri(
+            "at://did:plc:abc123/app.bsky.feed.post/3k5..."
+        ));
+        assert!(!string_utils::is_valid_at_uri(""));
+        assert!(!string_utils::is_valid_at_uri("at://"));
+        assert!(!string_utils::is_valid_at_uri("at://did:plc:test"));
+        assert!(!string_utils::is_valid_at_uri("http://example.com"));
+        assert!(!string_utils::is_valid_at_uri("invalid"));
 
         let truncated = string_utils::truncate_with_ellipsis("This is a very long string", 10);
         assert_eq!(truncated, "This is...");
