@@ -4,7 +4,7 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, trace};
+use tracing::trace;
 
 #[derive(Clone)]
 pub struct TurboCache {
@@ -90,7 +90,7 @@ impl TurboCache {
         }
         
         cache.put(did.clone(), profile);
-        debug!("Cached user profile: {}", did);
+        trace!("Cached user profile: {}", did);
     }
 
     pub async fn get_post(&self, uri: &str) -> Option<Arc<BlueskyPost>> {
@@ -135,7 +135,7 @@ impl TurboCache {
         }
         
         cache.put(uri.clone(), post);
-        debug!("Cached post: {}", uri);
+        trace!("Cached post: {}", uri);
     }
 
     pub async fn check_user_profiles_cached(&self, dids: &[String]) -> Vec<bool> {
@@ -168,7 +168,7 @@ impl TurboCache {
         let mut post_cache = self.post_cache.lock().await;
         user_cache.clear();
         post_cache.clear();
-        debug!("Cleared all caches");
+        trace!("Cleared all caches");
     }
 
     pub async fn cleanup_concurrent(&self, _max_age: std::time::Duration) {}

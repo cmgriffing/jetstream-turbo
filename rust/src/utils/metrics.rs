@@ -1,6 +1,6 @@
 use metrics::{counter, gauge, histogram, Counter, Gauge, Histogram};
 use std::time::Instant;
-use tracing::debug;
+use tracing::trace;
 
 /// Metrics collection for jetstream-turbo
 pub struct Metrics {
@@ -26,7 +26,7 @@ impl Metrics {
 
     pub fn record_message_processed(&self) {
         self.messages_processed.increment(1);
-        debug!("Messages processed count: {:?}", self.messages_processed);
+        trace!("Messages processed count: {:?}", self.messages_processed);
     }
 
     pub fn record_message_failed(&self) {
@@ -95,7 +95,7 @@ impl OperationTimer {
     pub fn finish(self) {
         let duration = self.start_time.elapsed();
         self.metrics.record_hydration_duration(duration);
-        debug!("Operation completed in {:?}", duration);
+        trace!("Operation completed in {:?}", duration);
     }
 }
 

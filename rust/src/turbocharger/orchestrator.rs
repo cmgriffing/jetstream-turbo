@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Semaphore};
 use tokio::time::interval;
-use tracing::{debug, error, info};
+use tracing::{error, info, trace};
 
 const BATCH_SIZE: usize = 100;
 const MAX_WAIT_TIME_MS: u64 = 50;
@@ -180,7 +180,7 @@ impl TurboCharger {
             .await
             {
                 Ok(count) => {
-                    debug!("Processed batch of {} messages", count);
+                    trace!("Processed batch of {} messages", count);
                 }
                 Err(e) => {
                     error!("Batch processing failed: {}", e);

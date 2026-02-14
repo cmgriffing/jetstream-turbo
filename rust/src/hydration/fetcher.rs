@@ -3,7 +3,7 @@ use crate::hydration::TurboCache;
 use crate::models::TurboResult;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{info, trace};
 
 pub struct DataFetcher {
     cache: TurboCache,
@@ -53,7 +53,7 @@ impl DataFetcher {
             }
         }
 
-        debug!("Fetched {} profiles from API", fetched_count);
+        trace!("Fetched {} profiles from API", fetched_count);
         Ok(fetched_count)
     }
 
@@ -89,7 +89,7 @@ impl DataFetcher {
             }
         }
 
-        debug!("Fetched {} posts from API", fetched_count);
+        trace!("Fetched {} posts from API", fetched_count);
         Ok(fetched_count)
     }
 

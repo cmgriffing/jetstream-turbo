@@ -9,7 +9,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, trace, warn};
 
 const REQUESTS_PER_SECOND: u32 = 15;
 
@@ -94,7 +94,7 @@ impl BlueskyClient {
                 Ok(resp) => match resp.status() {
                     StatusCode::OK => {
                         let body = resp.text().await?;
-                        debug!("Profiles response: {}", &body[..body.len().min(500)]);
+                        trace!("Profiles response: {}", &body[..body.len().min(500)]);
                         let profiles_response: GetProfilesResponse = serde_json::from_str(&body)
                             .map_err(|e| {
                                 error!(
@@ -165,7 +165,7 @@ impl BlueskyClient {
                 filtered_count,
                 uris.len()
             );
-            debug!(
+            trace!(
                 "Invalid URIs: {:?}",
                 uris.iter()
                     .filter(|u| !is_valid_at_uri(u))
@@ -210,13 +210,13 @@ impl BlueskyClient {
                 .send()
                 .await;
 
-            debug!("Fetching posts for URIs: {:?}", uris);
+            trace!("Fetching posts for URIs: {:?}", uris);
 
             match response {
                 Ok(resp) => match resp.status() {
                     StatusCode::OK => {
                         let body = resp.text().await?;
-                        debug!("Posts response: {}", &body[..body.len().min(500)]);
+                        trace!("Posts response: {}", &body[..body.len().min(500)]);
                         let posts_response: GetPostsBulkResponse = serde_json::from_str(&body)
                             .map_err(|e| {
                                 error!(

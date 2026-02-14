@@ -2,7 +2,7 @@ use crate::models::errors::TurboResult;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::interval;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, trace, warn};
 
 pub struct DatabaseRotator {
     db_dir: PathBuf,
@@ -58,7 +58,7 @@ impl DatabaseRotator {
         max_databases: usize,
         cleanup_age: Duration,
     ) -> TurboResult<()> {
-        debug!("Starting database rotation");
+        trace!("Starting database rotation");
 
         // Create timestamped database name
         let timestamp = SystemTime::now()
@@ -145,7 +145,7 @@ impl DatabaseRotator {
             tokio::fs::remove_file(&shm_path).await?;
         }
 
-        debug!("Removed database files for: {}", db_path.display());
+        trace!("Removed database files for: {}", db_path.display());
         Ok(())
     }
 

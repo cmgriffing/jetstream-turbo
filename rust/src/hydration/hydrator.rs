@@ -3,7 +3,7 @@ use crate::hydration::TurboCache;
 use crate::models::{enriched::EnrichedRecord, jetstream::JetstreamMessage, TurboResult};
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, info};
+use tracing::{info, trace};
 
 #[derive(Clone)]
 pub struct Hydrator {
@@ -59,7 +59,7 @@ impl Hydrator {
         // Update metrics
         enriched.metrics.hydration_time_ms = start_time.elapsed().as_millis() as u64;
 
-        debug!("Hydrated message for DID: {}", author_did);
+        trace!("Hydrated message for DID: {}", author_did);
         Ok(enriched)
     }
 
@@ -169,7 +169,7 @@ impl Hydrator {
             match result {
                 Ok(enriched) => results.push(enriched),
                 Err(e) => {
-                    debug!("Failed to hydrate message: {}", e);
+                    trace!("Failed to hydrate message: {}", e);
                 }
             }
         }

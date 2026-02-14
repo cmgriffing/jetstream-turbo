@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tracing::debug;
+use tracing::trace;
 
 /// Task coordinator for managing concurrent operations
 pub struct TaskCoordinator {
@@ -21,7 +21,7 @@ impl TaskCoordinator {
         let mut current = self.current_tasks.write().await;
 
         while *current >= self.max_concurrent {
-            debug!(
+            trace!(
                 "Waiting for task permit, current: {}, max: {}",
                 *current, self.max_concurrent
             );
@@ -33,7 +33,7 @@ impl TaskCoordinator {
         }
 
         *current += 1;
-        debug!("Acquired task permit, current tasks: {}", *current);
+        trace!("Acquired task permit, current tasks: {}", *current);
 
         TaskPermit {
             current_tasks: self.current_tasks.clone(),
@@ -58,7 +58,7 @@ impl Drop for TaskPermit {
         let mut current = self.current_tasks.try_write().unwrap();
         let count = (*current).saturating_sub(1);
         *current = count;
-        debug!("Released task permit, current tasks: {}", count);
+        trace!("Released task permit, current tasks: {}", count);
     }
 }
 

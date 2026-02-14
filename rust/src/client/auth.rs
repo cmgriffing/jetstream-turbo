@@ -2,7 +2,7 @@ use crate::models::errors::{TurboError, TurboResult};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, trace, warn};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AuthResponse {
@@ -69,7 +69,7 @@ impl BlueskyAuthClient {
                     match resp.status() {
                         reqwest::StatusCode::OK => {
                             let body_text = resp.text().await?;
-                            debug!("Auth response body: {}", body_text);
+                            trace!("Auth response body: {}", body_text);
 
                             let auth_response: AuthResponse = match serde_json::from_str(&body_text)
                             {
@@ -133,7 +133,7 @@ impl BlueskyAuthClient {
 
             attempt += 1;
             if attempt <= self.max_retries {
-                debug!(
+                trace!(
                     "Retry attempt {} in {}ms",
                     attempt,
                     self.retry_delay.as_millis()

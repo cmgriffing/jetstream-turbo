@@ -2,7 +2,7 @@ use crate::models::{enriched::EnrichedRecord, TurboResult};
 use chrono::{DateTime, Utc};
 use sqlx::{sqlite::SqliteConnectOptions, sqlite::SqliteJournalMode, Row, SqlitePool};
 use std::path::Path;
-use tracing::{debug, info};
+use tracing::{info, trace};
 
 pub struct SQLiteStore {
     pool: SqlitePool,
@@ -64,7 +64,7 @@ impl SQLiteStore {
         .execute(pool)
         .await?;
 
-        debug!("SQLite schema initialized");
+        trace!("SQLite schema initialized");
         Ok(())
     }
 
@@ -124,7 +124,7 @@ impl SQLiteStore {
         .await?;
 
         let id = result.last_insert_rowid();
-        debug!("Stored record with ID: {}", id);
+        trace!("Stored record with ID: {}", id);
         Ok(id)
     }
 
@@ -182,7 +182,7 @@ impl SQLiteStore {
         // Commit transaction - this is much faster than auto-commit per row
         tx.commit().await?;
 
-        info!("Stored batch of {} records", records.len());
+        trace!("Stored batch of {} records", records.len());
         Ok(ids)
     }
 

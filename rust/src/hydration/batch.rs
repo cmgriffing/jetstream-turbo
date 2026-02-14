@@ -2,7 +2,7 @@ use crate::hydration::Hydrator;
 use crate::models::{enriched::EnrichedRecord, jetstream::JetstreamMessage, TurboResult};
 use futures::StreamExt;
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{info, trace};
 
 pub struct BatchProcessor {
     hydrator: Hydrator,
@@ -38,7 +38,7 @@ impl BatchProcessor {
                         let batch = std::mem::take(&mut buffer);
                         match self.hydrator.hydrate_batch(batch).await {
                             Ok(processed) => {
-                                debug!("Processed batch of {} records", processed.len());
+                                trace!("Processed batch of {} records", processed.len());
                                 results.extend(processed);
                             }
                             Err(e) => return Err(e),
@@ -54,7 +54,7 @@ impl BatchProcessor {
         if !buffer.is_empty() {
             match self.hydrator.hydrate_batch(buffer).await {
                 Ok(processed) => {
-                    debug!("Processed final batch of {} records", processed.len());
+                    trace!("Processed final batch of {} records", processed.len());
                     results.extend(processed);
                 }
                 Err(e) => return Err(e),

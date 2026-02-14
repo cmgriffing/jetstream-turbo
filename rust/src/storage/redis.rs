@@ -6,7 +6,7 @@ use not_redis::Client as NotRedisClient;
 use serde_json;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info};
+use tracing::{error, info, trace};
 
 pub struct RedisStore {
     client: Arc<Mutex<NotRedisClient>>,
@@ -61,7 +61,7 @@ impl RedisStore {
                 .map_err(TurboError::RedisOperation)?;
         }
 
-        debug!("Published record to not_redis stream with ID: {}", id);
+        trace!("Published record to not_redis stream with ID: {}", id);
         Ok(id)
     }
 
@@ -137,7 +137,7 @@ impl RedisStore {
             .await
             .map_err(TurboError::RedisOperation)?;
 
-        debug!("Cleared not_redis stream: {}", self.stream_name);
+        trace!("Cleared not_redis stream: {}", self.stream_name);
         Ok(())
     }
 

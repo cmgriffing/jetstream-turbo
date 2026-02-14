@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, trace, warn};
 
 pub struct JetstreamClient {
     endpoints: Vec<String>,
@@ -61,7 +61,7 @@ impl JetstreamClient {
                         while let Some(msg_result) = read.next().await {
                             match msg_result {
                                 Ok(Message::Text(text)) => {
-                                    debug!("Received message: {}", text);
+                                    trace!("Received message: {}", text);
                                     match parse_message(&text) {
                                         Ok(message) => {
                                             if tx.send(Ok(message)).is_err() {
@@ -80,13 +80,13 @@ impl JetstreamClient {
                                     }
                                 }
                                 Ok(Message::Binary(_)) => {
-                                    debug!("Received binary message (ignoring)");
+                                    trace!("Received binary message (ignoring)");
                                 }
                                 Ok(Message::Ping(_)) => {
-                                    debug!("Received ping");
+                                    trace!("Received ping");
                                 }
                                 Ok(Message::Pong(_)) => {
-                                    debug!("Received pong");
+                                    trace!("Received pong");
                                 }
                                 Ok(Message::Close(_)) => {
                                     info!("WebSocket connection closed by server");
@@ -94,7 +94,7 @@ impl JetstreamClient {
                                 }
                                 Ok(Message::Frame(_)) => {
                                     // Ignore raw frames
-                                    debug!("Received raw frame (ignoring)");
+                                    trace!("Received raw frame (ignoring)");
                                 }
                                 Err(e) => {
                                     error!("WebSocket error: {}", e);

@@ -1,7 +1,7 @@
 use crate::models::errors::{TurboError, TurboResult};
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{debug, warn};
+use tracing::{trace, warn};
 
 /// Retry configuration
 #[derive(Debug, Clone)]
@@ -35,7 +35,7 @@ where
         match operation() {
             Ok(result) => {
                 if attempt > 1 {
-                    debug!("Operation succeeded on attempt {}", attempt);
+                    trace!("Operation succeeded on attempt {}", attempt);
                 }
                 return Ok(result);
             }
@@ -45,7 +45,7 @@ where
 
                 if attempt < config.max_attempts {
                     let delay = calculate_backoff_delay(attempt - 1, &config);
-                    debug!("Retrying in {:?} (attempt {})", delay, attempt);
+                    trace!("Retrying in {:?} (attempt {})", delay, attempt);
                     sleep(delay).await;
                 }
             }

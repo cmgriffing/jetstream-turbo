@@ -2,7 +2,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, Semaphore};
-use tracing::debug;
+use tracing::trace;
 
 pub struct ClientPool<T> {
     clients: Arc<RwLock<Vec<PooledClient<T>>>>,
@@ -98,7 +98,7 @@ where
 
         let removed = initial_count - clients.len();
         if removed > 0 {
-            debug!("Cleaned up {} idle clients", removed);
+            trace!("Cleaned up {} idle clients", removed);
         }
     }
 
