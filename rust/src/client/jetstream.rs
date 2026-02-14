@@ -145,8 +145,13 @@ impl JetstreamClient {
 }
 
 fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
-    let message: JetstreamMessage =
-        serde_json::from_str(text).map_err(TurboError::JsonSerialization)?;
+    // Use simd-json for faster parsing (2-4x faster than serde_json)
+    // simd-json requires mutable input and uses unsafe SIMD operations internally
+    // The library handles safety internally through careful validation
+    let mut text = text.to_string();
+    let message: JetstreamMessage = unsafe {
+        simd_json::from_str(&mut text).map_err(TurboError::JsonDeserialization)?
+    };
 
     // Validate required fields
     if message.did.is_empty() {
