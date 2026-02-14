@@ -66,11 +66,42 @@ impl RedisStore {
     }
 
     pub async fn publish_batch(&self, records: &[EnrichedRecord]) -> TurboResult<Vec<String>> {
+        if records.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut client = self.client.lock().await;
         let mut message_ids = Vec::with_capacity(records.len());
 
+        // Batch Redis operations - acquire lock once for all records
         for record in records {
-            let message_id = self.publish_record(record).await?;
-            message_ids.push(message_id);
+            let message_json = serde_json::to_string(record)?;
+            let message_id = generate_message_id(record);
+            let at_uri = record.get_at_uri().unwrap_or_default();
+            let did = record.get_did().to_string();
+            let hydrated_at = record.processed_at.to_rfc3339();
+
+            let values = vec![
+                ("at_uri", at_uri),
+                ("did", did),
+                ("message", message_json),
+                ("hydrated_at", hydrated_at),
+            ];
+
+            let id: String = client
+                .xadd(self.stream_name.clone(), Some(&message_id), values)
+                .await
+                .map_err(TurboError::RedisOperation)?;
+
+            message_ids.push(id);
+        }
+
+        // Trim stream once after batch if needed
+        if let Some(max_len) = self.max_length {
+            let _: i64 = client
+                .xtrim(self.stream_name.clone(), max_len, false)
+                .await
+                .map_err(TurboError::RedisOperation)?;
         }
 
         info!(

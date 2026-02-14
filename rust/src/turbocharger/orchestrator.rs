@@ -104,6 +104,7 @@ impl TurboCharger {
         let mut last_stats = std::time::Instant::now();
         let mut buffer: Vec<JetstreamMessage> = Vec::with_capacity(BATCH_SIZE);
         let mut flush_interval = interval(Duration::from_millis(MAX_WAIT_TIME_MS));
+        let mut batch_buffer: Vec<JetstreamMessage> = Vec::with_capacity(BATCH_SIZE);
 
         tokio::pin!(message_stream);
 
@@ -117,8 +118,10 @@ impl TurboCharger {
                             }
 
                             if buffer.len() >= BATCH_SIZE {
-                                let batch = buffer.drain(..).collect::<Vec<_>>();
-                                self.spawn_batch_processing(batch);
+                                // Reuse batch_buffer to avoid allocation
+                                batch_buffer.clear();
+                                batch_buffer.extend(buffer.drain(..));
+                                self.spawn_batch_processing(std::mem::take(&mut batch_buffer));
                             }
                         }
                         Some(Err(e)) => {
@@ -129,8 +132,10 @@ impl TurboCharger {
                 }
                 _ = flush_interval.tick() => {
                     if !buffer.is_empty() {
-                        let batch = buffer.drain(..).collect::<Vec<_>>();
-                        self.spawn_batch_processing(batch);
+                        // Reuse batch_buffer to avoid allocation
+                        batch_buffer.clear();
+                        batch_buffer.extend(buffer.drain(..));
+                        self.spawn_batch_processing(std::mem::take(&mut batch_buffer));
                     }
                 }
             }
@@ -149,8 +154,7 @@ impl TurboCharger {
         }
 
         if !buffer.is_empty() {
-            let batch = buffer;
-            self.process_batch(batch).await?;
+            self.process_batch(buffer).await?;
         }
 
         error!("Jetstream stream ended unexpectedly");
@@ -210,9 +214,31 @@ impl TurboCharger {
         let enriched_records = hydrator.hydrate_batch(batch).await?;
         let count = enriched_records.len();
 
+        if count == 0 {
+            return Ok(0);
+        }
+
+        // Parallelize SQLite batch insert and Redis operations
+        let sqlite_records = enriched_records.clone();
+        let redis_records = enriched_records.clone();
+        
+        let sqlite_future = async {
+            sqlite_store.store_batch(&sqlite_records).await
+        };
+        
+        let redis_future = async {
+            redis_store.publish_batch(&redis_records).await
+        };
+        
+        // Run SQLite and Redis operations concurrently
+        let (sqlite_result, redis_result) = tokio::join!(sqlite_future, redis_future);
+        
+        // Check results
+        let _sqlite_ids = sqlite_result?;
+        let _redis_ids = redis_result?;
+        
+        // Broadcast records (fire and forget)
         for enriched in enriched_records {
-            let _record_id = sqlite_store.store_record(&enriched).await?;
-            let _message_id = redis_store.publish_record(&enriched).await?;
             let _ = broadcast_sender.send(enriched);
         }
 

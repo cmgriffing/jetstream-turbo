@@ -148,10 +148,24 @@ impl Hydrator {
     }
 
     async fn hydrate_messages(&self, messages: Vec<JetstreamMessage>) -> Vec<EnrichedRecord> {
-        let mut results = Vec::with_capacity(messages.len());
+        use futures::stream::FuturesUnordered;
+        use futures::StreamExt;
 
+        let mut futures = FuturesUnordered::new();
+
+        // Spawn all hydration tasks concurrently
         for message in messages {
-            match self.hydrate_message(message).await {
+            let hydrator = self.clone();
+            futures.push(async move {
+                hydrator.hydrate_message(message).await
+            });
+        }
+
+        let mut results = Vec::with_capacity(futures.len());
+
+        // Collect results as they complete
+        while let Some(result) = futures.next().await {
+            match result {
                 Ok(enriched) => results.push(enriched),
                 Err(e) => {
                     debug!("Failed to hydrate message: {}", e);
