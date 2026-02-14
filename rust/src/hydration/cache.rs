@@ -1,15 +1,13 @@
 use crate::models::bluesky::{BlueskyPost, BlueskyProfile};
-use lru::LruCache;
-use std::num::NonZeroUsize;
+use moka::sync::Cache as MokaCache;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tracing::trace;
 
 #[derive(Clone)]
 pub struct TurboCache {
-    user_cache: Arc<Mutex<LruCache<String, Arc<BlueskyProfile>>>>,
-    post_cache: Arc<Mutex<LruCache<String, Arc<BlueskyPost>>>>,
+    user_cache: MokaCache<String, Arc<BlueskyProfile>>,
+    post_cache: MokaCache<String, Arc<BlueskyPost>>,
     metrics: Arc<CacheMetrics>,
 }
 
@@ -38,26 +36,33 @@ impl Clone for CacheMetrics {
 
 impl TurboCache {
     pub fn new(user_cache_size: usize, post_cache_size: usize) -> Self {
-        let user_size =
-            NonZeroUsize::new(user_cache_size).unwrap_or(NonZeroUsize::new(1000).unwrap());
-        let post_size =
-            NonZeroUsize::new(post_cache_size).unwrap_or(NonZeroUsize::new(1000).unwrap());
+        let user_cache = MokaCache::builder()
+            .max_capacity(user_cache_size as u64)
+            .eviction_listener(|_k, _v, cause| {
+                let _ = cause.was_evicted();
+            })
+            .build();
+
+        let post_cache = MokaCache::builder()
+            .max_capacity(post_cache_size as u64)
+            .eviction_listener(|_k, _v, cause| {
+                let _ = cause.was_evicted();
+            })
+            .build();
 
         Self {
-            user_cache: Arc::new(Mutex::new(LruCache::new(user_size))),
-            post_cache: Arc::new(Mutex::new(LruCache::new(post_size))),
+            user_cache,
+            post_cache,
             metrics: Arc::new(CacheMetrics::default()),
         }
     }
 
     pub async fn get_user_profile(&self, did: &str) -> Option<Arc<BlueskyProfile>> {
-        let mut cache = self.user_cache.lock().await;
-
-        if let Some(profile) = cache.get(did) {
+        if let Some(profile) = self.user_cache.get(did) {
             self.metrics.user_hits.fetch_add(1, Ordering::Relaxed);
             self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
             trace!("Cache hit for user profile: {}", did);
-            return Some(Arc::clone(profile));
+            return Some(Arc::clone(&profile));
         }
 
         self.metrics.user_misses.fetch_add(1, Ordering::Relaxed);
@@ -67,42 +72,32 @@ impl TurboCache {
     }
 
     pub async fn get_user_profiles(&self, dids: &[String]) -> Vec<Option<Arc<BlueskyProfile>>> {
-        let mut cache = self.user_cache.lock().await;
-        let mut results = Vec::with_capacity(dids.len());
-
-        for did in dids {
-            if let Some(profile) = cache.get(did) {
-                self.metrics.user_hits.fetch_add(1, Ordering::Relaxed);
-                self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
-                results.push(Some(Arc::clone(profile)));
-            } else {
-                self.metrics.user_misses.fetch_add(1, Ordering::Relaxed);
-                self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
-                results.push(None);
-            }
-        }
-        results
+        dids.iter()
+            .map(|did| {
+                if let Some(profile) = self.user_cache.get(did) {
+                    self.metrics.user_hits.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
+                    Some(Arc::clone(&profile))
+                } else {
+                    self.metrics.user_misses.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
+                    None
+                }
+            })
+            .collect()
     }
 
     pub async fn set_user_profile(&self, did: String, profile: Arc<BlueskyProfile>) {
-        let mut cache = self.user_cache.lock().await;
-
-        if cache.len() >= cache.cap().into() {
-            self.metrics.cache_evictions.fetch_add(1, Ordering::Relaxed);
-        }
-
-        cache.put(did.clone(), profile);
+        self.user_cache.insert(did.clone(), profile);
         trace!("Cached user profile: {}", did);
     }
 
     pub async fn get_post(&self, uri: &str) -> Option<Arc<BlueskyPost>> {
-        let mut cache = self.post_cache.lock().await;
-
-        if let Some(post) = cache.get(uri) {
+        if let Some(post) = self.post_cache.get(uri) {
             self.metrics.post_hits.fetch_add(1, Ordering::Relaxed);
             self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
             trace!("Cache hit for post: {}", uri);
-            return Some(Arc::clone(post));
+            return Some(Arc::clone(&post));
         }
 
         self.metrics.post_misses.fetch_add(1, Ordering::Relaxed);
@@ -112,42 +107,32 @@ impl TurboCache {
     }
 
     pub async fn get_posts(&self, uris: &[String]) -> Vec<Option<Arc<BlueskyPost>>> {
-        let mut cache = self.post_cache.lock().await;
-        let mut results = Vec::with_capacity(uris.len());
-
-        for uri in uris {
-            if let Some(post) = cache.get(uri) {
-                self.metrics.post_hits.fetch_add(1, Ordering::Relaxed);
-                self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
-                results.push(Some(Arc::clone(post)));
-            } else {
-                self.metrics.post_misses.fetch_add(1, Ordering::Relaxed);
-                self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
-                results.push(None);
-            }
-        }
-        results
+        uris.iter()
+            .map(|uri| {
+                if let Some(post) = self.post_cache.get(uri) {
+                    self.metrics.post_hits.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
+                    Some(Arc::clone(&post))
+                } else {
+                    self.metrics.post_misses.fetch_add(1, Ordering::Relaxed);
+                    self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
+                    None
+                }
+            })
+            .collect()
     }
 
     pub async fn set_post(&self, uri: String, post: Arc<BlueskyPost>) {
-        let mut cache = self.post_cache.lock().await;
-
-        if cache.len() >= cache.cap().into() {
-            self.metrics.cache_evictions.fetch_add(1, Ordering::Relaxed);
-        }
-
-        cache.put(uri.clone(), post);
+        self.post_cache.insert(uri.clone(), post);
         trace!("Cached post: {}", uri);
     }
 
     pub async fn check_user_profiles_cached(&self, dids: &[String]) -> Vec<bool> {
-        let cache = self.user_cache.lock().await;
-        dids.iter().map(|did| cache.contains(did)).collect()
+        dids.iter().map(|did| self.user_cache.contains_key(did)).collect()
     }
 
     pub async fn check_posts_cached(&self, uris: &[String]) -> Vec<bool> {
-        let cache = self.post_cache.lock().await;
-        uris.iter().map(|uri| cache.contains(uri)).collect()
+        uris.iter().map(|uri| self.post_cache.contains_key(uri)).collect()
     }
 
     pub async fn get_metrics(&self) -> CacheMetricsSnapshot {
@@ -162,10 +147,8 @@ impl TurboCache {
     }
 
     pub async fn clear(&self) {
-        let mut user_cache = self.user_cache.lock().await;
-        let mut post_cache = self.post_cache.lock().await;
-        user_cache.clear();
-        post_cache.clear();
+        self.user_cache.invalidate_all();
+        self.post_cache.invalidate_all();
         trace!("Cleared all caches");
     }
 
