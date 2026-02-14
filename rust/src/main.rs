@@ -38,8 +38,8 @@ struct Args {
     shard: u32,
 
     /// Log level: trace, debug, info, warn, error
-    #[arg(long, default_value = "info")]
-    log_level: String,
+    #[arg(long)]
+    log_level: Option<String>,
 }
 
 #[tokio::main]
@@ -51,8 +51,17 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    // Default to warn in release mode, info in debug mode
+    let log_level = args.log_level.unwrap_or_else(|| {
+        if cfg!(debug_assertions) {
+            "info".to_string()
+        } else {
+            "warn".to_string()
+        }
+    });
+
     // Initialize tracing
-    init_tracing(&args.log_level)?;
+    init_tracing(&log_level)?;
 
     // Load configuration
     let settings = Settings::from_env()?;
