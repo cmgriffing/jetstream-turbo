@@ -221,22 +221,18 @@ impl TurboCharger {
         // Parallelize SQLite batch insert and Redis operations
         let sqlite_records = enriched_records.clone();
         let redis_records = enriched_records.clone();
-        
-        let sqlite_future = async {
-            sqlite_store.store_batch(&sqlite_records).await
-        };
-        
-        let redis_future = async {
-            redis_store.publish_batch(&redis_records).await
-        };
-        
+
+        let sqlite_future = async { sqlite_store.store_batch(&sqlite_records).await };
+
+        let redis_future = async { redis_store.publish_batch(&redis_records).await };
+
         // Run SQLite and Redis operations concurrently
         let (sqlite_result, redis_result) = tokio::join!(sqlite_future, redis_future);
-        
+
         // Check results
         let _sqlite_ids = sqlite_result?;
         let _redis_ids = redis_result?;
-        
+
         // Broadcast records (fire and forget)
         for enriched in enriched_records {
             let _ = broadcast_sender.send(enriched);

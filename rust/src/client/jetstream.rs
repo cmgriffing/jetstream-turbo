@@ -149,9 +149,8 @@ fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
     // simd-json requires mutable input and uses unsafe SIMD operations internally
     // The library handles safety internally through careful validation
     let mut text = text.to_string();
-    let message: JetstreamMessage = unsafe {
-        simd_json::from_str(&mut text).map_err(TurboError::JsonDeserialization)?
-    };
+    let message: JetstreamMessage =
+        unsafe { simd_json::from_str(&mut text).map_err(TurboError::JsonDeserialization)? };
 
     // Validate required fields
     if message.did.is_empty() {

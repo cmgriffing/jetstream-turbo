@@ -123,7 +123,9 @@ impl Hydrator {
         if let Ok(profiles) = profiles_result {
             for (did, maybe_profile) in uncached_dids.iter().zip(profiles) {
                 if let Some(profile) = maybe_profile {
-                    self.cache.set_user_profile(did.clone(), Arc::new(profile)).await;
+                    self.cache
+                        .set_user_profile(did.clone(), Arc::new(profile))
+                        .await;
                 }
             }
         }
@@ -157,9 +159,7 @@ impl Hydrator {
         // Spawn all hydration tasks concurrently
         for message in messages {
             let hydrator = self.clone();
-            futures.push(async move {
-                hydrator.hydrate_message(message).await
-            });
+            futures.push(async move { hydrator.hydrate_message(message).await });
         }
 
         let mut results = Vec::with_capacity(futures.len());

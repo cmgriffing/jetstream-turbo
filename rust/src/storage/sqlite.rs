@@ -135,7 +135,7 @@ impl SQLiteStore {
 
         // Use a transaction for better performance - much faster than individual inserts
         let mut ids = Vec::with_capacity(records.len());
-        
+
         // Begin transaction
         let mut tx = self.pool.begin().await?;
 
@@ -151,7 +151,7 @@ impl SQLiteStore {
 
         for (record, message_json, metadata_json) in prepared_records {
             let now = Utc::now();
-            
+
             let result = sqlx::query(
                 r#"
                 INSERT INTO records (

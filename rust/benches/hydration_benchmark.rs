@@ -99,7 +99,10 @@ fn bench_cache_operations(c: &mut Criterion) {
                         // Fill cache halfway
                         for i in 0..(cache_size / 2) {
                             cache
-                                .set_user_profile(format!("did:plc:test{}", i), Arc::new(profile.clone()))
+                                .set_user_profile(
+                                    format!("did:plc:test{}", i),
+                                    Arc::new(profile.clone()),
+                                )
                                 .await;
                         }
 

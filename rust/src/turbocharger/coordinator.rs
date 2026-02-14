@@ -23,7 +23,8 @@ impl TaskCoordinator {
         while *current >= self.max_concurrent {
             trace!(
                 "Waiting for task permit, current: {}, max: {}",
-                *current, self.max_concurrent
+                *current,
+                self.max_concurrent
             );
 
             // Simple backoff - in a real implementation this would use a proper semaphore

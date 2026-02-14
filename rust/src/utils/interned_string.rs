@@ -23,7 +23,9 @@ impl DidInterner {
 
         let interned: Arc<str> = Arc::from(did);
         let mut cache = self.cache.write().await;
-        cache.entry(did.to_string()).or_insert_with(|| interned.clone());
+        cache
+            .entry(did.to_string())
+            .or_insert_with(|| interned.clone());
         interned
     }
 
@@ -37,7 +39,9 @@ impl DidInterner {
 
         let interned: Arc<str> = Arc::from(did);
         let mut cache = self.cache.blocking_write();
-        cache.entry(did.to_string()).or_insert_with(|| interned.clone());
+        cache
+            .entry(did.to_string())
+            .or_insert_with(|| interned.clone());
         interned
     }
 
