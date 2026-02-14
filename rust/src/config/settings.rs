@@ -2,6 +2,12 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+fn default_max_concurrent_requests() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get() * 10)
+        .unwrap_or(100)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Settings {
     // Bluesky Authentication
@@ -60,7 +66,7 @@ impl Default for Settings {
             rotation_minutes: 1,
             http_port: 8080,
             batch_size: 10,
-            max_concurrent_requests: 100,
+            max_concurrent_requests: default_max_concurrent_requests(),
             cache_size_users: 20000,
             cache_size_posts: 20000,
             max_retries: 3,
