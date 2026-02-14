@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
-const REQUESTS_PER_SECOND: u32 = 6;
+const REQUESTS_PER_SECOND: u32 = 15;
 
 pub struct BlueskyClient {
     http_client: Client,

@@ -91,3 +91,7 @@ path = "src/main.rs"
 
 [profile.dev]
 debug = true
+
+[[bench]]
+name = "hydration_benchmark"
+harness = false

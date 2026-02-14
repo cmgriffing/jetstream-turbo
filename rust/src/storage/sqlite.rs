@@ -105,58 +105,57 @@ impl SQLiteStore {
             return Ok(vec![]);
         }
 
+        // Use a transaction for better performance - much faster than individual inserts
         let mut ids = Vec::with_capacity(records.len());
-
+        
         // Begin transaction
         let mut tx = self.pool.begin().await?;
 
-        for record in records {
-            let id = self.store_record_in_tx(&mut tx, record).await?;
-            ids.push(id);
+        // Pre-serialize JSON once per record
+        let prepared_records: Vec<_> = records
+            .iter()
+            .map(|record| {
+                let message_json = serde_json::to_value(&record.message).ok();
+                let metadata_json = serde_json::to_value(&record.hydrated_metadata).ok();
+                (record, message_json, metadata_json)
+            })
+            .collect();
+
+        for (record, message_json, metadata_json) in prepared_records {
+            let now = Utc::now();
+            
+            let result = sqlx::query(
+                r#"
+                INSERT INTO records (
+                    at_uri, did, time_us, message, message_metadata,
+                    created_at, hydrated_at, hydration_time_ms,
+                    api_calls_count, cache_hit_rate, cache_hits, cache_misses
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(record.get_at_uri())
+            .bind(record.get_did())
+            .bind(record.message.time_us.map(|t| t as i64))
+            .bind(message_json.as_ref().map(|v| v.to_string()))
+            .bind(metadata_json.as_ref().map(|v| v.to_string()))
+            .bind(record.processed_at.to_rfc3339())
+            .bind(now.to_rfc3339())
+            .bind(record.metrics.hydration_time_ms as i64)
+            .bind(record.metrics.api_calls_count as i64)
+            .bind(record.metrics.cache_hit_rate)
+            .bind(record.metrics.cache_hits as i64)
+            .bind(record.metrics.cache_misses as i64)
+            .execute(&mut *tx)
+            .await?;
+
+            ids.push(result.last_insert_rowid());
         }
 
-        // Commit transaction
+        // Commit transaction - this is much faster than auto-commit per row
         tx.commit().await?;
 
         info!("Stored batch of {} records", records.len());
         Ok(ids)
-    }
-
-    async fn store_record_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        record: &EnrichedRecord,
-    ) -> TurboResult<i64> {
-        let now = Utc::now();
-
-        let message_json = serde_json::to_value(&record.message)?;
-        let metadata_json = serde_json::to_value(&record.hydrated_metadata)?;
-
-        let result = sqlx::query(
-            r#"
-            INSERT INTO records (
-                at_uri, did, time_us, message, message_metadata,
-                created_at, hydrated_at, hydration_time_ms,
-                api_calls_count, cache_hit_rate, cache_hits, cache_misses
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
-        )
-        .bind(record.get_at_uri())
-        .bind(record.get_did())
-        .bind(record.message.time_us.map(|t| t as i64))
-        .bind(message_json.to_string())
-        .bind(metadata_json.to_string())
-        .bind(record.processed_at.to_rfc3339())
-        .bind(now.to_rfc3339())
-        .bind(record.metrics.hydration_time_ms as i64)
-        .bind(record.metrics.api_calls_count as i64)
-        .bind(record.metrics.cache_hit_rate)
-        .bind(record.metrics.cache_hits as i64)
-        .bind(record.metrics.cache_misses as i64)
-        .execute(&mut **tx)
-        .await?;
-
-        Ok(result.last_insert_rowid())
     }
 
     pub async fn get_record_by_uri(&self, at_uri: &str) -> TurboResult<Option<EnrichedRecord>> {

@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use jetstream_turbo::hydration::TurboCache;
-use jetstream_turbo::models::bluesky::BlueskyProfile;
+use jetstream_turbo_rs::hydration::TurboCache;
+use jetstream_turbo_rs::models::bluesky::BlueskyProfile;
 
 fn bench_cache_operations(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -16,9 +16,9 @@ fn bench_cache_operations(c: &mut Criterion) {
                     description: None,
                     avatar: None,
                     banner: None,
-                    followers_count: 1000,
-                    follows_count: 500,
-                    posts_count: 250,
+                    followers_count: Some(1000),
+                    follows_count: Some(500),
+                    posts_count: Some(250),
                     indexed_at: None,
                     created_at: None,
                     labels: None,
@@ -43,9 +43,9 @@ fn bench_cache_operations(c: &mut Criterion) {
                 description: None,
                 avatar: None,
                 banner: None,
-                followers_count: 1000,
-                follows_count: 500,
-                posts_count: 250,
+                followers_count: Some(1000),
+                follows_count: Some(500),
+                posts_count: Some(250),
                 indexed_at: None,
                 created_at: None,
                 labels: None,
@@ -87,9 +87,9 @@ fn bench_cache_operations(c: &mut Criterion) {
                             description: None,
                             avatar: None,
                             banner: None,
-                            followers_count: 1000,
-                            follows_count: 500,
-                            posts_count: 250,
+                            followers_count: Some(1000),
+                            follows_count: Some(500),
+                            posts_count: Some(250),
                             indexed_at: None,
                             created_at: None,
                             labels: None,

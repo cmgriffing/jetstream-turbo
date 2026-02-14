@@ -1,204 +1,208 @@
 use crate::models::bluesky::{BlueskyPost, BlueskyProfile};
-use dashmap::DashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use lru::LruCache;
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 use tracing::{debug, trace};
 
 #[derive(Clone)]
 pub struct TurboCache {
-    user_cache: Arc<DashMap<String, BlueskyProfile>>,
-    post_cache: Arc<DashMap<String, BlueskyPost>>,
-    user_cache_size: usize,
-    post_cache_size: usize,
-    user_count: Arc<AtomicUsize>,
-    post_count: Arc<AtomicUsize>,
-    metrics: Arc<RwLock<CacheMetrics>>,
+    user_cache: Arc<Mutex<LruCache<String, BlueskyProfile>>>,
+    post_cache: Arc<Mutex<LruCache<String, BlueskyPost>>>,
+    metrics: Arc<CacheMetrics>,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct CacheMetrics {
-    pub user_hits: u64,
-    pub user_misses: u64,
-    pub post_hits: u64,
-    pub post_misses: u64,
-    pub total_requests: u64,
-    pub cache_evictions: u64,
+    pub user_hits: AtomicU64,
+    pub user_misses: AtomicU64,
+    pub post_hits: AtomicU64,
+    pub post_misses: AtomicU64,
+    pub total_requests: AtomicU64,
+    pub cache_evictions: AtomicU64,
+}
+
+impl Clone for CacheMetrics {
+    fn clone(&self) -> Self {
+        Self {
+            user_hits: AtomicU64::new(self.user_hits.load(Ordering::Relaxed)),
+            user_misses: AtomicU64::new(self.user_misses.load(Ordering::Relaxed)),
+            post_hits: AtomicU64::new(self.post_hits.load(Ordering::Relaxed)),
+            post_misses: AtomicU64::new(self.post_misses.load(Ordering::Relaxed)),
+            total_requests: AtomicU64::new(self.total_requests.load(Ordering::Relaxed)),
+            cache_evictions: AtomicU64::new(self.cache_evictions.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 impl TurboCache {
     pub fn new(user_cache_size: usize, post_cache_size: usize) -> Self {
+        let user_size = NonZeroUsize::new(user_cache_size).unwrap_or(NonZeroUsize::new(1000).unwrap());
+        let post_size = NonZeroUsize::new(post_cache_size).unwrap_or(NonZeroUsize::new(1000).unwrap());
+        
         Self {
-            user_cache: Arc::new(DashMap::new()),
-            post_cache: Arc::new(DashMap::new()),
-            user_cache_size,
-            post_cache_size,
-            user_count: Arc::new(AtomicUsize::new(0)),
-            post_count: Arc::new(AtomicUsize::new(0)),
-            metrics: Arc::new(RwLock::new(CacheMetrics::default())),
+            user_cache: Arc::new(Mutex::new(LruCache::new(user_size))),
+            post_cache: Arc::new(Mutex::new(LruCache::new(post_size))),
+            metrics: Arc::new(CacheMetrics::default()),
         }
     }
 
     pub async fn get_user_profile(&self, did: &str) -> Option<BlueskyProfile> {
-        if let Some(profile) = self.user_cache.get(did) {
-            self.update_metrics(|m| m.user_hits += 1).await;
+        let mut cache = self.user_cache.lock().await;
+        
+        if let Some(profile) = cache.get(did) {
+            self.metrics.user_hits.fetch_add(1, Ordering::Relaxed);
+            self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
             trace!("Cache hit for user profile: {}", did);
             return Some(profile.clone());
         }
 
-        self.update_metrics(|m| m.user_misses += 1).await;
+        self.metrics.user_misses.fetch_add(1, Ordering::Relaxed);
+        self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
         trace!("Cache miss for user profile: {}", did);
         None
     }
 
     pub async fn get_user_profiles(&self, dids: &[String]) -> Vec<Option<BlueskyProfile>> {
+        let mut cache = self.user_cache.lock().await;
         let mut results = Vec::with_capacity(dids.len());
+        
         for did in dids {
-            results.push(self.get_user_profile(did).await);
+            if let Some(profile) = cache.get(did) {
+                self.metrics.user_hits.fetch_add(1, Ordering::Relaxed);
+                self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
+                results.push(Some(profile.clone()));
+            } else {
+                self.metrics.user_misses.fetch_add(1, Ordering::Relaxed);
+                self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
+                results.push(None);
+            }
         }
         results
     }
 
     pub async fn set_user_profile(&self, did: String, profile: BlueskyProfile) {
-        let current_count = self.user_count.load(Ordering::Relaxed);
-
-        if current_count >= self.user_cache_size {
-            self.evict_oldest_users(100);
+        let mut cache = self.user_cache.lock().await;
+        
+        if cache.len() >= cache.cap().into() {
+            self.metrics.cache_evictions.fetch_add(1, Ordering::Relaxed);
         }
-
-        if self.user_cache.insert(did.clone(), profile).is_none() {
-            self.user_count.fetch_add(1, Ordering::Relaxed);
-        }
-
+        
+        cache.put(did.clone(), profile);
         debug!("Cached user profile: {}", did);
     }
 
-    fn evict_oldest_users(&self, count: usize) {
-        let evict_count = count.min(self.user_cache.len());
-        if evict_count == 0 {
-            return;
-        }
-
-        let keys: Vec<String> = self
-            .user_cache
-            .iter()
-            .take(evict_count)
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        for key in keys {
-            if self.user_cache.remove(&key).is_some() {
-                self.user_count.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-    }
-
     pub async fn get_post(&self, uri: &str) -> Option<BlueskyPost> {
-        if let Some(post) = self.post_cache.get(uri) {
-            self.update_metrics(|m| m.post_hits += 1).await;
+        let mut cache = self.post_cache.lock().await;
+        
+        if let Some(post) = cache.get(uri) {
+            self.metrics.post_hits.fetch_add(1, Ordering::Relaxed);
+            self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
             trace!("Cache hit for post: {}", uri);
             return Some(post.clone());
         }
 
-        self.update_metrics(|m| m.post_misses += 1).await;
+        self.metrics.post_misses.fetch_add(1, Ordering::Relaxed);
+        self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
         trace!("Cache miss for post: {}", uri);
         None
     }
 
     pub async fn get_posts(&self, uris: &[String]) -> Vec<Option<BlueskyPost>> {
+        let mut cache = self.post_cache.lock().await;
         let mut results = Vec::with_capacity(uris.len());
+        
         for uri in uris {
-            results.push(self.get_post(uri).await);
+            if let Some(post) = cache.get(uri) {
+                self.metrics.post_hits.fetch_add(1, Ordering::Relaxed);
+                self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
+                results.push(Some(post.clone()));
+            } else {
+                self.metrics.post_misses.fetch_add(1, Ordering::Relaxed);
+                self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
+                results.push(None);
+            }
         }
         results
     }
 
     pub async fn set_post(&self, uri: String, post: BlueskyPost) {
-        let current_count = self.post_count.load(Ordering::Relaxed);
-
-        if current_count >= self.post_cache_size {
-            self.evict_oldest_posts(100);
+        let mut cache = self.post_cache.lock().await;
+        
+        if cache.len() >= cache.cap().into() {
+            self.metrics.cache_evictions.fetch_add(1, Ordering::Relaxed);
         }
-
-        if self.post_cache.insert(uri.clone(), post).is_none() {
-            self.post_count.fetch_add(1, Ordering::Relaxed);
-        }
-
+        
+        cache.put(uri.clone(), post);
         debug!("Cached post: {}", uri);
     }
 
-    fn evict_oldest_posts(&self, count: usize) {
-        let evict_count = count.min(self.post_cache.len());
-        if evict_count == 0 {
-            return;
-        }
-
-        let keys: Vec<String> = self
-            .post_cache
-            .iter()
-            .take(evict_count)
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        for key in keys {
-            if self.post_cache.remove(&key).is_some() {
-                self.post_count.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-    }
-
     pub async fn check_user_profiles_cached(&self, dids: &[String]) -> Vec<bool> {
+        let cache = self.user_cache.lock().await;
         dids.iter()
-            .map(|did| self.user_cache.contains_key(did))
+            .map(|did| cache.contains(did))
             .collect()
     }
 
     pub async fn check_posts_cached(&self, uris: &[String]) -> Vec<bool> {
+        let cache = self.post_cache.lock().await;
         uris.iter()
-            .map(|uri| self.post_cache.contains_key(uri))
+            .map(|uri| cache.contains(uri))
             .collect()
     }
 
-    pub async fn get_metrics(&self) -> CacheMetrics {
-        self.metrics.read().await.clone()
+    pub async fn get_metrics(&self) -> CacheMetricsSnapshot {
+        CacheMetricsSnapshot {
+            user_hits: self.metrics.user_hits.load(Ordering::Relaxed),
+            user_misses: self.metrics.user_misses.load(Ordering::Relaxed),
+            post_hits: self.metrics.post_hits.load(Ordering::Relaxed),
+            post_misses: self.metrics.post_misses.load(Ordering::Relaxed),
+            total_requests: self.metrics.total_requests.load(Ordering::Relaxed),
+            cache_evictions: self.metrics.cache_evictions.load(Ordering::Relaxed),
+        }
     }
 
     pub async fn clear(&self) {
-        self.user_cache.clear();
-        self.post_cache.clear();
-        self.user_count.store(0, Ordering::Relaxed);
-        self.post_count.store(0, Ordering::Relaxed);
+        let mut user_cache = self.user_cache.lock().await;
+        let mut post_cache = self.post_cache.lock().await;
+        user_cache.clear();
+        post_cache.clear();
         debug!("Cleared all caches");
     }
 
     pub async fn cleanup_concurrent(&self, _max_age: std::time::Duration) {}
 
     pub async fn get_hit_rates(&self) -> (f64, f64) {
-        let metrics = self.metrics.read().await;
+        let user_hits = self.metrics.user_hits.load(Ordering::Relaxed);
+        let user_misses = self.metrics.user_misses.load(Ordering::Relaxed);
+        let post_hits = self.metrics.post_hits.load(Ordering::Relaxed);
+        let post_misses = self.metrics.post_misses.load(Ordering::Relaxed);
 
-        let user_hit_rate = if metrics.user_hits + metrics.user_misses > 0 {
-            metrics.user_hits as f64 / (metrics.user_hits + metrics.user_misses) as f64
+        let user_hit_rate = if user_hits + user_misses > 0 {
+            user_hits as f64 / (user_hits + user_misses) as f64
         } else {
             0.0
         };
 
-        let post_hit_rate = if metrics.post_hits + metrics.post_misses > 0 {
-            metrics.post_hits as f64 / (metrics.post_hits + metrics.post_misses) as f64
+        let post_hit_rate = if post_hits + post_misses > 0 {
+            post_hits as f64 / (post_hits + post_misses) as f64
         } else {
             0.0
         };
 
         (user_hit_rate, post_hit_rate)
     }
+}
 
-    async fn update_metrics<F>(&self, updater: F)
-    where
-        F: FnOnce(&mut CacheMetrics),
-    {
-        let mut metrics = self.metrics.write().await;
-        updater(&mut metrics);
-        metrics.total_requests += 1;
-    }
+#[derive(Debug, Clone, Default)]
+pub struct CacheMetricsSnapshot {
+    pub user_hits: u64,
+    pub user_misses: u64,
+    pub post_hits: u64,
+    pub post_misses: u64,
+    pub total_requests: u64,
+    pub cache_evictions: u64,
 }
 
 #[cfg(test)]

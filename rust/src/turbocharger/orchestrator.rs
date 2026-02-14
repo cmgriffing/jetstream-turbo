@@ -15,8 +15,8 @@ use tokio::sync::{broadcast, Semaphore};
 use tokio::time::interval;
 use tracing::{debug, error, info};
 
-const BATCH_SIZE: usize = 10;
-const MAX_WAIT_TIME_MS: u64 = 100;
+const BATCH_SIZE: usize = 100;
+const MAX_WAIT_TIME_MS: u64 = 50;
 
 pub struct TurboCharger {
     settings: Settings,
