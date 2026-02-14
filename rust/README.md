@@ -317,6 +317,69 @@ TURBO_MAX_CONCURRENT=100
 - **Benchmarks:** Performance validation
 - **Property Tests:** Invariant checking
 
+## 📏 Benchmarking
+
+This project includes a comprehensive benchmark suite to track performance of hot-path functions and prevent regressions.
+
+### Running Benchmarks
+
+```bash
+# Run all benchmarks
+cargo bench --bench hydration_benchmark
+
+# Run a specific benchmark
+cargo bench --bench hydration_benchmark -- cache_user_profile_get
+```
+
+### Checking for Regressions
+
+Before committing changes, run the benchmark check script to detect any performance regressions:
+
+```bash
+./scripts/benchmarks/check.sh
+```
+
+This compares current results against stored baselines. If any benchmark regresses beyond the 2% threshold, the check will fail and block the commit.
+
+### Updating Baselines
+
+If a regression is intentional (e.g., you made a performance optimization that temporarily regressed another metric), you can update the baselines:
+
+```bash
+./scripts/benchmarks/update.sh
+```
+
+Then commit the updated baseline files.
+
+### CI Protection
+
+Benchmarks run automatically on every PR and push to main via GitHub Actions. The workflow:
+1. Runs all benchmarks
+2. Compares against baselines
+3. Fails if any benchmark regresses beyond 2%
+4. Posts a comment on the PR with regression details
+
+### Benchmark Categories
+
+The benchmark suite covers these hot-path areas:
+
+| Category | Benchmarks |
+|----------|------------|
+| Cache | profile get/set, post get/set, bulk operations, hit rates |
+| Serialization | JSON serialize/deserialize (profile, message, enriched record) |
+| SQLite | store record, batch store |
+| Batch | message creation, record creation, profile creation |
+
+### Hot Path Functions
+
+The following functions are benchmarked as they represent the critical path in data processing:
+
+- `TurboCache::get_user_profile` / `set_user_profile`
+- `TurboCache::get_post` / `set_post`
+- `TurboCache::get_user_profiles` / `get_posts` (bulk)
+- `SQLiteStore::store_record`
+- Serialization/deserialization of `BlueskyProfile`, `JetstreamMessage`, `EnrichedRecord`
+
 ## 📈 Future Enhancements
 
 ### Immediate Improvements
