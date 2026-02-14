@@ -27,6 +27,9 @@ impl SQLiteStore {
 
         let pool = SqlitePool::connect_with(connect_options).await?;
 
+        // Apply performance optimizations
+        Self::apply_pragmas(&pool).await?;
+
         // Initialize schema
         Self::initialize_schema(&pool).await?;
 
@@ -62,6 +65,31 @@ impl SQLiteStore {
         .await?;
 
         debug!("SQLite schema initialized");
+        Ok(())
+    }
+
+    async fn apply_pragmas(pool: &SqlitePool) -> TurboResult<()> {
+        // synchronous = NORMAL: Good performance with WAL mode, still safe
+        sqlx::query("PRAGMA synchronous = NORMAL")
+            .execute(pool)
+            .await?;
+
+        // cache_size = -64000: 64MB page cache (negative = KB units)
+        sqlx::query("PRAGMA cache_size = -64000")
+            .execute(pool)
+            .await?;
+
+        // temp_store = MEMORY: Keep temp tables/indexes in memory
+        sqlx::query("PRAGMA temp_store = MEMORY")
+            .execute(pool)
+            .await?;
+
+        // mmap_size = 268435456: 256MB memory-mapped I/O for faster reads
+        sqlx::query("PRAGMA mmap_size = 268435456")
+            .execute(pool)
+            .await?;
+
+        info!("Applied SQLite performance PRAGMAs");
         Ok(())
     }
 
