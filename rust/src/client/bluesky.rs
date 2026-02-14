@@ -2,6 +2,7 @@ use crate::models::{
     bluesky::{BlueskyPost, BlueskyProfile, GetPostsBulkResponse, GetProfilesResponse},
     errors::{TurboError, TurboResult},
 };
+use crate::utils::serde_utils::string_utils::is_valid_at_uri;
 use governor::{Quota, RateLimiter};
 use reqwest::{Client, StatusCode};
 use std::num::NonZeroU32;
@@ -151,9 +152,25 @@ impl BlueskyClient {
             return Ok(vec![]);
         }
 
-        let mut all_posts: Vec<Option<BlueskyPost>> = Vec::with_capacity(uris.len());
+        let valid_uris: Vec<String> = uris
+            .iter()
+            .filter(|uri| !uri.is_empty() && is_valid_at_uri(uri))
+            .cloned()
+            .collect();
 
-        for chunk in uris.chunks(25) {
+        let filtered_count = uris.len() - valid_uris.len();
+        if filtered_count > 0 {
+            warn!("Filtered {} invalid URIs out of {}", filtered_count, uris.len());
+            debug!("Invalid URIs: {:?}", uris.iter().filter(|u| !is_valid_at_uri(u)).collect::<Vec<_>>());
+        }
+
+        if valid_uris.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut all_posts: Vec<Option<BlueskyPost>> = Vec::with_capacity(valid_uris.len());
+
+        for chunk in valid_uris.chunks(25) {
             let chunk_posts = self.fetch_posts_bulk(chunk).await?;
             all_posts.extend(chunk_posts);
         }

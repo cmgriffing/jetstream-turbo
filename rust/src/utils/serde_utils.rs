@@ -34,7 +34,16 @@ pub mod string_utils {
 
     /// Check if string is a valid AT-URI
     pub fn is_valid_at_uri(uri: &str) -> bool {
-        uri.starts_with("at://") && uri.split('/').count() >= 4
+        let trimmed = uri.trim();
+        if !trimmed.starts_with("at://") {
+            return false;
+        }
+        let parts: Vec<&str> = trimmed.split('/').collect();
+        if parts.len() < 4 {
+            return false;
+        }
+        let did_part = parts[2];
+        did_part.starts_with("did:plc:")
     }
 
     /// Truncate string with ellipsis
