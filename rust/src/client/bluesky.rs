@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{error, info, instrument, trace, warn};
 
-const REQUESTS_PER_SECOND_MS: u64 = 1000 / 10;
+const REQUESTS_PER_SECOND_MS: u64 = 1000 / 14;
 
 async fn handle_rate_limit_response(
     response: &reqwest::Response,
@@ -87,7 +87,7 @@ impl BlueskyClient {
         dids: &[String],
     ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
         tracing::Span::current().record("count", dids.len());
-        
+
         let mut profiles: Vec<Option<BlueskyProfile>> = Vec::with_capacity(dids.len());
         let chunks = dids.chunks(25).count();
         tracing::Span::current().record("chunks", chunks);
@@ -191,7 +191,11 @@ impl BlueskyClient {
         }
     }
 
-    #[instrument(name = "bulk_fetch_posts", skip(self, uris), fields(count, valid_count, chunks))]
+    #[instrument(
+        name = "bulk_fetch_posts",
+        skip(self, uris),
+        fields(count, valid_count, chunks)
+    )]
     pub async fn bulk_fetch_posts(&self, uris: &[String]) -> TurboResult<Vec<Option<BlueskyPost>>> {
         if uris.is_empty() {
             return Ok(vec![]);
@@ -208,7 +212,7 @@ impl BlueskyClient {
 
         let valid_count = valid_uris.len();
         tracing::Span::current().record("valid_count", valid_count);
-        
+
         let filtered_count = uris.len() - valid_uris.len();
         if filtered_count > 0 {
             warn!(
@@ -229,7 +233,7 @@ impl BlueskyClient {
         }
 
         let mut all_posts: Vec<Option<BlueskyPost>> = Vec::with_capacity(valid_uris.len());
-        
+
         let chunks = valid_uris.chunks(25).count();
         tracing::Span::current().record("chunks", chunks);
 
