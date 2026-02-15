@@ -9,7 +9,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tracing::{error, info, trace, warn};
+use tracing::{error, info, instrument, trace, warn};
 
 const REQUESTS_PER_SECOND_MS: u64 = 1000 / 10;
 
@@ -81,11 +81,16 @@ impl BlueskyClient {
         }
     }
 
+    #[instrument(name = "bulk_fetch_profiles", skip(self, dids), fields(count, chunks))]
     pub async fn bulk_fetch_profiles(
         &self,
         dids: &[String],
     ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
+        tracing::Span::current().record("count", dids.len());
+        
         let mut profiles: Vec<Option<BlueskyProfile>> = Vec::with_capacity(dids.len());
+        let chunks = dids.chunks(25).count();
+        tracing::Span::current().record("chunks", chunks);
 
         // Process in chunks of 25 (Bluesky API limit)
         for chunk in dids.chunks(25) {
@@ -186,10 +191,14 @@ impl BlueskyClient {
         }
     }
 
+    #[instrument(name = "bulk_fetch_posts", skip(self, uris), fields(count, valid_count, chunks))]
     pub async fn bulk_fetch_posts(&self, uris: &[String]) -> TurboResult<Vec<Option<BlueskyPost>>> {
         if uris.is_empty() {
             return Ok(vec![]);
         }
+
+        let count = uris.len();
+        tracing::Span::current().record("count", count);
 
         let valid_uris: Vec<String> = uris
             .iter()
@@ -197,6 +206,9 @@ impl BlueskyClient {
             .cloned()
             .collect();
 
+        let valid_count = valid_uris.len();
+        tracing::Span::current().record("valid_count", valid_count);
+        
         let filtered_count = uris.len() - valid_uris.len();
         if filtered_count > 0 {
             warn!(
@@ -217,6 +229,9 @@ impl BlueskyClient {
         }
 
         let mut all_posts: Vec<Option<BlueskyPost>> = Vec::with_capacity(valid_uris.len());
+        
+        let chunks = valid_uris.chunks(25).count();
+        tracing::Span::current().record("chunks", chunks);
 
         for chunk in valid_uris.chunks(25) {
             let chunk_posts = self.fetch_posts_bulk(chunk).await?;

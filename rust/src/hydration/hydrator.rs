@@ -3,7 +3,7 @@ use crate::hydration::TurboCache;
 use crate::models::{enriched::EnrichedRecord, jetstream::JetstreamMessage, TurboResult};
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{info, trace};
+use tracing::{info, instrument, trace};
 
 #[derive(Clone)]
 pub struct Hydrator {
@@ -19,19 +19,28 @@ impl Hydrator {
         }
     }
 
+    #[instrument(name = "hydrate_message", skip(self, message), fields(did, at_uri, cache_hit))]
     pub async fn hydrate_message(&self, message: JetstreamMessage) -> TurboResult<EnrichedRecord> {
         let start_time = Instant::now();
         let mut enriched = EnrichedRecord::new(message.clone());
 
-        // Extract author DID and mentioned DIDs
         let author_did = message.extract_did();
+        let at_uri = message.extract_at_uri().map(|s| s.to_string());
+
+        tracing::Span::current().record("did", &author_did);
+        if let Some(ref uri) = at_uri {
+            tracing::Span::current().record("at_uri", uri);
+        }
+
         let mentioned_dids = message.extract_mentioned_dids();
 
-        // Fetch author profile if not cached
         if let Some(_at_uri) = message.extract_at_uri() {
             let mut author_profile = self.cache.get_user_profile(author_did).await;
 
-            if author_profile.is_none() {
+            let hit = author_profile.is_some();
+            tracing::Span::current().record("cache_hit", hit);
+
+            if !hit {
                 let profiles = self
                     .bluesky_client
                     .bulk_fetch_profiles(&[author_did.to_string()])
@@ -63,11 +72,15 @@ impl Hydrator {
         Ok(enriched)
     }
 
+    #[instrument(name = "hydrate_batch", skip(self, messages), fields(message_count, unique_dids, unique_uris, cache_check_time_ms, api_fetch_time_ms, hydrate_time_ms, total_time_ms))]
     pub async fn hydrate_batch(
         &self,
         messages: Vec<JetstreamMessage>,
     ) -> TurboResult<Vec<EnrichedRecord>> {
         let start_time = Instant::now();
+
+        let message_count = messages.len();
+        tracing::Span::current().record("message_count", message_count);
 
         let mut unique_dids = std::collections::HashSet::new();
         let mut unique_uris = std::collections::HashSet::new();
@@ -82,11 +95,19 @@ impl Hydrator {
             }
         }
 
+        let unique_dids_count = unique_dids.len();
+        let unique_uris_count = unique_uris.len();
+        tracing::Span::current().record("unique_dids", unique_dids_count);
+        tracing::Span::current().record("unique_uris", unique_uris_count);
+
         let dids: Vec<String> = unique_dids.into_iter().collect();
         let uris: Vec<String> = unique_uris.into_iter().collect();
 
+        let cache_check_start = Instant::now();
         let cached_profile_flags = self.cache.check_user_profiles_cached(&dids).await;
         let cached_post_flags = self.cache.check_posts_cached(&uris).await;
+        let cache_check_time = cache_check_start.elapsed().as_millis() as u64;
+        tracing::Span::current().record("cache_check_time_ms", cache_check_time);
 
         let uncached_dids: Vec<String> = dids
             .iter()
@@ -120,6 +141,9 @@ impl Hydrator {
 
         let (profiles_result, posts_result) = tokio::join!(profiles_future, posts_future);
 
+        let api_fetch_time = cache_check_start.elapsed().as_millis() as u64 - cache_check_time;
+        tracing::Span::current().record("api_fetch_time_ms", api_fetch_time);
+
         if let Ok(profiles) = profiles_result {
             for (did, maybe_profile) in uncached_dids.iter().zip(profiles) {
                 if let Some(profile) = maybe_profile {
@@ -138,13 +162,18 @@ impl Hydrator {
             }
         }
 
+        let hydrate_start = Instant::now();
         let results = self.hydrate_messages(messages).await;
+        let hydrate_time = hydrate_start.elapsed().as_millis() as u64;
+        tracing::Span::current().record("hydrate_time_ms", hydrate_time);
 
-        let elapsed = start_time.elapsed();
+        let total_time = start_time.elapsed().as_millis() as u64;
+        tracing::Span::current().record("total_time_ms", total_time);
+
         info!(
             "Hydrated batch of {} messages in {:?}",
             results.len(),
-            elapsed
+            total_time
         );
 
         Ok(results)

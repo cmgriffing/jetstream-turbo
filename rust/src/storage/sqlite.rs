@@ -3,7 +3,8 @@ use chrono::{DateTime, Utc};
 use simd_json::to_string as simd_json_to_string;
 use sqlx::{sqlite::SqliteConnectOptions, sqlite::SqliteJournalMode, Row, SqlitePool};
 use std::path::Path;
-use tracing::{info, trace};
+use std::time::Instant;
+use tracing::{info, instrument, trace};
 
 pub struct SQLiteStore {
     pool: SqlitePool,
@@ -94,7 +95,12 @@ impl SQLiteStore {
         Ok(())
     }
 
+    #[instrument(name = "sqlite_store_record", skip(self, record), fields(at_uri, duration_ms))]
     pub async fn store_record(&self, record: &EnrichedRecord) -> TurboResult<i64> {
+        let start = Instant::now();
+        let at_uri = record.get_at_uri().unwrap_or_default();
+        tracing::Span::current().record("at_uri", &at_uri);
+        
         let now = Utc::now();
 
         let message_json = simd_json_to_string(&record.message).unwrap();
@@ -125,14 +131,22 @@ impl SQLiteStore {
         .await?;
 
         let id = result.last_insert_rowid();
+        let duration = start.elapsed().as_millis() as u64;
+        tracing::Span::current().record("duration_ms", duration);
         trace!("Stored record with ID: {}", id);
         Ok(id)
     }
 
+    #[instrument(name = "sqlite_store_batch", skip(self, records), fields(count, duration_ms))]
     pub async fn store_batch(&self, records: &[EnrichedRecord]) -> TurboResult<Vec<i64>> {
+        let start = Instant::now();
+        
         if records.is_empty() {
             return Ok(vec![]);
         }
+
+        let count = records.len();
+        tracing::Span::current().record("count", count);
 
         let mut tx = self.pool.begin().await?;
         let now = Utc::now();
@@ -177,6 +191,8 @@ impl SQLiteStore {
             .map(|i| last_id - (records.len() - 1 - i) as i64)
             .collect();
 
+        let duration = start.elapsed().as_millis() as u64;
+        tracing::Span::current().record("duration_ms", duration);
         trace!("Stored batch of {} records", records.len());
         Ok(ids)
     }
