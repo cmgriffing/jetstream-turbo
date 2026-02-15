@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{error, info, instrument, trace, warn};
 
-const REQUESTS_PER_SECOND_MS: u64 = 1000 / 14;
+const REQUESTS_PER_SECOND_MS: u64 = 1000 / 10;
 
 async fn handle_rate_limit_response(
     response: &reqwest::Response,
