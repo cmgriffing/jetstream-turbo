@@ -89,11 +89,11 @@ impl BlueskyClient {
         tracing::Span::current().record("count", dids.len());
 
         let mut profiles: Vec<Option<BlueskyProfile>> = Vec::with_capacity(dids.len());
-        let chunks = dids.chunks(25).count();
+        let chunks = dids.chunks(100).count();
         tracing::Span::current().record("chunks", chunks);
 
-        // Process in chunks of 25 (Bluesky API limit)
-        for chunk in dids.chunks(25) {
+        // Process in chunks of 100
+        for chunk in dids.chunks(100) {
             let chunk_profiles = self.fetch_profiles_batch(chunk).await?;
             profiles.extend(chunk_profiles);
         }
@@ -234,10 +234,10 @@ impl BlueskyClient {
 
         let mut all_posts: Vec<Option<BlueskyPost>> = Vec::with_capacity(valid_uris.len());
 
-        let chunks = valid_uris.chunks(25).count();
+        let chunks = valid_uris.chunks(100).count();
         tracing::Span::current().record("chunks", chunks);
 
-        for chunk in valid_uris.chunks(25) {
+        for chunk in valid_uris.chunks(100) {
             let chunk_posts = self.fetch_posts_bulk(chunk).await?;
             all_posts.extend(chunk_posts);
         }
