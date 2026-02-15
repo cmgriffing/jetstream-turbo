@@ -6,12 +6,14 @@ use crate::utils::serde_utils::string_utils::is_valid_at_uri;
 use governor::{Quota, RateLimiter};
 use reqwest::{Client, StatusCode};
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{error, info, instrument, trace, warn};
 
-const REQUESTS_PER_SECOND_MS: u64 = 1000 / 10;
+const REQUESTS_PER_SECOND_MS: u64 = 1000 / 12;
+const BATCH_SIZE: usize = 25;
 
 async fn handle_rate_limit_response(
     response: &reqwest::Response,
@@ -49,6 +51,10 @@ pub struct BlueskyClient {
     #[allow(dead_code)]
     retry_delay_ms: u64,
     retry_delay: Duration,
+    profile_batches_total: AtomicU64,
+    profile_batches_partial: AtomicU64,
+    post_batches_total: AtomicU64,
+    post_batches_partial: AtomicU64,
 }
 
 impl BlueskyClient {
@@ -78,6 +84,10 @@ impl BlueskyClient {
             max_retries: 3,
             retry_delay_ms: 200,
             retry_delay: Duration::from_millis(200),
+            profile_batches_total: AtomicU64::new(0),
+            profile_batches_partial: AtomicU64::new(0),
+            post_batches_total: AtomicU64::new(0),
+            post_batches_partial: AtomicU64::new(0),
         }
     }
 
@@ -89,14 +99,20 @@ impl BlueskyClient {
         tracing::Span::current().record("count", dids.len());
 
         let mut profiles: Vec<Option<BlueskyProfile>> = Vec::with_capacity(dids.len());
-        let chunks = dids.chunks(100).count();
+        let chunks = dids.chunks(BATCH_SIZE).count();
         tracing::Span::current().record("chunks", chunks);
 
-        // Process in chunks of 100
-        for chunk in dids.chunks(100) {
+        // Process in chunks of BATCH_SIZE
+        for chunk in dids.chunks(BATCH_SIZE) {
+            self.profile_batches_total.fetch_add(1, Ordering::Relaxed);
+            if chunk.len() < BATCH_SIZE {
+                self.profile_batches_partial.fetch_add(1, Ordering::Relaxed);
+            }
             let chunk_profiles = self.fetch_profiles_batch(chunk).await?;
             profiles.extend(chunk_profiles);
         }
+
+        self.log_partial_percentage("profiles");
 
         Ok(profiles)
     }
@@ -234,13 +250,19 @@ impl BlueskyClient {
 
         let mut all_posts: Vec<Option<BlueskyPost>> = Vec::with_capacity(valid_uris.len());
 
-        let chunks = valid_uris.chunks(100).count();
+        let chunks = valid_uris.chunks(BATCH_SIZE).count();
         tracing::Span::current().record("chunks", chunks);
 
-        for chunk in valid_uris.chunks(100) {
+        for chunk in valid_uris.chunks(BATCH_SIZE) {
+            self.post_batches_total.fetch_add(1, Ordering::Relaxed);
+            if chunk.len() < BATCH_SIZE {
+                self.post_batches_partial.fetch_add(1, Ordering::Relaxed);
+            }
             let chunk_posts = self.fetch_posts_bulk(chunk).await?;
             all_posts.extend(chunk_posts);
         }
+
+        self.log_partial_percentage("posts");
 
         Ok(all_posts)
     }
@@ -381,6 +403,28 @@ impl BlueskyClient {
 
     pub async fn get_session_count(&self) -> usize {
         self.session_strings.read().await.len()
+    }
+
+    fn log_partial_percentage(&self, name: &str) {
+        let total = if name == "profiles" {
+            self.profile_batches_total.load(Ordering::Relaxed)
+        } else {
+            self.post_batches_total.load(Ordering::Relaxed)
+        };
+
+        if total > 0 && total % 10 == 0 {
+            let partial = if name == "profiles" {
+                self.profile_batches_partial.load(Ordering::Relaxed)
+            } else {
+                self.post_batches_partial.load(Ordering::Relaxed)
+            };
+
+            let pct = (partial as f64 / total as f64) * 100.0;
+            info!(
+                "{} batch partial rate: {:.1}% ({}/{})",
+                name, pct, partial, total
+            );
+        }
     }
 }
 
