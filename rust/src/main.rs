@@ -77,6 +77,9 @@ async fn main() -> Result<()> {
     let turbocharger = TurboCharger::new(settings.clone(), args.modulo, args.shard).await?;
     let turbocharger = std::sync::Arc::new(turbocharger);
 
+    // Start background session refresh task
+    turbocharger.start_session_refresh_task();
+
     // Run both turbocharger and server
     let turbocharger_clone = turbocharger.clone();
     let turbocharger_handle = tokio::spawn(async move {

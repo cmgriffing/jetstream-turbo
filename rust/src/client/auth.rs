@@ -18,6 +18,8 @@ pub struct AuthResponse {
     pub email_confirmed: Option<bool>,
     #[serde(default)]
     pub active: Option<bool>,
+    #[serde(default, rename = "expiresAt")]
+    pub expires_at: Option<String>,
 }
 
 pub struct BlueskyAuthClient {
@@ -50,7 +52,7 @@ impl BlueskyAuthClient {
     }
 
     /// Authenticate with Bluesky and get a session token
-    pub async fn authenticate(&self) -> TurboResult<String> {
+    pub async fn authenticate(&self) -> TurboResult<AuthResponse> {
         let url = format!("{}/com.atproto.server.createSession", self.api_base_url);
 
         let request_body = serde_json::json!({
@@ -80,8 +82,7 @@ impl BlueskyAuthClient {
                                         e, body_text
                                     );
                                     return Err(TurboError::InvalidApiResponse(format!(
-                                        "Failed to parse auth response: {}. Response: {}",
-                                        e, body_text
+                                        "Failed to parse auth response: {e}. Response: {body_text}"
                                     )));
                                 }
                             };
@@ -101,8 +102,7 @@ impl BlueskyAuthClient {
                                 auth_response.handle
                             );
 
-                            // Return the access JWT directly - this is what Bluesky API expects in Authorization header
-                            return Ok(auth_response.access_jwt);
+                            return Ok(auth_response);
                         }
                         reqwest::StatusCode::UNAUTHORIZED => {
                             error!("Authentication failed - invalid handle or app password");
@@ -151,6 +151,63 @@ impl BlueskyAuthClient {
             Err(_) => Ok(false),
         }
     }
+
+    /// Refresh an expired session using the refresh JWT
+    pub async fn refresh_session(&self, refresh_jwt: &str) -> TurboResult<AuthResponse> {
+        let url = format!("{}/com.atproto.server.refreshSession", self.api_base_url);
+
+        let request_body = serde_json::json!({
+            "refreshJwt": refresh_jwt,
+        });
+
+        info!("Refreshing Bluesky session");
+
+        let response = self.http_client.post(&url).json(&request_body).send().await?;
+
+        match response.status() {
+            reqwest::StatusCode::OK => {
+                let body_text = response.text().await?;
+                trace!("Refresh response body: {}", body_text);
+
+                let auth_response: AuthResponse = serde_json::from_str(&body_text).map_err(|e| {
+                    error!("Failed to parse refresh response: {}", e);
+                    TurboError::InvalidApiResponse(format!(
+                        "Failed to parse refresh response: {e}. Response: {body_text}"
+                    ))
+                })?;
+
+                if auth_response.access_jwt.is_empty() {
+                    error!(
+                        "Refresh response missing access_jwt. Full response: {:?}",
+                        auth_response
+                    );
+                    return Err(TurboError::InvalidApiResponse(
+                        "Refresh response missing access_jwt field".to_string(),
+                    ));
+                }
+
+                info!(
+                    "Successfully refreshed session for {}",
+                    auth_response.handle
+                );
+
+                Ok(auth_response)
+            }
+            reqwest::StatusCode::UNAUTHORIZED => {
+                error!("Session refresh failed - refresh token may be expired");
+                Err(TurboError::ExpiredToken(
+                    "Refresh token expired".to_string(),
+                ))
+            }
+            status => {
+                let error_text = response.text().await.unwrap_or_default();
+                error!("Bluesky refresh error {}: {}", status, error_text);
+                Err(TurboError::InvalidApiResponse(format!(
+                    "Status {status}: {error_text}"
+                )))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -171,6 +228,7 @@ mod tests {
             email: None,
             email_confirmed: None,
             active: None,
+            expires_at: Some("2024-01-01T00:00:00.000Z".to_string()),
         };
 
         Mock::given(method("POST"))
@@ -189,7 +247,7 @@ mod tests {
         };
 
         let result = client.authenticate().await.unwrap();
-        assert_eq!(result, "test_jwt_token");
+        assert_eq!(result.access_jwt, "test_jwt_token");
     }
 
     #[tokio::test]

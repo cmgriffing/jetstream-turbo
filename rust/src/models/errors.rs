@@ -75,6 +75,9 @@ pub enum TurboError {
 
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
+
+    #[error("Session expired: {0}")]
+    ExpiredToken(String),
 }
 
 impl TurboError {
@@ -87,6 +90,7 @@ impl TurboError {
                 | TurboError::RedisOperation(_)
                 | TurboError::WebSocketConnection(_)
                 | TurboError::Timeout(_)
+                | TurboError::ExpiredToken(_)
         )
     }
 
@@ -97,5 +101,9 @@ impl TurboError {
                 | TurboError::MissingEnvVar(_)
                 | TurboError::PermissionDenied(_)
         )
+    }
+
+    pub fn is_expired_token(&self) -> bool {
+        matches!(self, TurboError::ExpiredToken(_))
     }
 }

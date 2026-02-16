@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{error, info, instrument, trace, warn};
 
-const REQUESTS_PER_SECOND_MS: u64 = 1000 / 12;
+const REQUESTS_PER_SECOND_MS: u64 = 1000 / 10;
 const BATCH_SIZE: usize = 25;
 
 async fn handle_rate_limit_response(
@@ -39,6 +39,8 @@ async fn handle_rate_limit_response(
 pub struct BlueskyClient {
     http_client: Client,
     session_strings: Arc<RwLock<Vec<String>>>,
+    refresh_jwt: Arc<RwLock<Option<String>>>,
+    expires_at: Arc<RwLock<Option<String>>>,
     rate_limiter: Arc<
         RateLimiter<
             governor::state::NotKeyed,
@@ -79,6 +81,8 @@ impl BlueskyClient {
         Self {
             http_client,
             session_strings: Arc::new(RwLock::new(session_strings)),
+            refresh_jwt: Arc::new(RwLock::new(None)),
+            expires_at: Arc::new(RwLock::new(None)),
             rate_limiter: Arc::new(RateLimiter::direct(quota)),
             api_base_url: "https://bsky.social/xrpc".to_string(),
             max_retries: 3,
@@ -395,10 +399,42 @@ impl BlueskyClient {
         Ok(sessions[0].clone())
     }
 
-    pub async fn refresh_sessions(&self, new_sessions: Vec<String>) {
+    pub async fn refresh_sessions(
+        &self,
+        new_sessions: Vec<String>,
+        new_refresh_jwt: Option<String>,
+        new_expires_at: Option<String>,
+    ) {
         let mut sessions = self.session_strings.write().await;
         *sessions = new_sessions;
         info!("Refreshed {} session strings", sessions.len());
+
+        if let Some(refresh_jwt) = new_refresh_jwt {
+            let mut jwt = self.refresh_jwt.write().await;
+            *jwt = Some(refresh_jwt);
+        }
+
+        if let Some(expires_at) = new_expires_at {
+            let mut exp = self.expires_at.write().await;
+            *exp = Some(expires_at.clone());
+            info!("Session expires at: {}", expires_at);
+        }
+    }
+
+    pub async fn should_refresh(&self) -> bool {
+        let expires_at = self.expires_at.read().await;
+        if let Some(ref exp) = *expires_at {
+            if let Ok(exp_time) = chrono::DateTime::parse_from_rfc3339(exp) {
+                let now = chrono::Utc::now();
+                let duration_until_expiry = exp_time.signed_duration_since(now);
+                return duration_until_expiry.num_seconds() < 3600;
+            }
+        }
+        true
+    }
+
+    pub async fn get_refresh_jwt(&self) -> Option<String> {
+        self.refresh_jwt.read().await.clone()
     }
 
     pub async fn get_session_count(&self) -> usize {
@@ -445,10 +481,14 @@ mod tests {
         assert_eq!(client.get_session_count().await, 1);
 
         client
-            .refresh_sessions(vec![
-                "new_session1:::bsky.social".to_string(),
-                "new_session2:::bsky.social".to_string(),
-            ])
+            .refresh_sessions(
+                vec![
+                    "new_session1:::bsky.social".to_string(),
+                    "new_session2:::bsky.social".to_string(),
+                ],
+                Some("new_refresh_jwt".to_string()),
+                Some("2024-01-01T00:00:00.000Z".to_string()),
+            )
             .await;
 
         assert_eq!(client.get_session_count().await, 2);

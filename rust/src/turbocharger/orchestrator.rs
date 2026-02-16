@@ -46,13 +46,20 @@ impl TurboCharger {
             settings.bluesky_app_password.clone(),
         );
 
-        let session_string = auth_client.authenticate().await?;
+        let auth_response = auth_client.authenticate().await?;
         info!(
             "Successfully authenticated with Bluesky as {}",
             settings.bluesky_handle
         );
 
-        let bluesky_client = Arc::new(BlueskyClient::new(vec![session_string]));
+        let bluesky_client = Arc::new(BlueskyClient::new(vec![auth_response.access_jwt.clone()]));
+        bluesky_client
+            .refresh_sessions(
+                vec![auth_response.access_jwt],
+                Some(auth_response.refresh_jwt),
+                auth_response.expires_at,
+            )
+            .await;
 
         // Initialize cache
         let cache = TurboCache::new(settings.cache_size_users, settings.cache_size_posts);
@@ -250,13 +257,44 @@ impl TurboCharger {
     pub async fn refresh_sessions(&self) -> TurboResult<()> {
         info!("Refreshing Bluesky session");
 
-        let session_string = self.auth_client.authenticate().await?;
+        let refresh_jwt = self
+            .bluesky_client
+            .get_refresh_jwt()
+            .await
+            .ok_or_else(|| TurboError::ExpiredToken("No refresh JWT available".to_string()))?;
+
+        let auth_response = self.auth_client.refresh_session(&refresh_jwt).await?;
+
         self.bluesky_client
-            .refresh_sessions(vec![session_string])
+            .refresh_sessions(
+                vec![auth_response.access_jwt],
+                Some(auth_response.refresh_jwt),
+                auth_response.expires_at,
+            )
             .await;
 
         info!("Refreshed session for {}", self.settings.bluesky_handle);
         Ok(())
+    }
+
+    pub fn start_session_refresh_task(self: &Arc<Self>) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            let mut refresh_interval = interval(Duration::from_secs(60 * 60));
+            refresh_interval.tick().await;
+
+            loop {
+                refresh_interval.tick().await;
+
+                if this.bluesky_client.should_refresh().await {
+                    info!("Session expiring soon, refreshing proactively");
+                    if let Err(e) = this.refresh_sessions().await {
+                        error!("Proactive session refresh failed: {}", e);
+                    }
+                }
+            }
+        });
+        info!("Started session refresh task (every 1 hour)");
     }
 
     pub async fn get_stats(&self) -> TurboResult<TurboStats> {

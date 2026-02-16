@@ -37,8 +37,8 @@ mod tests {
             mock_server.uri(),
         );
 
-        let session = client.authenticate().await.unwrap();
-        assert!(session.contains("test_jwt_token"));
+        let auth_response = client.authenticate().await.unwrap();
+        assert!(auth_response.access_jwt.contains("test_jwt_token"));
     }
 
     #[tokio::test]
