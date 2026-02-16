@@ -22,7 +22,7 @@ pub struct TurboCharger {
     settings: Settings,
     jetstream_client: JetstreamClient,
     bluesky_client: Arc<BlueskyClient>,
-    auth_client: BlueskyAuthClient,
+    auth_client: Arc<BlueskyAuthClient>,
     hydrator: Hydrator,
     sqlite_store: Arc<SQLiteStore>,
     redis_store: Arc<RedisStore>,
@@ -41,18 +41,20 @@ impl TurboCharger {
         let jetstream_client = JetstreamClient::with_defaults(settings.jetstream_hosts.clone());
 
         // Authenticate directly with Bluesky
-        let auth_client = BlueskyAuthClient::new(
+        let auth_client = Arc::new(BlueskyAuthClient::new(
             settings.bluesky_handle.clone(),
             settings.bluesky_app_password.clone(),
-        );
+        ));
 
         let auth_response = auth_client.authenticate().await?;
         info!(
             "Successfully authenticated with Bluesky as {}",
             settings.bluesky_handle
         );
-
-        let bluesky_client = Arc::new(BlueskyClient::new(vec![auth_response.access_jwt.clone()]));
+        let bluesky_client = Arc::new(BlueskyClient::new(
+            vec![auth_response.access_jwt.clone()],
+            Some(auth_client.clone()),
+        ));
         bluesky_client
             .refresh_sessions(
                 vec![auth_response.access_jwt],

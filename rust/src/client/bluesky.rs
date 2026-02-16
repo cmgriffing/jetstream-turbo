@@ -1,3 +1,4 @@
+use crate::client::BlueskyAuthClient;
 use crate::models::{
     bluesky::{BlueskyPost, BlueskyProfile, GetPostsBulkResponse, GetProfilesResponse},
     errors::{TurboError, TurboResult},
@@ -41,6 +42,7 @@ pub struct BlueskyClient {
     session_strings: Arc<RwLock<Vec<String>>>,
     refresh_jwt: Arc<RwLock<Option<String>>>,
     expires_at: Arc<RwLock<Option<String>>>,
+    auth_client: Option<Arc<BlueskyAuthClient>>,
     rate_limiter: Arc<
         RateLimiter<
             governor::state::NotKeyed,
@@ -60,7 +62,7 @@ pub struct BlueskyClient {
 }
 
 impl BlueskyClient {
-    pub fn new(session_strings: Vec<String>) -> Self {
+    pub fn new(session_strings: Vec<String>, auth_client: Option<Arc<BlueskyAuthClient>>) -> Self {
         let quota = Quota::with_period(Duration::from_millis(REQUESTS_PER_SECOND_MS))
             .expect("Valid quota")
             .allow_burst(NonZeroU32::new(1).unwrap());
@@ -83,6 +85,7 @@ impl BlueskyClient {
             session_strings: Arc::new(RwLock::new(session_strings)),
             refresh_jwt: Arc::new(RwLock::new(None)),
             expires_at: Arc::new(RwLock::new(None)),
+            auth_client,
             rate_limiter: Arc::new(RateLimiter::direct(quota)),
             api_base_url: "https://bsky.social/xrpc".to_string(),
             max_retries: 3,
@@ -127,7 +130,7 @@ impl BlueskyClient {
     ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
         let url = format!("{}/app.bsky.actor.getProfiles", self.api_base_url);
 
-        let session_string = self.get_session_string().await?;
+        let mut session_string = self.get_session_string().await?;
 
         let mut attempt = 0;
         loop {
@@ -183,7 +186,18 @@ impl BlueskyClient {
                         tokio::time::sleep(self.retry_delay * 2).await;
                     }
                     StatusCode::UNAUTHORIZED => {
-                        error!("Unauthorized - session may be invalid: {}", session_string);
+                        error!("Unauthorized - session may be invalid, attempting refresh");
+                        if let Err(e) = self.refresh_session_with_fallback().await {
+                            return Err(TurboError::ExpiredToken(format!(
+                                "Session refresh failed: {}",
+                                e
+                            )));
+                        }
+                        session_string = self.get_session_string().await?;
+                        if attempt < self.max_retries {
+                            attempt += 1;
+                            continue;
+                        }
                         return Err(TurboError::PermissionDenied(
                             "Invalid session token".to_string(),
                         ));
@@ -274,7 +288,7 @@ impl BlueskyClient {
     async fn fetch_posts_bulk(&self, uris: &[String]) -> TurboResult<Vec<Option<BlueskyPost>>> {
         let url = format!("{}/app.bsky.feed.getPosts", self.api_base_url);
 
-        let session_string = self.get_session_string().await?;
+        let mut session_string = self.get_session_string().await?;
 
         let mut attempt = 0;
         loop {
@@ -331,7 +345,18 @@ impl BlueskyClient {
                         tokio::time::sleep(self.retry_delay * 2).await;
                     }
                     StatusCode::UNAUTHORIZED => {
-                        error!("Unauthorized - session may be invalid: {}", session_string);
+                        error!("Unauthorized - session may be invalid, attempting refresh");
+                        if let Err(e) = self.refresh_session_with_fallback().await {
+                            return Err(TurboError::ExpiredToken(format!(
+                                "Session refresh failed: {}",
+                                e
+                            )));
+                        }
+                        session_string = self.get_session_string().await?;
+                        if attempt < self.max_retries {
+                            attempt += 1;
+                            continue;
+                        }
                         return Err(TurboError::PermissionDenied(
                             "Invalid session token".to_string(),
                         ));
@@ -437,6 +462,53 @@ impl BlueskyClient {
         self.refresh_jwt.read().await.clone()
     }
 
+    pub async fn refresh_session_with_fallback(&self) -> TurboResult<()> {
+        if let Some(ref auth_client) = self.auth_client {
+            if let Some(refresh_jwt) = self.get_refresh_jwt().await {
+                match auth_client.refresh_session(&refresh_jwt).await {
+                    Ok(auth_response) => {
+                        self.refresh_sessions(
+                            vec![auth_response.access_jwt],
+                            Some(auth_response.refresh_jwt),
+                            auth_response.expires_at,
+                        )
+                        .await;
+                        info!("Session refreshed successfully");
+                        return Ok(());
+                    }
+                    Err(TurboError::ExpiredToken(_)) => {
+                        warn!("Refresh token expired, re-authenticating with credentials");
+                    }
+                    Err(e) => {
+                        error!("Session refresh failed: {}", e);
+                        return Err(e);
+                    }
+                }
+            }
+
+            match auth_client.authenticate().await {
+                Ok(auth_response) => {
+                    self.refresh_sessions(
+                        vec![auth_response.access_jwt],
+                        Some(auth_response.refresh_jwt),
+                        auth_response.expires_at,
+                    )
+                    .await;
+                    info!("Re-authenticated successfully");
+                    Ok(())
+                }
+                Err(e) => {
+                    error!("Re-authentication failed: {}", e);
+                    Err(e)
+                }
+            }
+        } else {
+            Err(TurboError::ExpiredToken(
+                "No auth client available for re-authentication".to_string(),
+            ))
+        }
+    }
+
     pub async fn get_session_count(&self) -> usize {
         self.session_strings.read().await.len()
     }
@@ -471,13 +543,13 @@ mod tests {
     #[tokio::test]
     async fn test_bluesky_client_creation() {
         let sessions = vec!["session1:::bsky.social".to_string()];
-        let client = BlueskyClient::new(sessions);
+        let client = BlueskyClient::new(sessions, None);
         assert_eq!(client.get_session_count().await, 1);
     }
 
     #[tokio::test]
     async fn test_refresh_sessions() {
-        let client = BlueskyClient::new(vec!["old_session".to_string()]);
+        let client = BlueskyClient::new(vec!["old_session".to_string()], None);
         assert_eq!(client.get_session_count().await, 1);
 
         client
