@@ -202,6 +202,20 @@ impl BlueskyClient {
                             "Invalid session token".to_string(),
                         ));
                     }
+                    StatusCode::BAD_REQUEST => {
+                        let error_text = resp.text().await.unwrap_or_default();
+                        if let Some(new_session) = self.handle_auth_error_and_refresh(&error_text).await? {
+                            session_string = new_session;
+                            if attempt < self.max_retries {
+                                attempt += 1;
+                                continue;
+                            }
+                        }
+                        error!("API error 400: {}", error_text);
+                        return Err(TurboError::InvalidApiResponse(format!(
+                            "Status 400: {error_text}"
+                        )));
+                    }
                     status => {
                         let error_text = resp.text().await.unwrap_or_default();
                         error!("API error {}: {}", status, error_text);
@@ -361,6 +375,20 @@ impl BlueskyClient {
                             "Invalid session token".to_string(),
                         ));
                     }
+                    StatusCode::BAD_REQUEST => {
+                        let error_text = resp.text().await.unwrap_or_default();
+                        if let Some(new_session) = self.handle_auth_error_and_refresh(&error_text).await? {
+                            session_string = new_session;
+                            if attempt < self.max_retries {
+                                attempt += 1;
+                                continue;
+                            }
+                        }
+                        error!("API error 400: {}", error_text);
+                        return Err(TurboError::InvalidApiResponse(format!(
+                            "Status 400: {error_text}"
+                        )));
+                    }
                     status => {
                         let error_text = resp.text().await.unwrap_or_default();
                         error!("API error {}: {}", status, error_text);
@@ -460,6 +488,17 @@ impl BlueskyClient {
 
     pub async fn get_refresh_jwt(&self) -> Option<String> {
         self.refresh_jwt.read().await.clone()
+    }
+
+    async fn handle_auth_error_and_refresh(&self, error_response: &str) -> TurboResult<Option<String>> {
+        let is_expired = error_response.contains("ExpiredToken");
+
+        if is_expired {
+            error!("Token expired, full error: {}", error_response);
+            self.refresh_session_with_fallback().await?;
+            return Ok(Some(self.get_session_string().await?));
+        }
+        Ok(None)
     }
 
     pub async fn refresh_session_with_fallback(&self) -> TurboResult<()> {
