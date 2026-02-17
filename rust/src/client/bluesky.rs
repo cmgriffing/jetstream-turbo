@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{error, info, instrument, trace, warn};
 
-const REQUESTS_PER_SECOND_MS: u64 = 1000 / 10;
+const REQUESTS_PER_SECOND_MS: u64 = 1000 / 12;
 const BATCH_SIZE: usize = 25;
 
 async fn handle_rate_limit_response(
@@ -204,7 +204,9 @@ impl BlueskyClient {
                     }
                     StatusCode::BAD_REQUEST => {
                         let error_text = resp.text().await.unwrap_or_default();
-                        if let Some(new_session) = self.handle_auth_error_and_refresh(&error_text).await? {
+                        if let Some(new_session) =
+                            self.handle_auth_error_and_refresh(&error_text).await?
+                        {
                             session_string = new_session;
                             if attempt < self.max_retries {
                                 attempt += 1;
@@ -377,7 +379,9 @@ impl BlueskyClient {
                     }
                     StatusCode::BAD_REQUEST => {
                         let error_text = resp.text().await.unwrap_or_default();
-                        if let Some(new_session) = self.handle_auth_error_and_refresh(&error_text).await? {
+                        if let Some(new_session) =
+                            self.handle_auth_error_and_refresh(&error_text).await?
+                        {
                             session_string = new_session;
                             if attempt < self.max_retries {
                                 attempt += 1;
@@ -490,7 +494,10 @@ impl BlueskyClient {
         self.refresh_jwt.read().await.clone()
     }
 
-    async fn handle_auth_error_and_refresh(&self, error_response: &str) -> TurboResult<Option<String>> {
+    async fn handle_auth_error_and_refresh(
+        &self,
+        error_response: &str,
+    ) -> TurboResult<Option<String>> {
         let is_expired = error_response.contains("ExpiredToken");
 
         if is_expired {

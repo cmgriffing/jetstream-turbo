@@ -60,7 +60,7 @@ impl Default for Settings {
             rotation_minutes: 1,
             http_port: 8080,
             batch_size: 10,
-            max_concurrent_requests: 100,
+            max_concurrent_requests: 10,
             cache_size_users: 20000,
             cache_size_posts: 20000,
             max_retries: 3,

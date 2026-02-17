@@ -123,23 +123,22 @@ impl Hydrator {
             .map(|(uri, _)| uri.clone())
             .collect();
 
-        let profiles_future = async {
+        // Fetch profiles and posts sequentially to avoid rate limiting
+        let profiles_result = async {
             if uncached_dids.is_empty() {
                 return Ok(vec![]);
             }
             self.bluesky_client
                 .bulk_fetch_profiles(&uncached_dids)
                 .await
-        };
+        }.await;
 
-        let posts_future = async {
+        let posts_result = async {
             if uncached_uris.is_empty() {
                 return Ok(vec![]);
             }
             self.bluesky_client.bulk_fetch_posts(&uncached_uris).await
-        };
-
-        let (profiles_result, posts_result) = tokio::join!(profiles_future, posts_future);
+        }.await;
 
         let api_fetch_time = cache_check_start.elapsed().as_millis() as u64 - cache_check_time;
         tracing::Span::current().record("api_fetch_time_ms", api_fetch_time);
