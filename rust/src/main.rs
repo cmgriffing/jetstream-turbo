@@ -2,7 +2,9 @@ use anyhow::Result;
 use clap::Parser;
 use jetstream_turbo_rs::config::Settings;
 use jetstream_turbo_rs::server::create_server;
+use jetstream_turbo_rs::telemetry::ErrorReporter;
 use jetstream_turbo_rs::turbocharger::TurboCharger;
+use std::collections::HashMap;
 use std::env;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -66,6 +68,12 @@ async fn main() -> Result<()> {
     // Load configuration
     let settings = Settings::from_env()?;
 
+    // Initialize error reporter
+    let error_reporter = ErrorReporter::new(
+        settings.posthog_api_key.clone(),
+        settings.posthog_host.clone(),
+    ).await;
+
     tracing::info!("Starting jetstream-turbo v{}", env!("CARGO_PKG_VERSION"));
     tracing::info!(
         "Configuration loaded: modulo={}, shard={}",
@@ -74,7 +82,7 @@ async fn main() -> Result<()> {
     );
 
     // Create turbocharger
-    let turbocharger = TurboCharger::new(settings.clone(), args.modulo, args.shard).await?;
+    let turbocharger = TurboCharger::new(settings.clone(), args.modulo, args.shard, error_reporter.clone()).await?;
     let turbocharger = std::sync::Arc::new(turbocharger);
 
     // Start background session refresh task
@@ -82,15 +90,28 @@ async fn main() -> Result<()> {
 
     // Run both turbocharger and server
     let turbocharger_clone = turbocharger.clone();
+    let error_reporter_clone = error_reporter.clone();
     let turbocharger_handle = tokio::spawn(async move {
         if let Err(e) = turbocharger_clone.run().await {
             tracing::error!("Turbocharger failed: {}", e);
+            let mut ctx = HashMap::new();
+            ctx.insert("component", "main");
+            ctx.insert("operation", "turbocharger_run");
+            error_reporter_clone.capture_error(&e, ctx);
         }
     });
 
+    let server_error_reporter = error_reporter.clone();
     let server_handle = tokio::spawn(async move {
         if let Err(e) = create_server(settings.http_port, turbocharger).await {
             tracing::error!("Server failed: {}", e);
+            let mut ctx = HashMap::new();
+            ctx.insert("component", "main");
+            ctx.insert("operation", "server_run");
+            server_error_reporter.capture_error(
+                &jetstream_turbo_rs::TurboError::Internal(e.to_string()),
+                ctx,
+            );
         }
     });
 

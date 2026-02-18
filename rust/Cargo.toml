@@ -41,6 +41,7 @@ thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 posthog-rs = "0.4.0"
+hostname = "0.4"
 
 # Storage
 sqlx = { version = "0.8", features = [

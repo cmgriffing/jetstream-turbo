@@ -43,6 +43,10 @@ pub struct Settings {
     // Metrics Configuration
     pub statsd_host: Option<String>,
     pub statsd_port: Option<u16>,
+
+    // PostHog Configuration
+    pub posthog_api_key: Option<String>,
+    pub posthog_host: Option<String>,
 }
 
 impl Default for Settings {
@@ -67,6 +71,8 @@ impl Default for Settings {
             retry_base_delay: Duration::from_millis(100),
             statsd_host: None,
             statsd_port: None,
+            posthog_api_key: None,
+            posthog_host: None,
         }
     }
 }

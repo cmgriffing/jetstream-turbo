@@ -7,8 +7,10 @@ use crate::models::{
     jetstream::JetstreamMessage,
 };
 use crate::storage::{RedisStore, SQLiteStore};
+use crate::telemetry::ErrorReporter;
 use futures::StreamExt;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Semaphore};
@@ -28,10 +30,16 @@ pub struct TurboCharger {
     redis_store: Arc<RedisStore>,
     semaphore: Arc<Semaphore>,
     broadcast_sender: broadcast::Sender<EnrichedRecord>,
+    error_reporter: ErrorReporter,
 }
 
 impl TurboCharger {
-    pub async fn new(settings: Settings, modulo: u32, shard: u32) -> TurboResult<Self> {
+    pub async fn new(
+        settings: Settings,
+        modulo: u32,
+        shard: u32,
+        error_reporter: ErrorReporter,
+    ) -> TurboResult<Self> {
         info!(
             "Initializing TurboCharger with modulo={}, shard={}",
             modulo, shard
@@ -102,6 +110,7 @@ impl TurboCharger {
             redis_store,
             semaphore,
             broadcast_sender,
+            error_reporter,
         })
     }
 
@@ -292,6 +301,10 @@ impl TurboCharger {
                     info!("Session expiring soon, refreshing proactively");
                     if let Err(e) = this.refresh_sessions().await {
                         error!("Proactive session refresh failed: {}", e);
+                        let mut ctx = HashMap::new();
+                        ctx.insert("component", "turbocharger");
+                        ctx.insert("operation", "proactive_session_refresh");
+                        this.error_reporter.capture_error(&e, ctx);
                     }
                 }
             }
