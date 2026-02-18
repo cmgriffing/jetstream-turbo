@@ -24,3 +24,4 @@ bd sync               # Sync with git
 # CRITICAL NOTES
 
 - DO NOT COMMIT OR PUSH ANYTHING
+- Only read env vars from a `.env.example` file. Never from a `.env` file. You should only use the structure and variable names, not the actual values.
