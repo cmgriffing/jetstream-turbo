@@ -1,0 +1,14 @@
+/Volumes/T7/repos/jetstream-turbo/monitor/monitor/target/release/deps/serde-a6b0c9406a8d2088.d: /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Volumes/T7/repos/jetstream-turbo/monitor/monitor/target/release/build/serde-fd689f4ce75f552f/out/private.rs
+
+/Volumes/T7/repos/jetstream-turbo/monitor/monitor/target/release/deps/libserde-a6b0c9406a8d2088.rlib: /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Volumes/T7/repos/jetstream-turbo/monitor/monitor/target/release/build/serde-fd689f4ce75f552f/out/private.rs
+
+/Volumes/T7/repos/jetstream-turbo/monitor/monitor/target/release/deps/libserde-a6b0c9406a8d2088.rmeta: /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /Volumes/T7/repos/jetstream-turbo/monitor/monitor/target/release/build/serde-fd689f4ce75f552f/out/private.rs
+
+/Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/Volumes/T7/repos/jetstream-turbo/monitor/monitor/target/release/build/serde-fd689f4ce75f552f/out/private.rs:
+
+# env-dep:OUT_DIR=/Volumes/T7/repos/jetstream-turbo/monitor/monitor/target/release/build/serde-fd689f4ce75f552f/out

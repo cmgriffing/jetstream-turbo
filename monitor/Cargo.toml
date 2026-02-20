@@ -1,0 +1,36 @@
+[package]
+name = "jetstream-monitor"
+version = "0.1.0"
+edition = "2021"
+authors = ["Chris Griffing <cmgriffing@gmail.com>"]
+description = "Monitor and compare message rates between Bluesky turbo streams"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws", "macros"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-stream = "0.1"
+futures = "0.3"
+
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "chrono"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+config = "0.14"
+dotenvy = "0.15"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+strip = true

@@ -1,0 +1,14 @@
+/Volumes/T7/repos/jetstream-turbo/monitor/monitor/target/release/deps/thiserror-b4c88ad65a09bbe9.d: /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /Volumes/T7/repos/jetstream-turbo/monitor/monitor/target/release/build/thiserror-113b05393c653ab7/out/private.rs
+
+/Volumes/T7/repos/jetstream-turbo/monitor/monitor/target/release/deps/libthiserror-b4c88ad65a09bbe9.rlib: /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /Volumes/T7/repos/jetstream-turbo/monitor/monitor/target/release/build/thiserror-113b05393c653ab7/out/private.rs
+
+/Volumes/T7/repos/jetstream-turbo/monitor/monitor/target/release/deps/libthiserror-b4c88ad65a09bbe9.rmeta: /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs /Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs /Volumes/T7/repos/jetstream-turbo/monitor/monitor/target/release/build/thiserror-113b05393c653ab7/out/private.rs
+
+/Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/lib.rs:
+/Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/aserror.rs:
+/Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/display.rs:
+/Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/var.rs:
+/Users/cmgriffing/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.18/src/private.rs:
+/Volumes/T7/repos/jetstream-turbo/monitor/monitor/target/release/build/thiserror-113b05393c653ab7/out/private.rs:
+
+# env-dep:OUT_DIR=/Volumes/T7/repos/jetstream-turbo/monitor/monitor/target/release/build/thiserror-113b05393c653ab7/out

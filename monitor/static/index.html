@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Bluesky Stream Monitor</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+        }
+        .container {
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
+            gap: 2rem;
+            align-items: center;
+            max-width: 800px;
+        }
+        .counter {
+            background: #1a1a1a;
+            border-radius: 12px;
+            padding: 2rem;
+            text-align: center;
+            border: 1px solid #333;
+        }
+        .counter .label {
+            font-size: 0.875rem;
+            color: #888;
+            margin-bottom: 0.5rem;
+        }
+        .counter .value {
+            font-size: 2.5rem;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+        }
+        .counter .rate {
+            font-size: 1rem;
+            color: #666;
+            margin-top: 0.5rem;
+        }
+        .delta {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 1rem 2rem;
+        }
+        .delta .label {
+            font-size: 0.75rem;
+            color: #666;
+        }
+        .delta .value {
+            font-size: 2rem;
+            font-weight: 600;
+        }
+        .delta.positive .value { color: #4ade80; }
+        .delta.negative .value { color: #f87171; }
+        .delta.neutral .value { color: #888; }
+        .header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+        .header h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+        .header p {
+            color: #666;
+            font-size: 0.875rem;
+        }
+        .status {
+            position: fixed;
+            bottom: 1rem;
+            right: 1rem;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            background: #1a1a1a;
+            border: 1px solid #333;
+        }
+        .status.connected { color: #4ade80; }
+        .status.disconnected { color: #f87171; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Stream Monitor</h1>
+        <p>Comparing Bluesky turbo streams</p>
+    </div>
+    <div class="container">
+        <div class="counter">
+            <div class="label">Stream A</div>
+            <div class="value" id="count-a">0</div>
+            <div class="rate" id="rate-a">0/s</div>
+        </div>
+        <div class="delta neutral" id="delta">
+            <div class="label">Delta</div>
+            <div class="value" id="delta-value">0</div>
+        </div>
+        <div class="counter">
+            <div class="label">Stream B</div>
+            <div class="value" id="count-b">0</div>
+            <div class="rate" id="rate-b">0/s</div>
+        </div>
+    </div>
+    <div class="status disconnected" id="status">Disconnected</div>
+
+    <script>
+        const countA = document.getElementById('count-a');
+        const countB = document.getElementById('count-b');
+        const rateA = document.getElementById('rate-a');
+        const rateB = document.getElementById('rate-b');
+        const deltaEl = document.getElementById('delta');
+        const deltaValue = document.getElementById('delta-value');
+        const statusEl = document.getElementById('status');
+
+        function connect() {
+            const ws = new WebSocket(location.origin.replace('http', 'ws') + '/ws');
+            
+            ws.onopen = () => {
+                statusEl.textContent = 'Connected';
+                statusEl.className = 'status connected';
+            };
+            
+            ws.onclose = () => {
+                statusEl.textContent = 'Disconnected';
+                statusEl.className = 'status disconnected';
+                setTimeout(connect, 1000);
+            };
+            
+            ws.onmessage = (e) => {
+                const stats = JSON.parse(e.data);
+                countA.textContent = stats.stream_a.toLocaleString();
+                countB.textContent = stats.stream_b.toLocaleString();
+                rateA.textContent = Math.round(stats.rate_a).toLocaleString() + '/s';
+                rateB.textContent = Math.round(stats.rate_b).toLocaleString() + '/s';
+                
+                const delta = stats.delta;
+                deltaValue.textContent = delta > 0 ? '+' + delta.toLocaleString() : delta.toLocaleString();
+                
+                if (delta > 0) {
+                    deltaEl.className = 'delta positive';
+                } else if (delta < 0) {
+                    deltaEl.className = 'delta negative';
+                } else {
+                    deltaEl.className = 'delta neutral';
+                }
+            };
+        }
+
+        connect();
+    </script>
+</body>
+</html>
