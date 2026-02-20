@@ -41,6 +41,9 @@ impl StatsAggregator {
             let mut last_a: u64 = 0;
             let mut last_b: u64 = 0;
             let mut last_time = std::time::Instant::now();
+            let mut rate_ema_a: f64 = 0.0;
+            let mut rate_ema_b: f64 = 0.0;
+            const ALPHA: f64 = 0.3;
 
             loop {
                 interval.tick().await;
@@ -50,12 +53,18 @@ impl StatsAggregator {
                 let elapsed = now.duration_since(last_time).as_secs_f64();
 
                 if elapsed > 0.0 {
+                    let instant_rate_a = (internal.count_a.saturating_sub(last_a)) as f64 / elapsed;
+                    let instant_rate_b = (internal.count_b.saturating_sub(last_b)) as f64 / elapsed;
+
+                    rate_ema_a = ALPHA * instant_rate_a + (1.0 - ALPHA) * rate_ema_a;
+                    rate_ema_b = ALPHA * instant_rate_b + (1.0 - ALPHA) * rate_ema_b;
+
                     let stats_snapshot = StreamStats {
                         stream_a: internal.count_a,
                         stream_b: internal.count_b,
                         delta: internal.count_b as i64 - internal.count_a as i64,
-                        rate_a: (internal.count_a.saturating_sub(last_a)) as f64 / elapsed,
-                        rate_b: (internal.count_b.saturating_sub(last_b)) as f64 / elapsed,
+                        rate_a: rate_ema_a,
+                        rate_b: rate_ema_b,
                         timestamp: Utc::now(),
                     };
 
