@@ -12,27 +12,31 @@ pub fn App() -> impl IntoView {
         rate_b: 0.0,
         timestamp: chrono::Utc::now(),
     });
-    
+
     let count_a = move || stats.read().stream_a;
     let count_b = move || stats.read().stream_b;
     let rate_a = move || stats.read().rate_a;
     let rate_b = move || stats.read().rate_b;
     let delta = move || stats.read().delta;
-    
+
     let delta_class = move || {
         let d = stats.read().delta;
-        if d > 0 { "delta positive" }
-        else if d < 0 { "delta negative" }
-        else { "delta neutral" }
+        if d > 0 {
+            "delta positive"
+        } else if d < 0 {
+            "delta negative"
+        } else {
+            "delta neutral"
+        }
     };
 
     Effect::new(move |_| {
         let set_stats = set_stats;
-        
+
         leptos::task::spawn_local(async move {
-            use web_sys::WebSocket;
             use futures::StreamExt;
-            
+            use web_sys::WebSocket;
+
             let ws = WebSocket::new("/ws").unwrap();
             let mut recv = futures::stream::unfold(ws.clone(), |ws| async move {
                 loop {
@@ -42,7 +46,7 @@ pub fn App() -> impl IntoView {
                     }
                 }
             });
-            
+
             while let Some(text) = recv.next().await {
                 if let Ok(new_stats) = serde_json::from_str::<StreamStats>(&text) {
                     set_stats.set(new_stats);

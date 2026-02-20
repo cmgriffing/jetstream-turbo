@@ -35,7 +35,7 @@ impl StatsAggregator {
     pub fn process(&self, stats: &Arc<std::sync::RwLock<StreamStatsInternal>>) {
         let tx = self.tx.clone();
         let stats = Arc::clone(stats);
-        
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
             let mut last_a: u64 = 0;
@@ -44,25 +44,25 @@ impl StatsAggregator {
 
             loop {
                 interval.tick().await;
-                
+
                 let internal = stats.read().unwrap();
                 let now = std::time::Instant::now();
                 let elapsed = now.duration_since(last_time).as_secs_f64();
-                
+
                 if elapsed > 0.0 {
                     let stats_snapshot = StreamStats {
                         stream_a: internal.count_a,
                         stream_b: internal.count_b,
-                        delta: internal.count_a as i64 - internal.count_b as i64,
+                        delta: internal.count_b as i64 - internal.count_a as i64,
                         rate_a: (internal.count_a.saturating_sub(last_a)) as f64 / elapsed,
                         rate_b: (internal.count_b.saturating_sub(last_b)) as f64 / elapsed,
                         timestamp: Utc::now(),
                     };
-                    
+
                     last_a = internal.count_a;
                     last_b = internal.count_b;
                     last_time = now;
-                    
+
                     let _ = tx.send(stats_snapshot);
                 }
             }

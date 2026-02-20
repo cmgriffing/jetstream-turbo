@@ -1,3 +1,3 @@
 pub mod aggregator;
 
-pub use aggregator::{StreamStats, StatsAggregator, StreamStatsInternal};
+pub use aggregator::{StatsAggregator, StreamStats, StreamStatsInternal};

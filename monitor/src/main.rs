@@ -2,8 +2,8 @@ use anyhow::Result;
 use jetstream_monitor::{
     config::Settings,
     stats::{StatsAggregator, StreamStatsInternal},
-    stream::{StreamClient, StreamId},
     storage::Storage,
+    stream::{StreamClient, StreamId},
     websocket,
 };
 use std::sync::Arc;
@@ -15,8 +15,11 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let settings = Settings::load()?;
-    tracing::info!("Loaded settings: stream_a={}, stream_b={}", 
-        settings.stream_a_url, settings.stream_b_url);
+    tracing::info!(
+        "Loaded settings: stream_a={}, stream_b={}",
+        settings.stream_a_url,
+        settings.stream_b_url
+    );
 
     let storage = Storage::new(&settings.database_url).await?;
     tracing::info!("Initialized database");
@@ -33,7 +36,7 @@ async fn main() -> Result<()> {
         use futures::StreamExt;
         let mut stream_a = client_a.stream_counts();
         let mut stream_b = client_b.stream_counts();
-        
+
         loop {
             tokio::select! {
                 Some(msg) = stream_a.next() => {
@@ -54,21 +57,20 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
         let mut last_hour = chrono::Utc::now().format("%Y-%m-%d %H").to_string();
-        
+
         loop {
             interval.tick().await;
             let current_hour = chrono::Utc::now().format("%Y-%m-%d %H").to_string();
-            
+
             if current_hour != last_hour {
                 let (count_a, count_b) = {
                     let internal = stats_for_storage.read().unwrap();
                     (internal.count_a, internal.count_b)
                 };
-                if let Err(e) = storage_arc.save_hourly(
-                    chrono::Utc::now(),
-                    count_a,
-                    count_b,
-                ).await {
+                if let Err(e) = storage_arc
+                    .save_hourly(chrono::Utc::now(), count_a, count_b)
+                    .await
+                {
                     tracing::error!("Failed to save hourly stats: {}", e);
                 }
                 last_hour = current_hour;
@@ -77,16 +79,17 @@ async fn main() -> Result<()> {
     });
 
     let app = axum::Router::new()
-        .route("/", axum::routing::get(|| async { 
-            axum::response::Html(INDEX_HTML.to_string())
-        }))
+        .route(
+            "/",
+            axum::routing::get(|| async { axum::response::Html(INDEX_HTML.to_string()) }),
+        )
         .route("/ws", axum::routing::get(websocket::ws_handler))
         .with_state(broadcast_tx)
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(&settings.bind_address).await?;
     tracing::info!("Listening on {}", settings.bind_address);
-    
+
     axum::serve(listener, app).await?;
 
     Ok(())
