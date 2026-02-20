@@ -11,17 +11,21 @@ pub struct StreamStats {
     pub delta: i64,
     pub rate_a: f64,
     pub rate_b: f64,
+    pub stream_a_name: String,
+    pub stream_b_name: String,
     pub timestamp: DateTime<Utc>,
 }
 
 pub struct StatsAggregator {
     tx: broadcast::Sender<StreamStats>,
+    stream_a_name: String,
+    stream_b_name: String,
 }
 
 impl StatsAggregator {
-    pub fn new() -> Self {
+    pub fn new(stream_a_name: String, stream_b_name: String) -> Self {
         let (tx, _) = broadcast::channel(16);
-        Self { tx }
+        Self { tx, stream_a_name, stream_b_name }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<StreamStats> {
@@ -35,6 +39,8 @@ impl StatsAggregator {
     pub fn process(&self, stats: &Arc<std::sync::RwLock<StreamStatsInternal>>) {
         let tx = self.tx.clone();
         let stats = Arc::clone(stats);
+        let stream_a_name = self.stream_a_name.clone();
+        let stream_b_name = self.stream_b_name.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
@@ -65,6 +71,8 @@ impl StatsAggregator {
                         delta: internal.count_b as i64 - internal.count_a as i64,
                         rate_a: rate_ema_a,
                         rate_b: rate_ema_b,
+                        stream_a_name: stream_a_name.clone(),
+                        stream_b_name: stream_b_name.clone(),
                         timestamp: Utc::now(),
                     };
 

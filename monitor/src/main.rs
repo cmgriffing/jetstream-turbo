@@ -25,7 +25,10 @@ async fn main() -> Result<()> {
     tracing::info!("Initialized database");
 
     let stats_internal = Arc::new(std::sync::RwLock::new(StreamStatsInternal::default()));
-    let aggregator = StatsAggregator::new();
+    let aggregator = StatsAggregator::new(
+        settings.stream_a_name.clone(),
+        settings.stream_b_name.clone(),
+    );
     let broadcast_tx = Arc::new(aggregator.sender());
 
     let client_a = StreamClient::new(settings.stream_a_url.clone(), StreamId::A);

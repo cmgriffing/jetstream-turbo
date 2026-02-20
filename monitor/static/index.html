@@ -97,7 +97,7 @@
     </div>
     <div class="container">
         <div class="counter">
-            <div class="label">Stream A</div>
+            <div class="label" id="label-a">Stream A</div>
             <div class="value" id="count-a">0</div>
             <div class="rate" id="rate-a">0/s</div>
         </div>
@@ -106,7 +106,7 @@
             <div class="value" id="delta-value">0</div>
         </div>
         <div class="counter">
-            <div class="label">Stream B</div>
+            <div class="label" id="label-b">Stream B</div>
             <div class="value" id="count-b">0</div>
             <div class="rate" id="rate-b">0/s</div>
         </div>
@@ -114,6 +114,8 @@
     <div class="status disconnected" id="status">Disconnected</div>
 
     <script>
+        const labelA = document.getElementById('label-a');
+        const labelB = document.getElementById('label-b');
         const countA = document.getElementById('count-a');
         const countB = document.getElementById('count-b');
         const rateA = document.getElementById('rate-a');
@@ -138,6 +140,8 @@
             
             ws.onmessage = (e) => {
                 const stats = JSON.parse(e.data);
+                labelA.textContent = stats.stream_a_name;
+                labelB.textContent = stats.stream_b_name;
                 countA.textContent = stats.stream_a.toLocaleString();
                 countB.textContent = stats.stream_b.toLocaleString();
                 rateA.textContent = Math.round(stats.rate_a).toLocaleString() + '/s';
