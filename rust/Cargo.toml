@@ -50,7 +50,7 @@ sqlx = { version = "0.8", features = [
     "chrono",
     "uuid",
 ] }
-not_redis = "0.2.0"
+not_redis = "0.3.0"
 
 # Caching and utilities
 lru = "0.12"
