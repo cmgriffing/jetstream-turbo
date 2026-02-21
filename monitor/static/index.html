@@ -34,12 +34,20 @@
       }
       .live-counters {
         display: flex;
-        flex-wrap: wrap;
+        flex-wrap: nowrap;
         gap: 1rem;
         justify-content: center;
         align-items: stretch;
         margin: 0 auto 3rem auto;
         max-width: 800px;
+      }
+      .session-label {
+        width: 100%;
+        text-align: center;
+        font-size: 0.75rem;
+        color: #555;
+        margin-bottom: 0.25rem;
+        flex-shrink: 0;
       }
       .counter {
         background: #1a1a1a;
@@ -47,7 +55,8 @@
         padding: 2rem;
         text-align: center;
         border: 1px solid #333;
-        flex: 1 1 150px;
+        flex: 1 1 0;
+        min-width: 0;
       }
       .counter .label {
         font-size: 0.875rem;
@@ -71,7 +80,7 @@
         justify-content: center;
         padding: 1rem 2rem;
         flex: 0 0 140px;
-        min-width: 120px;
+        min-width: 240px;
       }
       .delta .value {
         font-variant-numeric: tabular-nums;
@@ -127,6 +136,13 @@
         font-size: 0.75rem;
         background: #1a1a1a;
         border: 1px solid #333;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      .status .duration {
+        font-size: 0.65rem;
+        color: #666;
       }
       .status.connected {
         color: #4ade80;
@@ -168,10 +184,11 @@
   <body>
     <div class="header">
       <h1>Stream Monitor</h1>
-      <p>Comparing Bluesky turbo streams</p>
+        <p>Session totals · Comparing Bluesky turbo streams</p>
     </div>
 
     <div class="live-counters">
+      <div class="session-label">During this browser session</div>
       <div class="counter">
         <div class="label" id="label-a">Stream A</div>
         <div class="value" id="count-a">0</div>
@@ -203,7 +220,10 @@
       </div>
     </div>
 
-    <div class="status disconnected" id="status">Disconnected</div>
+    <div class="status disconnected" id="status">
+      <span class="indicator">Disconnected</span>
+      <span class="duration" id="status-duration"></span>
+    </div>
 
     <script>
       const labelA = document.getElementById("label-a");
@@ -215,6 +235,25 @@
       const deltaEl = document.getElementById("delta");
       const deltaValue = document.getElementById("delta-value");
       const statusEl = document.getElementById("status");
+      const statusIndicator = statusEl.querySelector(".indicator");
+      const statusDuration = document.getElementById("status-duration");
+
+      let connectedAt = null;
+
+      function formatDuration(ms) {
+        const secs = Math.floor(ms / 1000);
+        const mins = Math.floor(secs / 60);
+        if (mins > 0) {
+          return `${mins}m ${secs % 60}s`;
+        }
+        return `${secs}s`;
+      }
+
+      setInterval(() => {
+        if (connectedAt) {
+          statusDuration.textContent = formatDuration(Date.now() - connectedAt);
+        }
+      }, 1000);
 
       const chartOptions = {
         responsive: true,
@@ -363,13 +402,17 @@
         const ws = new WebSocket(location.origin.replace("http", "ws") + "/ws");
 
         ws.onopen = () => {
-          statusEl.textContent = "Connected";
+          connectedAt = Date.now();
+          statusIndicator.textContent = "Connected";
           statusEl.className = "status connected";
+          statusDuration.textContent = "0s";
         };
 
         ws.onclose = () => {
-          statusEl.textContent = "Disconnected";
+          connectedAt = null;
+          statusIndicator.textContent = "Disconnected";
           statusEl.className = "status disconnected";
+          statusDuration.textContent = "";
           setTimeout(connect, 1000);
         };
 
