@@ -2,7 +2,7 @@ use anyhow::Result;
 use jetstream_monitor::{
     config::Settings,
     stats::{StatsAggregator, StreamStatsInternal},
-    storage::Storage,
+    storage::{HourlyStat, Storage},
     stream::{StreamClient, StreamId},
     websocket,
 };
@@ -57,6 +57,7 @@ async fn main() -> Result<()> {
 
     let stats_for_storage = Arc::clone(&stats_internal);
     let storage_arc = Arc::new(storage);
+    let storage_for_api = Arc::clone(&storage_arc);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
         let mut last_hour = chrono::Utc::now().format("%Y-%m-%d %H").to_string();
@@ -87,7 +88,8 @@ async fn main() -> Result<()> {
             axum::routing::get(|| async { axum::response::Html(INDEX_HTML.to_string()) }),
         )
         .route("/ws", axum::routing::get(websocket::ws_handler))
-        .with_state(broadcast_tx)
+        .route("/api/history", axum::routing::get(get_history))
+        .with_state((broadcast_tx, storage_for_api))
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(&settings.bind_address).await?;
@@ -96,4 +98,21 @@ async fn main() -> Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+async fn get_history(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::State((_, storage)): axum::extract::State<(Arc<tokio::sync::broadcast::Sender<jetstream_monitor::StreamStats>>, Arc<Storage>)>,
+) -> axum::Json<Vec<HourlyStat>> {
+    let hours: i64 = params
+        .get("hours")
+        .and_then(|h| h.parse().ok())
+        .unwrap_or(24);
+
+    let since = chrono::Utc::now() - chrono::Duration::hours(hours);
+
+    match storage.get_stats_since(since).await {
+        Ok(stats) => axum::Json(stats),
+        Err(_) => axum::Json(vec![]),
+    }
 }

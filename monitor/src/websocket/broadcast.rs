@@ -1,4 +1,5 @@
 use crate::stats::StreamStats;
+use crate::storage::Storage;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -11,7 +12,7 @@ use tokio::sync::broadcast;
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
-    State(tx): State<Arc<broadcast::Sender<StreamStats>>>,
+    State((tx, _)): State<(Arc<broadcast::Sender<StreamStats>>, Arc<Storage>)>,
 ) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, tx.subscribe()))
 }

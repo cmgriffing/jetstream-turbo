@@ -1,6 +1,15 @@
 use anyhow::Result;
-use chrono::DateTime;
-use sqlx::SqlitePool;
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+use sqlx::{FromRow, SqlitePool};
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct HourlyStat {
+    pub hour: String,
+    pub stream_a_count: i64,
+    pub stream_b_count: i64,
+    pub delta: i64,
+}
 
 pub struct Storage {
     pool: SqlitePool,
@@ -54,5 +63,23 @@ impl Storage {
         .await?;
 
         Ok(())
+    }
+
+    pub async fn get_stats_since(&self, since: DateTime<Utc>) -> Result<Vec<HourlyStat>> {
+        let since_str = since.format("%Y-%m-%d %H:00:00").to_string();
+
+        let rows = sqlx::query_as::<_, HourlyStat>(
+            r#"
+            SELECT hour, stream_a_count, stream_b_count, delta
+            FROM hourly_stats
+            WHERE hour >= ?
+            ORDER BY hour ASC
+            "#
+        )
+        .bind(since_str)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
     }
 }
