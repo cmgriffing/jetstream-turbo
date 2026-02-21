@@ -1,8 +1,11 @@
-name: Deploy to VPS
+name: Deploy Turbo to VPS
 
 on:
   push:
     branches: [main, master]
+    paths:
+      - 'rust/**'
+      - '.github/workflows/deploy-turbo.yml'
   workflow_dispatch:
     inputs:
       target:
@@ -46,16 +49,17 @@ jobs:
             ${{ runner.os }}-cargo-git-
 
       - name: Build release binary
+        working-directory: rust
         run: cross build --release --target ${{ env.TARGET }}
 
       - name: Strip binary
-        run: strip target/${{ env.TARGET }}/release/${{ env.BINARY_NAME }}
+        run: strip rust/target/${{ env.TARGET }}/release/${{ env.BINARY_NAME }}
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: binary-${{ env.TARGET }}
-          path: target/${{ env.TARGET }}/release/${{ env.BINARY_NAME }}
+          name: binary-turbo-${{ env.TARGET }}
+          path: rust/target/${{ env.TARGET }}/release/${{ env.BINARY_NAME }}
           retention-days: 1
 
   deploy:
@@ -71,7 +75,7 @@ jobs:
       - name: Download binary artifact
         uses: actions/download-artifact@v4
         with:
-          name: binary-${{ env.TARGET }}
+          name: binary-turbo-${{ env.TARGET }}
 
       - name: Setup SSH key
         run: |
@@ -111,7 +115,7 @@ jobs:
           SSH_USER: ${{ secrets.VPS_USER }}
           SSH_PORT: ${{ secrets.VPS_PORT || '22' }}
         run: |
-          scp -P $SSH_PORT deploy/systemd/${{ env.SERVICE_NAME }}.service $SSH_USER@$SSH_HOST:/tmp/${{ env.SERVICE_NAME }}.service
+          scp -P $SSH_PORT rust/deploy/systemd/${{ env.SERVICE_NAME }}.service $SSH_USER@$SSH_HOST:/tmp/${{ env.SERVICE_NAME }}.service
           ssh -p $SSH_PORT $SSH_USER@$SSH_HOST "
             sudo cp /tmp/${{ env.SERVICE_NAME }}.service /etc/systemd/system/${{ env.SERVICE_NAME }}.service
             sudo systemctl daemon-reload

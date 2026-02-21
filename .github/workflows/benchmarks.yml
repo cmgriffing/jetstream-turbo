@@ -3,8 +3,13 @@ name: Benchmarks
 on:
   push:
     branches: [main, master]
+    paths:
+      - 'rust/**'
+      - '.github/workflows/benchmarks.yml'
   pull_request:
     branches: [main, master]
+    paths:
+      - 'rust/**'
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,26 +33,28 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashDeps }}
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache cargo index
         uses: actions/cache@v4
         with:
           path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashDeps }}
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache cargo build
         uses: actions/cache@v4
         with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashDeps }}
+          path: rust/target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run benchmarks
+        working-directory: rust
         run: |
           cargo bench --bench hydration_benchmark
 
       - name: Compare with baseline
         id: compare
+        working-directory: rust
         run: |
           cd scripts/benchmarks
           chmod +x check.sh
@@ -56,6 +63,7 @@ jobs:
 
       - name: Update baselines on main branch
         if: github.ref == 'refs/heads/main' && steps.compare.outcome == 'success'
+        working-directory: rust
         run: |
           cd scripts/benchmarks
           chmod +x update.sh
@@ -78,7 +86,7 @@ jobs:
             
             // Try to get detailed comparison
             try {
-              const output = execSync('./scripts/benchmarks/check.sh 2>&1', { encoding: 'utf8' });
+              const output = execSync('./rust/scripts/benchmarks/check.sh 2>&1', { encoding: 'utf8' });
               const lines = output.split('\n').filter(l => l.includes('[REGRESSION]'));
               for (const line of lines) {
                 comment += '- ' + line.replace('[REGRESSION]', '').trim() + '\n';
@@ -86,7 +94,7 @@ jobs:
             } catch (e) {}
             
             comment += '\n**Action Required:**\n';
-            comment += '- If this regression is intentional, update baselines with `./scripts/benchmarks/update.sh`\n';
+            comment += '- If this regression is intentional, update baselines with `./rust/scripts/benchmarks/update.sh`\n';
             comment += '- If unintended, please investigate and fix the performance regression\n';
             
             github.rest.issues.createComment({
