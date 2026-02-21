@@ -80,15 +80,15 @@ jobs:
       - name: Setup SSH key
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_rsa
+          echo "${{ secrets.VPS_MONITOR_SSH_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh-keyscan -H ${{ secrets.VPS_MONITOR_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Create directories on VPS
         env:
-          SSH_HOST: ${{ secrets.VPS_HOST }}
-          SSH_USER: ${{ secrets.VPS_USER }}
-          SSH_PORT: ${{ secrets.VPS_PORT || '22' }}
+          SSH_HOST: ${{ secrets.VPS_MONITOR_HOST }}
+          SSH_USER: ${{ secrets.VPS_MONITOR_USER }}
+          SSH_PORT: ${{ secrets.VPS_MONITOR_PORT || '22' }}
         run: |
           ssh -p $SSH_PORT $SSH_USER@$SSH_HOST "
             sudo mkdir -p ${{ env.DEPLOY_PATH }}
@@ -98,9 +98,9 @@ jobs:
 
       - name: Copy binary to VPS
         env:
-          SSH_HOST: ${{ secrets.VPS_HOST }}
-          SSH_USER: ${{ secrets.VPS_USER }}
-          SSH_PORT: ${{ secrets.VPS_PORT || '22' }}
+          SSH_HOST: ${{ secrets.VPS_MONITOR_HOST }}
+          SSH_USER: ${{ secrets.VPS_MONITOR_USER }}
+          SSH_PORT: ${{ secrets.VPS_MONITOR_PORT || '22' }}
         run: |
           scp -P $SSH_PORT ${{ env.BINARY_NAME }} $SSH_USER@$SSH_HOST:/tmp/${{ env.BINARY_NAME }}
           ssh -p $SSH_PORT $SSH_USER@$SSH_HOST "
@@ -111,9 +111,9 @@ jobs:
 
       - name: Copy systemd service file
         env:
-          SSH_HOST: ${{ secrets.VPS_HOST }}
-          SSH_USER: ${{ secrets.VPS_USER }}
-          SSH_PORT: ${{ secrets.VPS_PORT || '22' }}
+          SSH_HOST: ${{ secrets.VPS_MONITOR_HOST }}
+          SSH_USER: ${{ secrets.VPS_MONITOR_USER }}
+          SSH_PORT: ${{ secrets.VPS_MONITOR_PORT || '22' }}
         run: |
           scp -P $SSH_PORT monitor/deploy/systemd/${{ env.SERVICE_NAME }}.service $SSH_USER@$SSH_HOST:/tmp/${{ env.SERVICE_NAME }}.service
           ssh -p $SSH_PORT $SSH_USER@$SSH_HOST "
@@ -123,9 +123,9 @@ jobs:
 
       - name: Copy .env.example if not exists
         env:
-          SSH_HOST: ${{ secrets.VPS_HOST }}
-          SSH_USER: ${{ secrets.VPS_USER }}
-          SSH_PORT: ${{ secrets.VPS_PORT || '22' }}
+          SSH_HOST: ${{ secrets.VPS_MONITOR_HOST }}
+          SSH_USER: ${{ secrets.VPS_MONITOR_USER }}
+          SSH_PORT: ${{ secrets.VPS_MONITOR_PORT || '22' }}
         run: |
           ssh -p $SSH_PORT $SSH_USER@$SSH_HOST "
             if [ ! -f ${{ env.DEPLOY_PATH }}/.env ]; then
@@ -136,20 +136,29 @@ jobs:
 
       - name: Restart service
         env:
-          SSH_HOST: ${{ secrets.VPS_HOST }}
-          SSH_USER: ${{ secrets.VPS_USER }}
-          SSH_PORT: ${{ secrets.VPS_PORT || '22' }}
+          SSH_HOST: ${{ secrets.VPS_MONITOR_HOST }}
+          SSH_USER: ${{ secrets.VPS_MONITOR_USER }}
+          SSH_PORT: ${{ secrets.VPS_MONITOR_PORT || '22' }}
         run: |
           ssh -p $SSH_PORT $SSH_USER@$SSH_HOST "
             sudo systemctl enable ${{ env.SERVICE_NAME }}
             sudo systemctl restart ${{ env.SERVICE_NAME }}
           "
 
+      - name: Setup Caddy reverse proxy
+        env:
+          SSH_HOST: ${{ secrets.VPS_MONITOR_HOST }}
+          SSH_USER: ${{ secrets.VPS_MONITOR_USER }}
+          SSH_PORT: ${{ secrets.VPS_MONITOR_PORT || '22' }}
+        run: |
+          scp -P $SSH_PORT monitor/deploy/setup-caddy.sh $SSH_USER@$SSH_HOST:/tmp/setup-caddy.sh
+          ssh -p $SSH_PORT $SSH_USER@$SSH_HOST "sudo bash /tmp/setup-caddy.sh"
+
       - name: Verify deployment
         env:
-          SSH_HOST: ${{ secrets.VPS_HOST }}
-          SSH_USER: ${{ secrets.VPS_USER }}
-          SSH_PORT: ${{ secrets.VPS_PORT || '22' }}
+          SSH_HOST: ${{ secrets.VPS_MONITOR_HOST }}
+          SSH_USER: ${{ secrets.VPS_MONITOR_USER }}
+          SSH_PORT: ${{ secrets.VPS_MONITOR_PORT || '22' }}
         run: |
           ssh -p $SSH_PORT $SSH_USER@$SSH_HOST "
             sleep 3
