@@ -79,7 +79,7 @@ jobs:
       - name: Create directories on VPS
         uses: appleboy/ssh-action@master
         with:
-          host: ${{ vars.VPS_TURBO_HOST }}
+          host: ${{ secrets.VPS_TURBO_HOST }}
           username: deploy
           key: ${{ secrets.VPS_TURBO_SSH_KEY }}
           script: |
@@ -92,7 +92,7 @@ jobs:
       - name: Copy binary to VPS
         uses: appleboy/scp-action@master
         with:
-          host: ${{ vars.VPS_TURBO_HOST }}
+          host: ${{ secrets.VPS_TURBO_HOST }}
           username: deploy
           key: ${{ secrets.VPS_TURBO_SSH_KEY }}
           source: ${{ env.BINARY_NAME }}
@@ -101,7 +101,7 @@ jobs:
       - name: Update binary permissions on Host
         uses: appleboy/ssh-action@master
         with:
-          host: ${{ vars.VPS_TURBO_HOST }}
+          host: ${{ secrets.VPS_TURBO_HOST }}
           username: deploy
           key: ${{ secrets.VPS_TURBO_SSH_KEY }}
           script: |
@@ -112,7 +112,7 @@ jobs:
       - name: Copy systemd service file to Host
         uses: appleboy/scp-action@master
         with:
-          host: ${{ vars.VPS_TURBO_HOST }}
+          host: ${{ secrets.VPS_TURBO_HOST }}
           username: deploy
           key: ${{ secrets.VPS_TURBO_SSH_KEY }}
           source: rust/deploy/systemd/${{ env.SERVICE_NAME }}.service
@@ -121,7 +121,7 @@ jobs:
       - name: Move systemd service file and reload via systemctl
         uses: appleboy/ssh-action@master
         with:
-          host: ${{ vars.VPS_TURBO_HOST }}
+          host: ${{ secrets.VPS_TURBO_HOST }}
           username: deploy
           key: ${{ secrets.VPS_TURBO_SSH_KEY }}
           script: |
@@ -131,7 +131,7 @@ jobs:
       - name: Check for .env file
         uses: appleboy/ssh-action@master
         with:
-          host: ${{ vars.VPS_TURBO_HOST }}
+          host: ${{ secrets.VPS_TURBO_HOST }}
           username: deploy
           key: ${{ secrets.VPS_TURBO_SSH_KEY }}
           script: |
@@ -145,7 +145,7 @@ jobs:
       - name: Restart Service
         uses: appleboy/ssh-action@master
         with:
-          host: ${{ vars.VPS_TURBO_HOST }}
+          host: ${{ secrets.VPS_TURBO_HOST }}
           username: deploy
           key: ${{ secrets.VPS_TURBO_SSH_KEY }}
           script: |
@@ -155,7 +155,7 @@ jobs:
       - name: Copy Caddy setup script to Host
         uses: appleboy/scp-action@master
         with:
-          host: ${{ vars.VPS_TURBO_HOST }}
+          host: ${{ secrets.VPS_TURBO_HOST }}
           username: deploy
           key: ${{ secrets.VPS_TURBO_SSH_KEY }}
           source: rust/deploy/setup-caddy.sh
@@ -164,7 +164,7 @@ jobs:
       - name: Execute Caddy setup script
         uses: appleboy/ssh-action@master
         with:
-          host: ${{ vars.VPS_TURBO_HOST }}
+          host: ${{ secrets.VPS_TURBO_HOST }}
           username: deploy
           key: ${{ secrets.VPS_TURBO_SSH_KEY }}
           script: |
@@ -173,7 +173,7 @@ jobs:
       - name: Verify deployment
         uses: appleboy/ssh-action@master
         with:
-          host: ${{ vars.VPS_TURBO_HOST }}
+          host: ${{ secrets.VPS_TURBO_HOST }}
           username: deploy
           key: ${{ secrets.VPS_TURBO_SSH_KEY }}
           script: |
