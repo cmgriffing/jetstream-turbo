@@ -73,6 +73,20 @@
         color: #666;
         margin-top: 0.5rem;
       }
+      .counter.winning {
+        border-color: #4ade80;
+        box-shadow: 0 0 20px rgba(74, 222, 128, 0.3);
+      }
+      .counter.winning .value {
+        color: #4ade80;
+      }
+      .counter.losing {
+        border-color: #f87171;
+        box-shadow: 0 0 20px rgba(248, 113, 113, 0.3);
+      }
+      .counter.losing .value {
+        color: #f87171;
+      }
       .delta {
         display: flex;
         flex-direction: column;
@@ -102,6 +116,61 @@
       .delta.neutral .value {
         color: #888;
       }
+      .totals-row {
+        display: flex;
+        gap: 1rem;
+        max-width: 800px;
+        margin: 0 auto 2rem auto;
+      }
+      .totals-card {
+        flex: 1;
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 12px;
+        padding: 1rem 1.5rem;
+      }
+      .totals-header {
+        font-size: 0.75rem;
+        color: #666;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 0.75rem;
+      }
+      .totals-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.25rem 0;
+      }
+      .totals-label {
+        font-size: 0.875rem;
+        color: #888;
+      }
+      .totals-value {
+        font-size: 1rem;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+      }
+      .totals-delta {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding-top: 0.5rem;
+        margin-top: 0.5rem;
+        border-top: 1px solid #333;
+        font-size: 0.875rem;
+        color: #888;
+      }
+      .totals-delta-value {
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+      }
+      .totals-delta-value.positive {
+        color: #4ade80;
+      }
+      .totals-delta-value.negative {
+        color: #f87171;
+      }
       .charts-container {
         display: flex;
         flex-wrap: wrap;
@@ -116,6 +185,7 @@
         border: 1px solid #333;
         flex: 1 1 calc(50% - 1rem);
         min-width: 0;
+        overflow: hidden;
       }
       .chart-panel h2 {
         font-size: 1rem;
@@ -126,6 +196,8 @@
       .chart-wrapper {
         height: 300px;
         position: relative;
+        width: 100%;
+        overflow: hidden;
       }
       .status {
         position: fixed;
@@ -178,18 +250,25 @@
         .delta {
           padding: 0.5rem;
         }
+        .totals-row {
+          flex-direction: column;
+          gap: 0.5rem;
+        }
+        .chart-wrapper canvas {
+          max-width: 100%;
+        }
       }
     </style>
   </head>
   <body>
     <div class="header">
       <h1>Stream Monitor</h1>
-        <p>Session totals · Comparing Bluesky turbo streams</p>
+      <p>Session totals · Comparing Bluesky turbo streams</p>
     </div>
 
+    <div class="session-label">During this browser session</div>
     <div class="live-counters">
-      <div class="session-label">During this browser session</div>
-      <div class="counter">
+      <div class="counter" id="counter-a">
         <div class="label" id="label-a">Stream A</div>
         <div class="value" id="count-a">0</div>
         <div class="rate" id="rate-a">0/s</div>
@@ -198,22 +277,55 @@
         <div class="label">Delta</div>
         <div class="value" id="delta-value">0</div>
       </div>
-      <div class="counter">
+      <div class="counter" id="counter-b">
         <div class="label" id="label-b">Stream B</div>
         <div class="value" id="count-b">0</div>
         <div class="rate" id="rate-b">0/s</div>
       </div>
     </div>
 
+    <div class="totals-row">
+      <div class="totals-card">
+        <div class="totals-header">24-Hour Totals</div>
+        <div class="totals-item">
+          <span class="totals-label" id="totals-24h-label-a">Stream A</span>
+          <span class="totals-value" id="totals-24h-a">0</span>
+        </div>
+        <div class="totals-item">
+          <span class="totals-label" id="totals-24h-label-b">Stream B</span>
+          <span class="totals-value" id="totals-24h-b">0</span>
+        </div>
+        <div class="totals-delta">
+          <span>Delta</span>
+          <span class="totals-delta-value" id="totals-24h-delta">0</span>
+        </div>
+      </div>
+      <div class="totals-card">
+        <div class="totals-header">28-Day Totals</div>
+        <div class="totals-item">
+          <span class="totals-label" id="totals-28d-label-a">Stream A</span>
+          <span class="totals-value" id="totals-28d-a">0</span>
+        </div>
+        <div class="totals-item">
+          <span class="totals-label" id="totals-28d-label-b">Stream B</span>
+          <span class="totals-value" id="totals-28d-b">0</span>
+        </div>
+        <div class="totals-delta">
+          <span>Delta</span>
+          <span class="totals-delta-value" id="totals-28d-delta">0</span>
+        </div>
+      </div>
+    </div>
+
     <div class="charts-container">
       <div class="chart-panel">
-        <h2>Real-Time (24h)</h2>
+        <h2>Delta (24h)</h2>
         <div class="chart-wrapper">
           <canvas id="chart-24h"></canvas>
         </div>
       </div>
       <div class="chart-panel">
-        <h2>Historical (28 days)</h2>
+        <h2>Delta (28 days)</h2>
         <div class="chart-wrapper">
           <canvas id="chart-28d"></canvas>
         </div>
@@ -232,13 +344,37 @@
       const countB = document.getElementById("count-b");
       const rateA = document.getElementById("rate-a");
       const rateB = document.getElementById("rate-b");
+      const counterA = document.getElementById("counter-a");
+      const counterB = document.getElementById("counter-b");
       const deltaEl = document.getElementById("delta");
       const deltaValue = document.getElementById("delta-value");
       const statusEl = document.getElementById("status");
       const statusIndicator = statusEl.querySelector(".indicator");
       const statusDuration = document.getElementById("status-duration");
+      const chart24hTitle = document.querySelector(
+        ".chart-panel:nth-child(1) h2",
+      );
+      const chart28dTitle = document.querySelector(
+        ".chart-panel:nth-child(2) h2",
+      );
+
+      const totals24hA = document.getElementById("totals-24h-a");
+      const totals24hB = document.getElementById("totals-24h-b");
+      const totals24hDelta = document.getElementById("totals-24h-delta");
+      const totals24hLabelA = document.getElementById("totals-24h-label-a");
+      const totals24hLabelB = document.getElementById("totals-24h-label-b");
+
+      const totals28dA = document.getElementById("totals-28d-a");
+      const totals28dB = document.getElementById("totals-28d-b");
+      const totals28dDelta = document.getElementById("totals-28d-delta");
+      const totals28dLabelA = document.getElementById("totals-28d-label-a");
+      const totals28dLabelB = document.getElementById("totals-28d-label-b");
 
       let connectedAt = null;
+      let streamAName = "Stream A";
+      let streamBName = "Stream B";
+      let rawData24h = [];
+      let rawData28d = [];
 
       function formatDuration(ms) {
         const secs = Math.floor(ms / 1000);
@@ -255,118 +391,181 @@
         }
       }, 1000);
 
-      const chartOptions = {
-        responsive: true,
-        maintainAspectRatio: false,
-        interaction: {
-          mode: "index",
-          intersect: false,
-        },
-        plugins: {
-          legend: {
-            position: "top",
-            labels: { color: "#888", font: { size: 11 } },
-          },
-          tooltip: {
-            backgroundColor: "#2a2a2a",
-            titleColor: "#e0e0e0",
-            bodyColor: "#888",
-          },
-        },
-        scales: {
-          x: {
-            ticks: { color: "#666", maxTicksLimit: 8 },
-            grid: { color: "#222" },
-          },
-          y: {
-            ticks: { color: "#666" },
-            grid: { color: "#222" },
-          },
-        },
-      };
+      function updateChartTitles() {
+        chart24hTitle.textContent = `Delta (24h) — ${streamAName} vs ${streamBName}`;
+        chart28dTitle.textContent = `Delta (28 days) — ${streamAName} vs ${streamBName}`;
+        totals24hLabelA.textContent = streamAName;
+        totals24hLabelB.textContent = streamBName;
+        totals28dLabelA.textContent = streamAName;
+        totals28dLabelB.textContent = streamBName;
+      }
+
+      function updateDeltaDisplay(element, delta) {
+        const sign = delta >= 0 ? "+" : "";
+        element.textContent = sign + delta.toLocaleString();
+        element.className =
+          "totals-delta-value " +
+          (delta > 0 ? "positive" : delta < 0 ? "negative" : "");
+      }
 
       const chart24h = new Chart(document.getElementById("chart-24h"), {
-        type: "line",
+        type: "bar",
         data: {
           labels: [],
           datasets: [
             {
-              label: "Stream A",
-              data: [],
-              borderColor: "#3b82f6",
-              backgroundColor: "rgba(59, 130, 246, 0.1)",
-              fill: false,
-              tension: 0.1,
-              pointRadius: 0,
-            },
-            {
-              label: "Stream B",
-              data: [],
-              borderColor: "#8b5cf6",
-              backgroundColor: "rgba(139, 92, 246, 0.1)",
-              fill: false,
-              tension: 0.1,
-              pointRadius: 0,
-            },
-            {
               label: "Delta",
               data: [],
-              borderColor: "#4ade80",
-              backgroundColor: "rgba(74, 222, 128, 0.1)",
-              fill: false,
-              tension: 0.1,
-              pointRadius: 0,
-              borderDash: [5, 5],
+              backgroundColor: (ctx) => {
+                const value = ctx.raw ?? 0;
+                return value >= 0
+                  ? "rgba(74, 222, 128, 0.7)"
+                  : "rgba(248, 113, 113, 0.7)";
+              },
+              borderColor: (ctx) => {
+                const value = ctx.raw ?? 0;
+                return value >= 0 ? "#4ade80" : "#f87171";
+              },
+              borderWidth: 1,
+              borderRadius: 4,
+              barPercentage: 0.9,
+              categoryPercentage: 0.9,
             },
           ],
         },
-        options: chartOptions,
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: {
+            mode: "index",
+            intersect: false,
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              enabled: true,
+              backgroundColor: "#2a2a2a",
+              titleColor: "#e0e0e0",
+              bodyColor: "#888",
+              callbacks: {
+                label: (ctx) => {
+                  const value = ctx.raw ?? 0;
+                  const sign = value >= 0 ? "+" : "";
+                  return `Delta: ${sign}${value.toLocaleString()}`;
+                },
+                afterBody: (ctx) => {
+                  const idx = ctx.dataIndex;
+                  const d = rawData24h[idx];
+                  if (!d) return [];
+                  return [
+                    `${streamAName}: ${d.streamA.toLocaleString()}`,
+                    `${streamBName}: ${d.streamB.toLocaleString()}`,
+                  ];
+                },
+              },
+            },
+          },
+          scales: {
+            x: {
+              ticks: { color: "#666", maxTicksLimit: 12 },
+              grid: { display: false },
+            },
+            y: {
+              ticks: { color: "#666" },
+              grid: { color: "#222" },
+            },
+          },
+        },
       });
 
       const chart28d = new Chart(document.getElementById("chart-28d"), {
-        type: "line",
+        type: "bar",
         data: {
           labels: [],
           datasets: [
             {
-              label: "Stream A",
-              data: [],
-              borderColor: "#3b82f6",
-              backgroundColor: "rgba(59, 130, 246, 0.1)",
-              fill: false,
-              tension: 0.1,
-              pointRadius: 0,
-            },
-            {
-              label: "Stream B",
-              data: [],
-              borderColor: "#8b5cf6",
-              backgroundColor: "rgba(139, 92, 246, 0.1)",
-              fill: false,
-              tension: 0.1,
-              pointRadius: 0,
-            },
-            {
               label: "Delta",
               data: [],
-              borderColor: "#4ade80",
-              backgroundColor: "rgba(74, 222, 128, 0.1)",
-              fill: false,
-              tension: 0.1,
-              pointRadius: 0,
-              borderDash: [5, 5],
+              backgroundColor: (ctx) => {
+                const value = ctx.raw ?? 0;
+                return value >= 0
+                  ? "rgba(74, 222, 128, 0.7)"
+                  : "rgba(248, 113, 113, 0.7)";
+              },
+              borderColor: (ctx) => {
+                const value = ctx.raw ?? 0;
+                return value >= 0 ? "#4ade80" : "#f87171";
+              },
+              borderWidth: 1,
+              borderRadius: 4,
+              barPercentage: 0.9,
+              categoryPercentage: 0.9,
             },
           ],
         },
-        options: chartOptions,
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: {
+            mode: "index",
+            intersect: false,
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              enabled: true,
+              backgroundColor: "#2a2a2a",
+              titleColor: "#e0e0e0",
+              bodyColor: "#888",
+              callbacks: {
+                label: (ctx) => {
+                  const value = ctx.raw ?? 0;
+                  const sign = value >= 0 ? "+" : "";
+                  return `Delta: ${sign}${value.toLocaleString()}`;
+                },
+                afterBody: (ctx) => {
+                  const idx = ctx.dataIndex;
+                  const d = rawData28d[idx];
+                  if (!d) return [];
+                  return [
+                    `${streamAName}: ${d.streamA.toLocaleString()}`,
+                    `${streamBName}: ${d.streamB.toLocaleString()}`,
+                  ];
+                },
+              },
+            },
+          },
+          scales: {
+            x: {
+              ticks: { color: "#666", maxTicksLimit: 14 },
+              grid: { display: false },
+            },
+            y: {
+              ticks: { color: "#666" },
+              grid: { color: "#222" },
+            },
+          },
+        },
       });
 
-      async function fetchHistory(hours, chart) {
+      async function fetchHistory(hours, chart, rawData) {
         try {
           const res = await fetch(`/api/history?hours=${hours}`);
           const data = await res.json();
 
-          const labels = data.map((d) => {
+          let processedData = data;
+
+          if (hours > 48 && data.length > 0) {
+            const dailyMap = new Map();
+            data.forEach((d) => {
+              const date = new Date(d.hour);
+              const dayKey = date.toISOString().split("T")[0];
+              dailyMap.set(dayKey, d);
+            });
+            processedData = Array.from(dailyMap.values());
+          }
+
+          const labels = processedData.map((d) => {
             const date = new Date(d.hour);
             return hours <= 48
               ? date.toLocaleString("en-US", {
@@ -380,19 +579,44 @@
                 });
           });
 
+          rawData.length = 0;
+          processedData.forEach((d) => {
+            rawData.push({
+              streamA: d.stream_a_count,
+              streamB: d.stream_b_count,
+              delta: d.delta,
+            });
+          });
+
           chart.data.labels = labels;
-          chart.data.datasets[0].data = data.map((d) => d.stream_a_count);
-          chart.data.datasets[1].data = data.map((d) => d.stream_b_count);
-          chart.data.datasets[2].data = data.map((d) => d.delta);
+          chart.data.datasets[0].data = processedData.map((d) => d.delta);
           chart.update("none");
+
+          if (processedData.length >= 2) {
+            const first = processedData[0];
+            const last = processedData[processedData.length - 1];
+            const totalA = last.stream_a_count - first.stream_a_count;
+            const totalB = last.stream_b_count - first.stream_b_count;
+            const totalDelta = totalA - totalB;
+
+            if (hours <= 48) {
+              totals24hA.textContent = totalA.toLocaleString();
+              totals24hB.textContent = totalB.toLocaleString();
+              updateDeltaDisplay(totals24hDelta, totalDelta);
+            } else {
+              totals28dA.textContent = totalA.toLocaleString();
+              totals28dB.textContent = totalB.toLocaleString();
+              updateDeltaDisplay(totals28dDelta, totalDelta);
+            }
+          }
         } catch (e) {
           console.error("Failed to fetch history:", e);
         }
       }
 
       function refreshCharts() {
-        fetchHistory(24, chart24h);
-        fetchHistory(672, chart28d);
+        fetchHistory(24, chart24h, rawData24h);
+        fetchHistory(672, chart28d, rawData28d);
       }
 
       refreshCharts();
@@ -418,6 +642,16 @@
 
         ws.onmessage = (e) => {
           const stats = JSON.parse(e.data);
+
+          if (
+            streamAName !== stats.stream_a_name ||
+            streamBName !== stats.stream_b_name
+          ) {
+            streamAName = stats.stream_a_name;
+            streamBName = stats.stream_b_name;
+            updateChartTitles();
+          }
+
           labelA.textContent = stats.stream_a_name;
           labelB.textContent = stats.stream_b_name;
           countA.textContent = stats.stream_a.toLocaleString();
@@ -426,15 +660,21 @@
           rateB.textContent = Math.round(stats.rate_b).toLocaleString() + "/s";
 
           const delta = stats.delta;
-          deltaValue.textContent =
-            delta > 0 ? "+" + delta.toLocaleString() : delta.toLocaleString();
+          const sign = delta >= 0 ? "+" : "";
+          deltaValue.textContent = sign + delta.toLocaleString();
 
           if (delta > 0) {
             deltaEl.className = "delta positive";
+            counterA.className = "counter winning";
+            counterB.className = "counter losing";
           } else if (delta < 0) {
             deltaEl.className = "delta negative";
+            counterA.className = "counter losing";
+            counterB.className = "counter winning";
           } else {
             deltaEl.className = "delta neutral";
+            counterA.className = "counter";
+            counterB.className = "counter";
           }
         };
       }

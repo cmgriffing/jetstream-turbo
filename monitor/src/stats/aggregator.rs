@@ -25,7 +25,11 @@ pub struct StatsAggregator {
 impl StatsAggregator {
     pub fn new(stream_a_name: String, stream_b_name: String) -> Self {
         let (tx, _) = broadcast::channel(16);
-        Self { tx, stream_a_name, stream_b_name }
+        Self {
+            tx,
+            stream_a_name,
+            stream_b_name,
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<StreamStats> {
@@ -68,7 +72,7 @@ impl StatsAggregator {
                     let stats_snapshot = StreamStats {
                         stream_a: internal.count_a,
                         stream_b: internal.count_b,
-                        delta: internal.count_b as i64 - internal.count_a as i64,
+                        delta: internal.count_a as i64 - internal.count_b as i64,
                         rate_a: rate_ema_a,
                         rate_b: rate_ema_b,
                         stream_a_name: stream_a_name.clone(),
