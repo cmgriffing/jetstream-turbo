@@ -84,91 +84,107 @@ jobs:
         with:
           name: binary-turbo-${{ env.TARGET }}
 
-      - name: Setup SSH key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.VPS_TURBO_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ secrets.VPS_TURBO_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
-
       - name: Create directories on VPS
-        env:
-          SSH_HOST: ${{ secrets.VPS_TURBO_HOST }}
-          SSH_USER: ${{ secrets.VPS_TURBO_USER }}
-          SSH_PORT: ${{ secrets.VPS_TURBO_PORT || '22' }}
-        run: |
-          ssh -p $SSH_PORT $SSH_USER@$SSH_HOST "
-            sudo mkdir -p ${{ env.DEPLOY_PATH }}
-            sudo useradd -r -s /bin/false ${{ env.SERVICE_NAME }} 2>/dev/null || true
-            sudo chown ${{ env.SERVICE_NAME }}:${{ env.SERVICE_NAME }} ${{ env.DEPLOY_PATH }}
-          "
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ vars.VPS_TURBO_HOST }}
+          username: deploy
+          key: ${{ secrets.VPS_TURBO_SSH_KEY }}
+          script: |
+            ssh -p $SSH_PORT $SSH_USER@$SSH_HOST "
+              sudo mkdir -p ${{ env.DEPLOY_PATH }}
+              sudo useradd -r -s /bin/false ${{ env.SERVICE_NAME }} 2>/dev/null || true
+              sudo chown ${{ env.SERVICE_NAME }}:${{ env.SERVICE_NAME }} ${{ env.DEPLOY_PATH }}
+            "
 
       - name: Copy binary to VPS
-        env:
-          SSH_HOST: ${{ secrets.VPS_TURBO_HOST }}
-          SSH_USER: ${{ secrets.VPS_TURBO_USER }}
-          SSH_PORT: ${{ secrets.VPS_TURBO_PORT || '22' }}
-        run: |
-          scp -P $SSH_PORT ${{ env.BINARY_NAME }} $SSH_USER@$SSH_HOST:/tmp/${{ env.BINARY_NAME }}
-          ssh -p $SSH_PORT $SSH_USER@$SSH_HOST "
-            sudo cp /tmp/${{ env.BINARY_NAME }} ${{ env.DEPLOY_PATH }}/${{ env.BINARY_NAME }}
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ vars.VPS_TURBO_HOST }}
+          username: deploy
+          key: ${{ secrets.VPS_TURBO_SSH_KEY }}
+          source: ${{ env.BINARY_NAME }}
+          target: "/tmp/${{ env.DEPLOY_PATH }}/${{ env.BINARY_NAME }}"
+
+      - name: Update binary permissions on Host
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ vars.VPS_TURBO_HOST }}
+          username: deploy
+          key: ${{ secrets.VPS_TURBO_SSH_KEY }}
+          script: |
+            sudo mv /tmp/${{ env.DEPLOY_PATH }}/${{ env.BINARY_NAME }} ${{ env.DEPLOY_PATH }}/${{ env.BINARY_NAME }}
             sudo chmod +x ${{ env.DEPLOY_PATH }}/${{ env.BINARY_NAME }}
             sudo chown ${{ env.SERVICE_NAME }}:${{ env.SERVICE_NAME }} ${{ env.DEPLOY_PATH }}/${{ env.BINARY_NAME }}
-          "
 
-      - name: Copy systemd service file
-        env:
-          SSH_HOST: ${{ secrets.VPS_TURBO_HOST }}
-          SSH_USER: ${{ secrets.VPS_TURBO_USER }}
-          SSH_PORT: ${{ secrets.VPS_TURBO_PORT || '22' }}
-        run: |
-          scp -P $SSH_PORT rust/deploy/systemd/${{ env.SERVICE_NAME }}.service $SSH_USER@$SSH_HOST:/tmp/${{ env.SERVICE_NAME }}.service
-          ssh -p $SSH_PORT $SSH_USER@$SSH_HOST "
-            sudo cp /tmp/${{ env.SERVICE_NAME }}.service /etc/systemd/system/${{ env.SERVICE_NAME }}.service
+      - name: Copy systemd service file to Host
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ vars.VPS_TURBO_HOST }}
+          username: deploy
+          key: ${{ secrets.VPS_TURBO_SSH_KEY }}
+          source: rust/deploy/systemd/${{ env.SERVICE_NAME }}.service
+          target: "/tmp/${{ env.DEPLOY_PATH }}/${{ env.BINARY_NAME }}"
+
+      - name: Move systemd service file and reload via systemctl
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ vars.VPS_TURBO_HOST }}
+          username: deploy
+          key: ${{ secrets.VPS_TURBO_SSH_KEY }}
+          script: |
+            sudo mv /tmp/${{ env.SERVICE_NAME }}.service /etc/systemd/system/${{ env.SERVICE_NAME }}.service
             sudo systemctl daemon-reload
-          "
 
-      - name: Copy .env.example if not exists
-        env:
-          SSH_HOST: ${{ secrets.VPS_TURBO_HOST }}
-          SSH_USER: ${{ secrets.VPS_TURBO_USER }}
-          SSH_PORT: ${{ secrets.VPS_TURBO_PORT || '22' }}
-        run: |
-          ssh -p $SSH_PORT $SSH_USER@$SSH_HOST "
+      - name: Check for .env file
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ vars.VPS_TURBO_HOST }}
+          username: deploy
+          key: ${{ secrets.VPS_TURBO_SSH_KEY }}
+          script: |
             if [ ! -f ${{ env.DEPLOY_PATH }}/.env ]; then
               echo '# Create .env file at ${{ env.DEPLOY_PATH }}/.env with your configuration'
               echo '# Required: BLUESKY_HANDLE, BLUESKY_APP_PASSWORD, STREAM_NAME'
+              echo '# You will need to restart the service after updating the .env file.'
+              echo '# sudo systemctl restart ${{ env.SERVICE_NAME }}'
             fi
-          "
 
-      - name: Restart service
-        env:
-          SSH_HOST: ${{ secrets.VPS_TURBO_HOST }}
-          SSH_USER: ${{ secrets.VPS_TURBO_USER }}
-          SSH_PORT: ${{ secrets.VPS_TURBO_PORT || '22' }}
-        run: |
-          ssh -p $SSH_PORT $SSH_USER@$SSH_HOST "
+      - name: Restart Service
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ vars.VPS_TURBO_HOST }}
+          username: deploy
+          key: ${{ secrets.VPS_TURBO_SSH_KEY }}
+          script: |
             sudo systemctl enable ${{ env.SERVICE_NAME }}
             sudo systemctl restart ${{ env.SERVICE_NAME }}
-          "
 
-      - name: Setup Caddy reverse proxy
-        env:
-          SSH_HOST: ${{ secrets.VPS_TURBO_HOST }}
-          SSH_USER: ${{ secrets.VPS_TURBO_USER }}
-          SSH_PORT: ${{ secrets.VPS_TURBO_PORT || '22' }}
-        run: |
-          scp -P $SSH_PORT rust/deploy/setup-caddy.sh $SSH_USER@$SSH_HOST:/tmp/setup-caddy.sh
-          ssh -p $SSH_PORT $SSH_USER@$SSH_HOST "sudo bash /tmp/setup-caddy.sh"
+      - name: Copy Caddy setup script to Host
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ vars.VPS_TURBO_HOST }}
+          username: deploy
+          key: ${{ secrets.VPS_TURBO_SSH_KEY }}
+          source: rust/deploy/setup-caddy.sh
+          target: "/tmp/${{ env.DEPLOY_PATH }}/${{ env.BINARY_NAME }}"
+
+      - name: Execute Caddy setup script
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ vars.VPS_TURBO_HOST }}
+          username: deploy
+          key: ${{ secrets.VPS_TURBO_SSH_KEY }}
+          script: |
+            sudo bash /tmp/setup-caddy.sh
 
       - name: Verify deployment
-        env:
-          SSH_HOST: ${{ secrets.VPS_TURBO_HOST }}
-          SSH_USER: ${{ secrets.VPS_TURBO_USER }}
-          SSH_PORT: ${{ secrets.VPS_TURBO_PORT || '22' }}
-        run: |
-          ssh -p $SSH_PORT $SSH_USER@$SSH_HOST "
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ vars.VPS_TURBO_HOST }}
+          username: deploy
+          key: ${{ secrets.VPS_TURBO_SSH_KEY }}
+          script: |
             sleep 3
             sudo systemctl status ${{ env.SERVICE_NAME }} --no-pager
             curl -sf http://localhost:8080/api/v1/health || echo 'Health check failed - service may still be starting'
-          "
