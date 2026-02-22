@@ -29,31 +29,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install GCC 11
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-11 g++-11
-          echo "CC=gcc-11" >> $GITHUB_ENV
-          echo "CXX=g++-11" >> $GITHUB_ENV
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cross
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cross
+          key: ${{ runner.os }}-cross-bin
 
       - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-
-
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-git-
+          # Since your Cargo.toml is in the 'rust' subfolder
+          workspaces: "rust -> target"
 
       - name: Build release binary
         working-directory: rust
