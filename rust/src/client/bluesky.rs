@@ -112,9 +112,15 @@ impl BlueskyClient {
         // Process in chunks of BATCH_SIZE
         for chunk in dids.chunks(BATCH_SIZE) {
             self.profile_batches_total.fetch_add(1, Ordering::Relaxed);
-            if chunk.len() < BATCH_SIZE {
+            let chunk_len = chunk.len();
+            if chunk_len < BATCH_SIZE {
                 self.profile_batches_partial.fetch_add(1, Ordering::Relaxed);
             }
+            let pct = (chunk_len as f64 / BATCH_SIZE as f64) * 100.0;
+            info!(
+                "Profile batch capacity: {}/{} ({:.0}%)",
+                chunk_len, BATCH_SIZE, pct
+            );
             let chunk_profiles = self.fetch_profiles_batch(chunk).await?;
             profiles.extend(chunk_profiles);
         }
@@ -289,9 +295,15 @@ impl BlueskyClient {
 
         for chunk in valid_uris.chunks(BATCH_SIZE) {
             self.post_batches_total.fetch_add(1, Ordering::Relaxed);
-            if chunk.len() < BATCH_SIZE {
+            let chunk_len = chunk.len();
+            if chunk_len < BATCH_SIZE {
                 self.post_batches_partial.fetch_add(1, Ordering::Relaxed);
             }
+            let pct = (chunk_len as f64 / BATCH_SIZE as f64) * 100.0;
+            info!(
+                "Post batch capacity: {}/{} ({:.0}%)",
+                chunk_len, BATCH_SIZE, pct
+            );
             let chunk_posts = self.fetch_posts_bulk(chunk).await?;
             all_posts.extend(chunk_posts);
         }
