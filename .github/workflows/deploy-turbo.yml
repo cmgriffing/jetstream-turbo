@@ -97,7 +97,7 @@ jobs:
           username: deploy
           key: ${{ secrets.VPS_TURBO_SSH_KEY }}
           source: ${{ env.BINARY_NAME }}
-          target: "/tmp/${{ env.DEPLOY_PATH }}/${{ env.BINARY_NAME }}"
+          target: "/tmp/${{ env.DEPLOY_PATH }}/"
 
       - name: Update binary permissions on Host
         uses: appleboy/ssh-action@master
@@ -117,7 +117,7 @@ jobs:
           username: deploy
           key: ${{ secrets.VPS_TURBO_SSH_KEY }}
           source: rust/deploy/systemd/${{ env.SERVICE_NAME }}.service
-          target: "/tmp/${{ env.DEPLOY_PATH }}/${{ env.BINARY_NAME }}"
+          target: "/tmp/${{ env.SERVICE_NAME }}.service"
 
       - name: Move systemd service file and reload via systemctl
         uses: appleboy/ssh-action@master
@@ -160,7 +160,7 @@ jobs:
           username: deploy
           key: ${{ secrets.VPS_TURBO_SSH_KEY }}
           source: rust/deploy/setup-caddy.sh
-          target: "/tmp/${{ env.DEPLOY_PATH }}/${{ env.BINARY_NAME }}"
+          target: "/tmp/"
 
       - name: Execute Caddy setup script
         uses: appleboy/ssh-action@master
