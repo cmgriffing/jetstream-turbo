@@ -31,6 +31,10 @@ pub struct Settings {
 
     // Performance Configuration
     pub batch_size: usize,
+    pub profile_batch_size: usize,
+    pub post_batch_size: usize,
+    pub profile_batch_wait_ms: u64,
+    pub post_batch_wait_ms: u64,
     pub max_concurrent_requests: usize,
     pub cache_size_users: usize,
     pub cache_size_posts: usize,
@@ -64,6 +68,10 @@ impl Default for Settings {
             rotation_minutes: 1,
             http_port: 8080,
             batch_size: 10,
+            profile_batch_size: 25,
+            post_batch_size: 25,
+            profile_batch_wait_ms: 150,
+            post_batch_wait_ms: 300,
             max_concurrent_requests: 10,
             cache_size_users: 20000,
             cache_size_posts: 20000,
