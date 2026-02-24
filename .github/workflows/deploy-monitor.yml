@@ -89,6 +89,15 @@ jobs:
             sudo useradd -r -s /bin/false ${{ env.SERVICE_NAME }} 2>/dev/null || true
             sudo chown ${{ env.SERVICE_NAME }}:${{ env.SERVICE_NAME }} ${{ env.DEPLOY_PATH }}
 
+      - name: Cleanup temp folder on Host
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_MONITOR_HOST }}
+          username: deploy
+          key: ${{ secrets.VPS_MONITOR_SSH_KEY }}
+          script: |
+            sudo rm -rf /tmp/${{ env.DEPLOY_PATH }}
+
       - name: Copy binary to VPS
         uses: appleboy/scp-action@master
         with:
@@ -96,7 +105,7 @@ jobs:
           username: deploy
           key: ${{ secrets.VPS_MONITOR_SSH_KEY }}
           source: ${{ env.BINARY_NAME }}
-          target: "/tmp/${{ env.DEPLOY_PATH }}/${{ env.BINARY_NAME }}/"
+          target: "/tmp/${{ env.DEPLOY_PATH }}/"
 
       - name: Update binary permissions on Host
         uses: appleboy/ssh-action@master
