@@ -16,27 +16,12 @@ use tracing::{error, info, instrument, trace, warn};
 const REQUESTS_PER_SECOND_MS: u64 = 1000 / 10;
 
 pub struct BlueskyClient {
-    http_client: Client,
     session_strings: Arc<RwLock<Vec<String>>>,
     refresh_jwt: Arc<RwLock<Option<String>>>,
     expires_at: Arc<RwLock<Option<String>>>,
     auth_client: Option<Arc<BlueskyAuthClient>>,
-    rate_limiter: Arc<
-        RateLimiter<
-            governor::state::NotKeyed,
-            governor::state::InMemoryState,
-            governor::clock::DefaultClock,
-        >,
-    >,
-    api_base_url: String,
-    max_retries: u32,
     #[allow(dead_code)]
     retry_delay_ms: u64,
-    retry_delay: Duration,
-    profile_batches_total: AtomicU64,
-    profile_batches_partial: AtomicU64,
-    post_batches_total: AtomicU64,
-    post_batches_partial: AtomicU64,
     profile_batch_collector: Arc<RwLock<ProfileBatchCollector>>,
     post_batch_collector: Arc<RwLock<PostBatchCollector>>,
 }
@@ -179,20 +164,11 @@ impl BlueskyClient {
         )));
 
         Self {
-            http_client,
             session_strings,
             refresh_jwt,
             expires_at,
             auth_client,
-            rate_limiter,
-            api_base_url,
-            max_retries,
             retry_delay_ms: 200,
-            retry_delay,
-            profile_batches_total: AtomicU64::new(0),
-            profile_batches_partial: AtomicU64::new(0),
-            post_batches_total: AtomicU64::new(0),
-            post_batches_partial: AtomicU64::new(0),
             profile_batch_collector,
             post_batch_collector,
         }
@@ -264,18 +240,6 @@ impl BlueskyClient {
         Ok(posts)
     }
 
-    async fn get_session_string(&self) -> TurboResult<String> {
-        let sessions = self.session_strings.read().await;
-
-        if sessions.is_empty() {
-            return Err(TurboError::PermissionDenied(
-                "No valid session strings available".to_string(),
-            ));
-        }
-
-        Ok(sessions[0].clone())
-    }
-
     pub async fn refresh_sessions(
         &self,
         new_sessions: Vec<String>,
@@ -312,20 +276,6 @@ impl BlueskyClient {
 
     pub async fn get_refresh_jwt(&self) -> Option<String> {
         self.refresh_jwt.read().await.clone()
-    }
-
-    async fn handle_auth_error_and_refresh(
-        &self,
-        error_response: &str,
-    ) -> TurboResult<Option<String>> {
-        let is_expired = error_response.contains("ExpiredToken");
-
-        if is_expired {
-            error!("Token expired, full error: {}", error_response);
-            self.refresh_session_with_fallback().await?;
-            return Ok(Some(self.get_session_string().await?));
-        }
-        Ok(None)
     }
 
     pub async fn refresh_session_with_fallback(&self) -> TurboResult<()> {
@@ -479,10 +429,7 @@ impl ProfileBatchCollector {
         }
     }
 
-    async fn fetch_batch(
-        &self,
-        dids: &[String],
-    ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
+    async fn fetch_batch(&self, dids: &[String]) -> TurboResult<Vec<Option<BlueskyProfile>>> {
         let url = format!("{}/app.bsky.actor.getProfiles", self.api_base_url);
         let mut session_string = self.get_session_string().await?;
         let mut attempt = 0;
@@ -606,7 +553,7 @@ impl ProfileBatchCollector {
 
         while !remaining.is_empty() {
             self.pending.extend(remaining.drain(..));
-            
+
             while self.pending.len() >= self.config.batch_size {
                 let batch: Vec<String> = self.pending.drain(..self.config.batch_size).collect();
                 self.batches_total.fetch_add(1, Ordering::Relaxed);
@@ -625,7 +572,9 @@ impl ProfileBatchCollector {
                 self.last_flush = Instant::now();
             }
 
-            if self.pending.len() > 0 && self.last_flush.elapsed() >= Duration::from_millis(self.config.wait_ms) {
+            if self.pending.len() > 0
+                && self.last_flush.elapsed() >= Duration::from_millis(self.config.wait_ms)
+            {
                 let batch: Vec<String> = std::mem::take(&mut self.pending);
                 self.batches_total.fetch_add(1, Ordering::Relaxed);
                 let batch_len = batch.len();
@@ -811,10 +760,7 @@ impl PostBatchCollector {
         }
     }
 
-    async fn fetch_batch(
-        &self,
-        uris: &[String],
-    ) -> TurboResult<Vec<Option<BlueskyPost>>> {
+    async fn fetch_batch(&self, uris: &[String]) -> TurboResult<Vec<Option<BlueskyPost>>> {
         let url = format!("{}/app.bsky.feed.getPosts", self.api_base_url);
         let mut session_string = self.get_session_string().await?;
         let mut attempt = 0;
@@ -961,7 +907,9 @@ impl PostBatchCollector {
                 self.last_flush = Instant::now();
             }
 
-            if self.pending.len() > 0 && self.last_flush.elapsed() >= Duration::from_millis(self.config.wait_ms) {
+            if self.pending.len() > 0
+                && self.last_flush.elapsed() >= Duration::from_millis(self.config.wait_ms)
+            {
                 let batch: Vec<String> = std::mem::take(&mut self.pending);
                 self.batches_total.fetch_add(1, Ordering::Relaxed);
                 let batch_len = batch.len();
