@@ -125,8 +125,9 @@ jobs:
           host: ${{ secrets.VPS_TURBO_HOST }}
           username: deploy
           key: ${{ secrets.VPS_TURBO_SSH_KEY }}
+          strip_components: true
           source: rust/deploy/systemd/${{ env.SERVICE_NAME }}.service
-          target: "/tmp/${{ env.SERVICE_NAME }}.service"
+          target: "/tmp/"
 
       - name: Move systemd service file and reload via systemctl
         uses: appleboy/ssh-action@master
