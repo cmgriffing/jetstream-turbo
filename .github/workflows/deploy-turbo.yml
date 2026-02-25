@@ -169,6 +169,7 @@ jobs:
           host: ${{ secrets.VPS_TURBO_HOST }}
           username: deploy
           key: ${{ secrets.VPS_TURBO_SSH_KEY }}
+          strip_components: 2
           source: rust/deploy/setup-caddy.sh
           target: "/tmp/"
 
