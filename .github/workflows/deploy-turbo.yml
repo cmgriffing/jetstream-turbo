@@ -125,7 +125,7 @@ jobs:
           host: ${{ secrets.VPS_TURBO_HOST }}
           username: deploy
           key: ${{ secrets.VPS_TURBO_SSH_KEY }}
-          strip_components: true
+          strip_components: 1
           source: rust/deploy/systemd/${{ env.SERVICE_NAME }}.service
           target: "/tmp/"
 
