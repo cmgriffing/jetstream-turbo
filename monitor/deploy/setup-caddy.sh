@@ -74,7 +74,7 @@ CADDYEOF
 
   cat >> "$NEW_CADDYFILE" << CADDYEOF
 $DOMAIN {
-  reverse_proxy $UPSTREAM
+  reverse_proxy http://$UPSTREAM
   
   log {
     output file /var/log/caddy/monitor-access.log
