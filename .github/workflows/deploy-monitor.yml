@@ -124,6 +124,7 @@ jobs:
           host: ${{ secrets.VPS_MONITOR_HOST }}
           username: deploy
           key: ${{ secrets.VPS_MONITOR_SSH_KEY }}
+          strip_components: 3
           source: monitor/deploy/systemd/${{ env.SERVICE_NAME }}.service
           target: "/tmp/${{ env.SERVICE_NAME }}.service"
 
