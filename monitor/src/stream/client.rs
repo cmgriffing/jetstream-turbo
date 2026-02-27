@@ -23,6 +23,10 @@ pub struct ConnectionStatus {
     pub stream_id: StreamId,
     pub connected: bool,
     pub connected_at: Option<Instant>,
+<<<<<<< Updated upstream
+=======
+    pub latency_ms: Option<u64>,
+>>>>>>> Stashed changes
 }
 
 pub struct StreamClient {
@@ -109,6 +113,7 @@ impl StreamClient {
         tokio::spawn(async move {
             loop {
                 info!(stream = ?stream_id, "Connecting to {}", url);
+<<<<<<< Updated upstream
                 let connected_at = Instant::now();
                 
                 let _ = tx_status.send(ConnectionStatus {
@@ -120,6 +125,22 @@ impl StreamClient {
                 match connect_async(&url).await {
                     Ok((ws_stream, _)) => {
                         info!(stream = ?stream_id, "Connected successfully");
+=======
+                let connect_start = Instant::now();
+                
+                match connect_async(&url).await {
+                    Ok((ws_stream, _)) => {
+                        let latency_ms = connect_start.elapsed().as_millis() as u64;
+                        info!(stream = ?stream_id, "Connected successfully in {}ms", latency_ms);
+                        
+                        let _ = tx_status.send(ConnectionStatus {
+                            stream_id,
+                            connected: true,
+                            connected_at: Some(connect_start),
+                            latency_ms: Some(latency_ms),
+                        });
+
+>>>>>>> Stashed changes
                         let (_, mut read) = ws_stream.split();
                         let mut count: u64 = 0;
                         let mut last_send = Instant::now();
@@ -162,6 +183,10 @@ impl StreamClient {
                     stream_id,
                     connected: false,
                     connected_at: None,
+<<<<<<< Updated upstream
+=======
+                    latency_ms: None,
+>>>>>>> Stashed changes
                 });
 
                 warn!(stream = ?stream_id, "Reconnecting in {:?}...", reconnect_delay);

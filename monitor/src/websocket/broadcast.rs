@@ -12,7 +12,7 @@ use tokio::sync::broadcast;
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
-    State((tx, _)): State<(Arc<broadcast::Sender<StreamStats>>, Arc<Storage>)>,
+    State((tx, _, _)): State<(Arc<broadcast::Sender<StreamStats>>, Arc<Storage>, Arc<std::sync::RwLock<crate::stats::UptimeTracker>>)>,
 ) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, tx.subscribe()))
 }

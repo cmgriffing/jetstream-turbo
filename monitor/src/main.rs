@@ -1,7 +1,11 @@
 use anyhow::Result;
 use jetstream_monitor::{
     config::Settings,
+<<<<<<< Updated upstream
     stats::{StatsAggregator, StreamStatsInternal, UptimeTracker},
+=======
+    stats::{StatsAggregator, StreamStatsInternal, UptimeDetailedStats, UptimeTracker},
+>>>>>>> Stashed changes
     storage::{HourlyStat, Storage},
     stream::{StreamClient, StreamId},
     websocket,
@@ -46,9 +50,17 @@ async fn main() -> Result<()> {
             tokio::select! {
                 Some(msg) = stream_a.next() => {
                     stats_for_stream.write().unwrap().update(msg);
+                    uptime_for_status.write().unwrap().record_message(StreamId::A);
                 }
                 Some(msg) = stream_b.next() => {
                     stats_for_stream.write().unwrap().update(msg);
+                    uptime_for_status.write().unwrap().record_message(StreamId::B);
+                }
+                Some(status) = status_a.next() => {
+                    uptime_for_status.write().unwrap().handle_connection_status(status);
+                }
+                Some(status) = status_b.next() => {
+                    uptime_for_status.write().unwrap().handle_connection_status(status);
                 }
                 Some(status) = status_a.next() => {
                     uptime_for_status.write().unwrap().handle_connection_status(status);
@@ -67,6 +79,7 @@ async fn main() -> Result<()> {
     let uptime_for_storage: Arc<std::sync::RwLock<UptimeTracker>> = Arc::clone(&uptime_tracker);
     let storage_arc = Arc::new(storage);
     let storage_for_api = Arc::clone(&storage_arc);
+    let uptime_for_api: Arc<std::sync::RwLock<UptimeTracker>> = Arc::clone(&uptime_tracker);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
         let mut last_hour = chrono::Utc::now().format("%Y-%m-%d %H").to_string();
@@ -87,12 +100,32 @@ async fn main() -> Result<()> {
                     tracing::error!("Failed to save hourly stats: {}", e);
                 }
 
+<<<<<<< Updated upstream
                 let (uptime_a, uptime_b) = {
                     let up = uptime_for_storage.read().unwrap();
                     up.get_current_uptime_seconds()
                 };
                 if let Err(e) = storage_arc
                     .save_hourly_uptime(chrono::Utc::now(), uptime_a, uptime_b)
+=======
+                let detailed = {
+                    let up = uptime_for_storage.read().unwrap();
+                    up.get_detailed_stats(3600)
+                };
+
+                if let Err(e) = storage_arc
+                    .save_hourly_uptime(
+                        chrono::Utc::now(),
+                        detailed.uptime_a_seconds,
+                        detailed.uptime_b_seconds,
+                        detailed.disconnect_count_a,
+                        detailed.disconnect_count_b,
+                        detailed.avg_latency_a_ms,
+                        detailed.avg_latency_b_ms,
+                        detailed.total_messages_a,
+                        detailed.total_messages_b,
+                    )
+>>>>>>> Stashed changes
                     .await
                 {
                     tracing::error!("Failed to save hourly uptime: {}", e);
@@ -111,7 +144,12 @@ async fn main() -> Result<()> {
         .route("/ws", axum::routing::get(websocket::ws_handler))
         .route("/api/history", axum::routing::get(get_history))
         .route("/api/uptime", axum::routing::get(get_uptime))
+<<<<<<< Updated upstream
         .with_state((broadcast_tx, storage_for_api))
+=======
+        .route("/api/uptime-detailed", axum::routing::get(get_uptime_detailed))
+        .with_state((broadcast_tx, storage_for_api, uptime_for_api))
+>>>>>>> Stashed changes
         .layer(tower_http::trace::TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(&settings.bind_address).await?;
@@ -124,7 +162,7 @@ async fn main() -> Result<()> {
 
 async fn get_history(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-    axum::extract::State((_, storage)): axum::extract::State<(Arc<tokio::sync::broadcast::Sender<jetstream_monitor::StreamStats>>, Arc<Storage>)>,
+    axum::extract::State((_, storage, _)): axum::extract::State<(Arc<tokio::sync::broadcast::Sender<jetstream_monitor::StreamStats>>, Arc<Storage>, Arc<std::sync::RwLock<UptimeTracker>>)>,
 ) -> axum::Json<Vec<HourlyStat>> {
     let hours: i64 = params
         .get("hours")
@@ -141,7 +179,11 @@ async fn get_history(
 
 async fn get_uptime(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+<<<<<<< Updated upstream
     axum::extract::State((_, storage)): axum::extract::State<(Arc<tokio::sync::broadcast::Sender<jetstream_monitor::StreamStats>>, Arc<Storage>)>,
+=======
+    axum::extract::State((_, storage, _)): axum::extract::State<(Arc<tokio::sync::broadcast::Sender<jetstream_monitor::StreamStats>>, Arc<Storage>, Arc<std::sync::RwLock<UptimeTracker>>)>,
+>>>>>>> Stashed changes
 ) -> axum::Json<Vec<jetstream_monitor::storage::HourlyUptime>> {
     let hours: i64 = params
         .get("hours")
@@ -155,3 +197,21 @@ async fn get_uptime(
         Err(_) => axum::Json(vec![]),
     }
 }
+<<<<<<< Updated upstream
+=======
+
+async fn get_uptime_detailed(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::State((_, _, uptime_tracker)): axum::extract::State<(Arc<tokio::sync::broadcast::Sender<jetstream_monitor::StreamStats>>, Arc<Storage>, Arc<std::sync::RwLock<UptimeTracker>>)>,
+) -> axum::Json<UptimeDetailedStats> {
+    let hours: i64 = params
+        .get("hours")
+        .and_then(|h| h.parse().ok())
+        .unwrap_or(24);
+
+    let period_seconds = (hours * 3600) as u64;
+    let detailed = uptime_tracker.read().unwrap().get_detailed_stats(period_seconds);
+
+    axum::Json(detailed)
+}
+>>>>>>> Stashed changes
