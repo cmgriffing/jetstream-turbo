@@ -12,7 +12,8 @@
         padding: 0;
       }
       body {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
         background: #0a0a0a;
         color: #e0e0e0;
         min-height: 100vh;
@@ -88,14 +89,19 @@
         font-weight: 600;
         display: block;
       }
-      .counter .stat-value.good { color: #4ade80; }
-      .counter .stat-value.warning { color: #fbbf24; }
-      .counter .stat-value.bad { color: #f87171; }
+      .counter .stat-value.good {
+        color: #4ade80;
+      }
+      .counter .stat-value.warning {
+        color: #fbbf24;
+      }
+      .counter .stat-value.bad {
+        color: #f87171;
+      }
       .counter .connection-status {
         font-size: 0.7rem;
         margin-top: 0.5rem;
       }
-<<<<<<< Updated upstream
       .counter .uptime {
         font-size: 0.75rem;
         color: #4ade80;
@@ -115,20 +121,26 @@
       .counter .connection-dot.disconnected {
         background: #f87171;
       }
-=======
-      .counter .connection-status.connected { color: #4ade80; }
-      .counter .connection-status.disconnected { color: #f87171; }
->>>>>>> Stashed changes
+      .counter .connection-status.connected {
+        color: #4ade80;
+      }
+      .counter .connection-status.disconnected {
+        color: #f87171;
+      }
       .counter.winning {
         border-color: #4ade80;
         box-shadow: 0 0 20px rgba(74, 222, 128, 0.3);
       }
-      .counter.winning .value { color: #4ade80; }
+      .counter.winning .value {
+        color: #4ade80;
+      }
       .counter.losing {
         border-color: #f87171;
         box-shadow: 0 0 20px rgba(248, 113, 113, 0.3);
       }
-      .counter.losing .value { color: #f87171; }
+      .counter.losing .value {
+        color: #f87171;
+      }
       .delta {
         display: flex;
         flex-direction: column;
@@ -138,13 +150,27 @@
         flex: 0 0 140px;
         min-width: 180px;
       }
-      .delta .value { font-variant-numeric: tabular-nums; }
-      .delta .label { font-size: 0.75rem; color: #666; }
-      .delta .value { font-size: 1.5rem; font-weight: 600; }
-      .delta.positive .value { color: #4ade80; }
-      .delta.negative .value { color: #f87171; }
-      .delta.neutral .value { color: #888; }
-      
+      .delta .value {
+        font-variant-numeric: tabular-nums;
+      }
+      .delta .label {
+        font-size: 0.75rem;
+        color: #666;
+      }
+      .delta .value {
+        font-size: 1.5rem;
+        font-weight: 600;
+      }
+      .delta.positive .value {
+        color: #4ade80;
+      }
+      .delta.negative .value {
+        color: #f87171;
+      }
+      .delta.neutral .value {
+        color: #888;
+      }
+
       .section-title {
         font-size: 0.875rem;
         color: #666;
@@ -153,7 +179,7 @@
         margin: 2rem 0 1rem 0;
         text-align: center;
       }
-      
+
       .metrics-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
@@ -161,7 +187,7 @@
         max-width: 1400px;
         margin: 0 auto 1.5rem auto;
       }
-      
+
       .metric-card {
         background: #1a1a1a;
         border: 1px solid #333;
@@ -182,7 +208,9 @@
         padding: 0.4rem 0;
         border-bottom: 1px solid #2a2a2a;
       }
-      .metric-row:last-child { border-bottom: none; }
+      .metric-row:last-child {
+        border-bottom: none;
+      }
       .metric-label {
         font-size: 0.8rem;
         color: #888;
@@ -192,10 +220,16 @@
         font-weight: 600;
         font-variant-numeric: tabular-nums;
       }
-      .metric-value.good { color: #4ade80; }
-      .metric-value.warning { color: #fbbf24; }
-      .metric-value.bad { color: #f87171; }
-      
+      .metric-value.good {
+        color: #4ade80;
+      }
+      .metric-value.warning {
+        color: #fbbf24;
+      }
+      .metric-value.bad {
+        color: #f87171;
+      }
+
       .uptime-mini-bar {
         width: 60px;
         height: 6px;
@@ -210,7 +244,7 @@
         height: 100%;
         border-radius: 3px;
       }
-      
+
       .charts-container {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
@@ -235,7 +269,7 @@
         position: relative;
         width: 100%;
       }
-      
+
       .status {
         position: fixed;
         bottom: 1rem;
@@ -249,17 +283,39 @@
         align-items: center;
         gap: 0.5rem;
       }
-      .status .duration { font-size: 0.65rem; color: #666; }
-      .status.connected { color: #4ade80; }
-      .status.disconnected { color: #f87171; }
-      
+      .status .duration {
+        font-size: 0.65rem;
+        color: #666;
+      }
+      .status.connected {
+        color: #4ade80;
+      }
+      .status.disconnected {
+        color: #f87171;
+      }
+
       @media (max-width: 900px) {
-        body { padding: 1rem; }
-        .live-counters { flex-direction: column; gap: 0.75rem; }
-        .counter, .delta { flex: 1 1 100%; width: 100%; }
-        .charts-container { grid-template-columns: 1fr; }
-        .chart-panel { min-width: 0; }
-        .chart-wrapper { height: 180px; }
+        body {
+          padding: 1rem;
+        }
+        .live-counters {
+          flex-direction: column;
+          gap: 0.75rem;
+        }
+        .counter,
+        .delta {
+          flex: 1 1 100%;
+          width: 100%;
+        }
+        .charts-container {
+          grid-template-columns: 1fr;
+        }
+        .chart-panel {
+          min-width: 0;
+        }
+        .chart-wrapper {
+          height: 180px;
+        }
       }
     </style>
   </head>
@@ -275,9 +331,6 @@
         <div class="label" id="label-a">Stream A</div>
         <div class="value" id="count-a">0</div>
         <div class="rate" id="rate-a">0/s</div>
-<<<<<<< Updated upstream
-        <div class="uptime" id="uptime-a">-</div>
-=======
         <div class="stats-row">
           <div class="stat-item">
             <span class="stat-value" id="latency-a">-</span>
@@ -292,22 +345,20 @@
             Uptime
           </div>
         </div>
-        <div class="connection-status connected" id="conn-status-a">● Connected</div>
->>>>>>> Stashed changes
+        <div class="connection-status connected" id="conn-status-a">
+          ● Connected
+        </div>
       </div>
-      
+
       <div class="delta neutral" id="delta">
         <div class="label">Delta</div>
         <div class="value" id="delta-value">0</div>
       </div>
-      
+
       <div class="counter" id="counter-b">
         <div class="label" id="label-b">Stream B</div>
         <div class="value" id="count-b">0</div>
         <div class="rate" id="rate-b">0/s</div>
-<<<<<<< Updated upstream
-        <div class="uptime" id="uptime-b">-</div>
-=======
         <div class="stats-row">
           <div class="stat-item">
             <span class="stat-value" id="latency-b">-</span>
@@ -322,8 +373,9 @@
             Uptime
           </div>
         </div>
-        <div class="connection-status connected" id="conn-status-b">● Connected</div>
->>>>>>> Stashed changes
+        <div class="connection-status connected" id="conn-status-b">
+          ● Connected
+        </div>
       </div>
     </div>
 
@@ -332,11 +384,15 @@
       <div class="metric-card">
         <h3>24-Hour Summary</h3>
         <div class="metric-row">
-          <span class="metric-label" id="uptime24-label-a">Stream A Uptime</span>
+          <span class="metric-label" id="uptime24-label-a"
+            >Stream A Uptime</span
+          >
           <span class="metric-value good" id="uptime24-a">-</span>
         </div>
         <div class="metric-row">
-          <span class="metric-label" id="uptime24-label-b">Stream B Uptime</span>
+          <span class="metric-label" id="uptime24-label-b"
+            >Stream B Uptime</span
+          >
           <span class="metric-value good" id="uptime24-b">-</span>
         </div>
         <div class="metric-row">
@@ -356,15 +412,19 @@
           <span class="metric-value" id="uptime24-disc-b">-</span>
         </div>
       </div>
-      
+
       <div class="metric-card">
         <h3>28-Day Summary</h3>
         <div class="metric-row">
-          <span class="metric-label" id="uptime28-label-a">Stream A Uptime</span>
+          <span class="metric-label" id="uptime28-label-a"
+            >Stream A Uptime</span
+          >
           <span class="metric-value good" id="uptime28-a">-</span>
         </div>
         <div class="metric-row">
-          <span class="metric-label" id="uptime28-label-b">Stream B Uptime</span>
+          <span class="metric-label" id="uptime28-label-b"
+            >Stream B Uptime</span
+          >
           <span class="metric-value good" id="uptime28-b">-</span>
         </div>
         <div class="metric-row">
@@ -384,7 +444,7 @@
           <span class="metric-value" id="uptime28-disc-b">-</span>
         </div>
       </div>
-      
+
       <div class="metric-card">
         <h3>Message Rate (24h)</h3>
         <div class="metric-row">
@@ -404,7 +464,7 @@
           <span class="metric-value" id="msgs24-b">-</span>
         </div>
       </div>
-      
+
       <div class="metric-card">
         <h3>Latency</h3>
         <div class="metric-row">
@@ -465,10 +525,6 @@
       const countB = document.getElementById("count-b");
       const rateA = document.getElementById("rate-a");
       const rateB = document.getElementById("rate-b");
-<<<<<<< Updated upstream
-      const uptimeA = document.getElementById("uptime-a");
-      const uptimeB = document.getElementById("uptime-b");
-=======
       const latencyA = document.getElementById("latency-a");
       const latencyB = document.getElementById("latency-b");
       const streakA = document.getElementById("streak-a");
@@ -477,7 +533,6 @@
       const uptimeB = document.getElementById("uptime-b");
       const connStatusA = document.getElementById("conn-status-a");
       const connStatusB = document.getElementById("conn-status-b");
->>>>>>> Stashed changes
       const counterA = document.getElementById("counter-a");
       const counterB = document.getElementById("counter-b");
       const deltaEl = document.getElementById("delta");
@@ -489,16 +544,13 @@
       let connectedAt = null;
       let streamAName = "Stream A";
       let streamBName = "Stream B";
-<<<<<<< Updated upstream
       let rawData24h = [];
       let rawData28d = [];
       let uptimeData24h = [];
       let uptimeData28d = [];
-=======
       let rawUptimeData24h = [];
       let rawUptimeData28d = [];
       let uptimeDetailed = null;
->>>>>>> Stashed changes
 
       function formatDuration(ms) {
         const secs = Math.floor(ms / 1000);
@@ -509,11 +561,6 @@
         return `${secs}s`;
       }
 
-<<<<<<< Updated upstream
-      function formatUptimePercentage(seconds, periodSeconds = 3600) {
-        const percentage = (seconds / periodSeconds) * 100;
-        return percentage.toFixed(1) + "%";
-=======
       function formatDurationLong(seconds) {
         const hrs = Math.floor(seconds / 3600);
         const mins = Math.floor((seconds % 3600) / 60);
@@ -538,7 +585,6 @@
         if (ms < 100) return "good";
         if (ms < 200) return "warning";
         return "bad";
->>>>>>> Stashed changes
       }
 
       setInterval(() => {
@@ -548,14 +594,22 @@
       }, 1000);
 
       function updateLabels() {
-        document.getElementById("uptime24-label-a").textContent = streamAName + " Uptime";
-        document.getElementById("uptime24-label-b").textContent = streamBName + " Uptime";
-        document.getElementById("uptime28-label-a").textContent = streamAName + " Uptime";
-        document.getElementById("uptime28-label-b").textContent = streamBName + " Uptime";
-        document.getElementById("rate24-label-a").textContent = streamAName + " Avg";
-        document.getElementById("rate24-label-b").textContent = streamBName + " Avg";
-        document.getElementById("lat-label-a").textContent = streamAName + " Avg";
-        document.getElementById("lat-label-b").textContent = streamBName + " Avg";
+        document.getElementById("uptime24-label-a").textContent =
+          streamAName + " Uptime";
+        document.getElementById("uptime24-label-b").textContent =
+          streamBName + " Uptime";
+        document.getElementById("uptime28-label-a").textContent =
+          streamAName + " Uptime";
+        document.getElementById("uptime28-label-b").textContent =
+          streamBName + " Uptime";
+        document.getElementById("rate24-label-a").textContent =
+          streamAName + " Avg";
+        document.getElementById("rate24-label-b").textContent =
+          streamBName + " Avg";
+        document.getElementById("lat-label-a").textContent =
+          streamAName + " Avg";
+        document.getElementById("lat-label-b").textContent =
+          streamBName + " Avg";
       }
 
       function createUptimeChart(canvasId, titleId, title) {
@@ -566,18 +620,30 @@
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
-              legend: { display: true, position: "top", labels: { color: "#888", boxWidth: 12 } },
-              tooltip: { backgroundColor: "#2a2a2a", titleColor: "#e0e0e0", bodyColor: "#888" }
+              legend: {
+                display: true,
+                position: "top",
+                labels: { color: "#888", boxWidth: 12 },
+              },
+              tooltip: {
+                backgroundColor: "#2a2a2a",
+                titleColor: "#e0e0e0",
+                bodyColor: "#888",
+              },
             },
             scales: {
-              x: { ticks: { color: "#666", maxTicksLimit: 12 }, grid: { display: false } },
-              y: { 
-                ticks: { color: "#666", callback: v => v + "%" }, 
+              x: {
+                ticks: { color: "#666", maxTicksLimit: 12 },
+                grid: { display: false },
+              },
+              y: {
+                ticks: { color: "#666", callback: (v) => v + "%" },
                 grid: { color: "#222" },
-                min: 0, max: 100 
-              }
-            }
-          }
+                min: 0,
+                max: 100,
+              },
+            },
+          },
         });
       }
 
@@ -589,14 +655,28 @@
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
-              legend: { display: true, position: "top", labels: { color: "#888", boxWidth: 12 } },
-              tooltip: { backgroundColor: "#2a2a2a", titleColor: "#e0e0e0", bodyColor: "#888" }
+              legend: {
+                display: true,
+                position: "top",
+                labels: { color: "#888", boxWidth: 12 },
+              },
+              tooltip: {
+                backgroundColor: "#2a2a2a",
+                titleColor: "#e0e0e0",
+                bodyColor: "#888",
+              },
             },
             scales: {
-              x: { ticks: { color: "#666", maxTicksLimit: 12 }, grid: { display: false } },
-              y: { ticks: { color: "#666", callback: v => v + "/s" }, grid: { color: "#222" } }
-            }
-          }
+              x: {
+                ticks: { color: "#666", maxTicksLimit: 12 },
+                grid: { display: false },
+              },
+              y: {
+                ticks: { color: "#666", callback: (v) => v + "/s" },
+                grid: { color: "#222" },
+              },
+            },
+          },
         });
       }
 
@@ -608,21 +688,51 @@
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
-              legend: { display: true, position: "top", labels: { color: "#888", boxWidth: 12 } },
-              tooltip: { backgroundColor: "#2a2a2a", titleColor: "#e0e0e0", bodyColor: "#888" }
+              legend: {
+                display: true,
+                position: "top",
+                labels: { color: "#888", boxWidth: 12 },
+              },
+              tooltip: {
+                backgroundColor: "#2a2a2a",
+                titleColor: "#e0e0e0",
+                bodyColor: "#888",
+              },
             },
             scales: {
-              x: { ticks: { color: "#666", maxTicksLimit: 12 }, grid: { display: false } },
-              y: { ticks: { color: "#666", callback: v => v + "ms" }, grid: { color: "#222" } }
-            }
-          }
+              x: {
+                ticks: { color: "#666", maxTicksLimit: 12 },
+                grid: { display: false },
+              },
+              y: {
+                ticks: { color: "#666", callback: (v) => v + "ms" },
+                grid: { color: "#222" },
+              },
+            },
+          },
         });
       }
 
-      const chartUptime24h = createUptimeChart("chart-uptime-24h", "uptime-chart-24h-title", "Uptime % (24h)");
-      const chartUptime28d = createUptimeChart("chart-uptime-28d", "uptime-chart-28d-title", "Uptime % (28 days)");
-      const chartRate24h = createRateChart("chart-rate-24h", "rate-chart-24h-title", "Message Rate (24h)");
-      const chartLatency = createLatencyChart("chart-latency", "latency-chart-title", "Latency History");
+      const chartUptime24h = createUptimeChart(
+        "chart-uptime-24h",
+        "uptime-chart-24h-title",
+        "Uptime % (24h)",
+      );
+      const chartUptime28d = createUptimeChart(
+        "chart-uptime-28d",
+        "uptime-chart-28d-title",
+        "Uptime % (28 days)",
+      );
+      const chartRate24h = createRateChart(
+        "chart-rate-24h",
+        "rate-chart-24h-title",
+        "Message Rate (24h)",
+      );
+      const chartLatency = createLatencyChart(
+        "chart-latency",
+        "latency-chart-title",
+        "Latency History",
+      );
 
       async function fetchDetailedUptime() {
         try {
@@ -634,7 +744,6 @@
         }
       }
 
-<<<<<<< Updated upstream
       function refreshCharts() {
         fetchHistory(24, chart24h, rawData24h);
         fetchHistory(672, chart28d, rawData28d);
@@ -667,7 +776,7 @@
         let totalA = 0;
         let totalB = 0;
 
-        data.forEach(d => {
+        data.forEach((d) => {
           totalA += d.stream_a_seconds;
           totalB += d.stream_b_seconds;
         });
@@ -678,36 +787,62 @@
         if (hours <= 24) {
           uptimeA.textContent = formatUptimePercentage(totalA, periodSeconds);
           uptimeB.textContent = formatUptimePercentage(totalB, periodSeconds);
-=======
-      async function fetchUptimeHistory(hours, uptimeChart, rateChart, latencyChart) {
+        }
+      }
+      async function fetchUptimeHistory(
+        hours,
+        uptimeChart,
+        rateChart,
+        latencyChart,
+      ) {
         try {
           const res = await fetch(`/api/uptime?hours=${hours}`);
           const data = await res.json();
-          
+
           if (data.length === 0) return;
-          
-          const labels = data.map(d => {
+
+          const labels = data.map((d) => {
             const date = new Date(d.hour);
-            return hours <= 24 
-              ? date.toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit" })
-              : date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+            return hours <= 24
+              ? date.toLocaleString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                  hour: "2-digit",
+                })
+              : date.toLocaleDateString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                });
           });
 
-          const uptimeA = data.map(d => (d.stream_a_seconds / 3600) * 100);
-          const uptimeB = data.map(d => (d.stream_b_seconds / 3600) * 100);
+          const uptimeA = data.map((d) => (d.stream_a_seconds / 3600) * 100);
+          const uptimeB = data.map((d) => (d.stream_b_seconds / 3600) * 100);
 
           if (uptimeChart && hours <= 24) {
             uptimeChart.data.labels = labels;
             uptimeChart.data.datasets = [
-              { label: streamAName, data: uptimeA, backgroundColor: "rgba(74, 222, 128, 0.7)", borderColor: "#4ade80", borderWidth: 1 },
-              { label: streamBName, data: uptimeB, backgroundColor: "rgba(59, 130, 246, 0.7)", borderColor: "#3b82f6", borderWidth: 1 }
+              {
+                label: streamAName,
+                data: uptimeA,
+                backgroundColor: "rgba(74, 222, 128, 0.7)",
+                borderColor: "#4ade80",
+                borderWidth: 1,
+              },
+              {
+                label: streamBName,
+                data: uptimeB,
+                backgroundColor: "rgba(59, 130, 246, 0.7)",
+                borderColor: "#3b82f6",
+                borderWidth: 1,
+              },
             ];
             uptimeChart.update("none");
           } else if (uptimeChart) {
             const dailyUptime = {};
-            data.forEach(d => {
+            data.forEach((d) => {
               const day = new Date(d.hour).toISOString().split("T")[0];
-              if (!dailyUptime[day]) dailyUptime[day] = { a: 0, b: 0, count: 0 };
+              if (!dailyUptime[day])
+                dailyUptime[day] = { a: 0, b: 0, count: 0 };
               dailyUptime[day].a += d.stream_a_seconds;
               dailyUptime[day].b += d.stream_b_seconds;
               dailyUptime[day].count++;
@@ -715,30 +850,72 @@
             const days = Object.keys(dailyUptime).slice(-28);
             uptimeChart.data.labels = days;
             uptimeChart.data.datasets = [
-              { label: streamAName, data: days.map(d => (dailyUptime[d].a / (dailyUptime[d].count * 3600)) * 100), backgroundColor: "rgba(74, 222, 128, 0.7)", borderColor: "#4ade80", borderWidth: 1 },
-              { label: streamBName, data: days.map(d => (dailyUptime[d].b / (dailyUptime[d].count * 3600)) * 100), backgroundColor: "rgba(59, 130, 246, 0.7)", borderColor: "#3b82f6", borderWidth: 1 }
+              {
+                label: streamAName,
+                data: days.map(
+                  (d) =>
+                    (dailyUptime[d].a / (dailyUptime[d].count * 3600)) * 100,
+                ),
+                backgroundColor: "rgba(74, 222, 128, 0.7)",
+                borderColor: "#4ade80",
+                borderWidth: 1,
+              },
+              {
+                label: streamBName,
+                data: days.map(
+                  (d) =>
+                    (dailyUptime[d].b / (dailyUptime[d].count * 3600)) * 100,
+                ),
+                backgroundColor: "rgba(59, 130, 246, 0.7)",
+                borderColor: "#3b82f6",
+                borderWidth: 1,
+              },
             ];
             uptimeChart.update("none");
           }
 
           if (rateChart && hours <= 24) {
-            const messagesA = data.map(d => d.stream_a_messages || 0);
-            const messagesB = data.map(d => d.stream_b_messages || 0);
+            const messagesA = data.map((d) => d.stream_a_messages || 0);
+            const messagesB = data.map((d) => d.stream_b_messages || 0);
             rateChart.data.labels = labels;
             rateChart.data.datasets = [
-              { label: streamAName, data: messagesA.map((m, i) => m / 3600), borderColor: "#4ade80", backgroundColor: "transparent", tension: 0.3 },
-              { label: streamBName, data: messagesB.map((m, i) => m / 3600), borderColor: "#3b82f6", backgroundColor: "transparent", tension: 0.3 }
+              {
+                label: streamAName,
+                data: messagesA.map((m, i) => m / 3600),
+                borderColor: "#4ade80",
+                backgroundColor: "transparent",
+                tension: 0.3,
+              },
+              {
+                label: streamBName,
+                data: messagesB.map((m, i) => m / 3600),
+                borderColor: "#3b82f6",
+                backgroundColor: "transparent",
+                tension: 0.3,
+              },
             ];
             rateChart.update("none");
           }
 
           if (latencyChart && hours <= 24) {
-            const latA = data.map(d => d.stream_a_latency_ms || 0);
-            const latB = data.map(d => d.stream_b_latency_ms || 0);
+            const latA = data.map((d) => d.stream_a_latency_ms || 0);
+            const latB = data.map((d) => d.stream_b_latency_ms || 0);
             latencyChart.data.labels = labels;
             latencyChart.data.datasets = [
-              { label: streamAName, data: latA, borderColor: "#4ade80", backgroundColor: "transparent", tension: 0.3 },
-              { label: streamBName, data: latB, borderColor: "#3b82f6", backgroundColor: "transparent", tension: 0.3 }
+              {
+                label: streamAName,
+                data: latA,
+                borderColor: "#4ade80",
+                backgroundColor: "transparent",
+                tension: 0.3,
+              },
+              {
+                label: streamBName,
+                data: latB,
+                borderColor: "#3b82f6",
+                backgroundColor: "transparent",
+                tension: 0.3,
+              },
             ];
             latencyChart.update("none");
           }
@@ -751,72 +928,96 @@
           }
         } catch (e) {
           console.error("Failed to fetch uptime history:", e);
->>>>>>> Stashed changes
         }
       }
 
       function calculate24hStats(data) {
         if (data.length === 0) return;
-        
-        let totalA = 0, totalB = 0;
-        let disconnectsA = 0, disconnectsB = 0;
-        let messagesA = 0, messagesB = 0;
-        let latencyA = 0, latencyB = 0;
-        let latencyCountA = 0, latencyCountB = 0;
-        
-        data.forEach(d => {
+
+        let totalA = 0,
+          totalB = 0;
+        let disconnectsA = 0,
+          disconnectsB = 0;
+        let messagesA = 0,
+          messagesB = 0;
+        let latencyA = 0,
+          latencyB = 0;
+        let latencyCountA = 0,
+          latencyCountB = 0;
+
+        data.forEach((d) => {
           totalA += d.stream_a_seconds || 0;
           totalB += d.stream_b_seconds || 0;
           disconnectsA += d.stream_a_disconnects || 0;
           disconnectsB += d.stream_b_disconnects || 0;
           messagesA += d.stream_a_messages || 0;
           messagesB += d.stream_b_messages || 0;
-          if (d.stream_a_latency_ms) { latencyA += d.stream_a_latency_ms; latencyCountA++; }
-          if (d.stream_b_latency_ms) { latencyB += d.stream_b_latency_ms; latencyCountB++; }
+          if (d.stream_a_latency_ms) {
+            latencyA += d.stream_a_latency_ms;
+            latencyCountA++;
+          }
+          if (d.stream_b_latency_ms) {
+            latencyB += d.stream_b_latency_ms;
+            latencyCountB++;
+          }
         });
 
         const uptimeA = (totalA / (24 * 3600)) * 100;
         const uptimeB = (totalB / (24 * 3600)) * 100;
-        
+
         const el = (id, val) => document.getElementById(id);
-        el("uptime24-a").textContent = formatUptimePercentage(totalA, 24 * 3600);
-        el("uptime24-b").textContent = formatUptimePercentage(totalB, 24 * 3600);
+        el("uptime24-a").textContent = formatUptimePercentage(
+          totalA,
+          24 * 3600,
+        );
+        el("uptime24-b").textContent = formatUptimePercentage(
+          totalB,
+          24 * 3600,
+        );
         el("uptime24-a").className = "metric-value " + getUptimeClass(uptimeA);
         el("uptime24-b").className = "metric-value " + getUptimeClass(uptimeB);
-        
+
         el("uptime24-total-a").textContent = formatDurationLong(totalA);
         el("uptime24-total-b").textContent = formatDurationLong(totalB);
-        
+
         el("uptime24-disc-a").textContent = disconnectsA;
         el("uptime24-disc-b").textContent = disconnectsB;
-        
+
         if (messagesA > 0 && totalA > 0) {
           el("rate24-a").textContent = (messagesA / totalA).toFixed(1) + "/s";
         }
         if (messagesB > 0 && totalB > 0) {
           el("rate24-b").textContent = (messagesB / totalB).toFixed(1) + "/s";
         }
-        
+
         el("msgs24-a").textContent = messagesA.toLocaleString();
         el("msgs24-b").textContent = messagesB.toLocaleString();
-        
+
         if (latencyCountA > 0) {
-          el("lat24-a").textContent = Math.round(latencyA / latencyCountA) + "ms";
-          el("lat24-a").className = "metric-value " + getLatencyClass(latencyA / latencyCountA);
+          el("lat24-a").textContent =
+            Math.round(latencyA / latencyCountA) + "ms";
+          el("lat24-a").className =
+            "metric-value " + getLatencyClass(latencyA / latencyCountA);
         }
         if (latencyCountB > 0) {
-          el("lat24-b").textContent = Math.round(latencyB / latencyCountB) + "ms";
-          el("lat24-b").className = "metric-value " + getLatencyClass(latencyB / latencyCountB);
+          el("lat24-b").textContent =
+            Math.round(latencyB / latencyCountB) + "ms";
+          el("lat24-b").className =
+            "metric-value " + getLatencyClass(latencyB / latencyCountB);
         }
       }
 
       function updateDetailedDisplay() {
         if (!uptimeDetailed) return;
-        
-        document.getElementById("lat-current-a").textContent = uptimeDetailed.avg_latency_a_ms + "ms";
-        document.getElementById("lat-current-b").textContent = uptimeDetailed.avg_latency_b_ms + "ms";
-        document.getElementById("lat-current-a").className = "metric-value " + getLatencyClass(uptimeDetailed.avg_latency_a_ms);
-        document.getElementById("lat-current-b").className = "metric-value " + getLatencyClass(uptimeDetailed.avg_latency_b_ms);
+
+        document.getElementById("lat-current-a").textContent =
+          uptimeDetailed.avg_latency_a_ms + "ms";
+        document.getElementById("lat-current-b").textContent =
+          uptimeDetailed.avg_latency_b_ms + "ms";
+        document.getElementById("lat-current-a").className =
+          "metric-value " + getLatencyClass(uptimeDetailed.avg_latency_a_ms);
+        document.getElementById("lat-current-b").className =
+          "metric-value " + getLatencyClass(uptimeDetailed.avg_latency_b_ms);
       }
 
       function refreshData() {
@@ -849,7 +1050,10 @@
         ws.onmessage = (e) => {
           const stats = JSON.parse(e.data);
 
-          if (streamAName !== stats.stream_a_name || streamBName !== stats.stream_b_name) {
+          if (
+            streamAName !== stats.stream_a_name ||
+            streamBName !== stats.stream_b_name
+          ) {
             streamAName = stats.stream_a_name;
             streamBName = stats.stream_b_name;
             labelA.textContent = streamAName;
@@ -866,20 +1070,16 @@
 
           const uptimePercentA = formatUptimePercentage(stats.uptime_a, 3600);
           const uptimePercentB = formatUptimePercentage(stats.uptime_b, 3600);
-<<<<<<< Updated upstream
-          uptimeA.textContent = (stats.connected_a ? "" : "⏸ ") + uptimePercentA;
-          uptimeB.textContent = (stats.connected_b ? "" : "⏸ ") + uptimePercentB;
-          uptimeA.className = stats.connected_a ? "uptime" : "uptime disconnected";
-          uptimeB.className = stats.connected_b ? "uptime" : "uptime disconnected";
-=======
           uptimeA.textContent = uptimePercentA;
           uptimeB.textContent = uptimePercentB;
-          
+
           latencyA.textContent = stats.latency_a_ms + "ms";
-          latencyA.className = "stat-value " + getLatencyClass(stats.latency_a_ms);
+          latencyA.className =
+            "stat-value " + getLatencyClass(stats.latency_a_ms);
           latencyB.textContent = stats.latency_b_ms + "ms";
-          latencyB.className = "stat-value " + getLatencyClass(stats.latency_b_ms);
-          
+          latencyB.className =
+            "stat-value " + getLatencyClass(stats.latency_b_ms);
+
           streakA.textContent = formatDuration(stats.current_streak_a * 1000);
           streakB.textContent = formatDuration(stats.current_streak_b * 1000);
 
@@ -892,7 +1092,7 @@
             connStatusA.className = "connection-status disconnected";
             uptimeA.className = "stat-value bad";
           }
-          
+
           if (stats.connected_b) {
             connStatusB.textContent = "● Connected";
             connStatusB.className = "connection-status connected";
@@ -902,7 +1102,6 @@
             connStatusB.className = "connection-status disconnected";
             uptimeB.className = "stat-value bad";
           }
->>>>>>> Stashed changes
 
           const delta = stats.delta;
           const sign = delta >= 0 ? "+" : "";

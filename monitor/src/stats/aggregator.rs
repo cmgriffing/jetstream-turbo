@@ -19,13 +19,10 @@ pub struct StreamStats {
     pub uptime_b: f64,
     pub connected_a: bool,
     pub connected_b: bool,
-<<<<<<< Updated upstream
-=======
     pub latency_a_ms: u64,
     pub latency_b_ms: u64,
     pub current_streak_a: f64,
     pub current_streak_b: f64,
->>>>>>> Stashed changes
 }
 
 pub struct StatsAggregator {
@@ -52,7 +49,11 @@ impl StatsAggregator {
         self.tx.clone()
     }
 
-    pub fn process(&self, stats: &Arc<std::sync::RwLock<StreamStatsInternal>>, uptime: &Arc<std::sync::RwLock<UptimeTracker>>) {
+    pub fn process(
+        &self,
+        stats: &Arc<std::sync::RwLock<StreamStatsInternal>>,
+        uptime: &Arc<std::sync::RwLock<UptimeTracker>>,
+    ) {
         let tx = self.tx.clone();
         let stats = Arc::clone(stats);
         let uptime = Arc::clone(uptime);
@@ -82,29 +83,28 @@ impl StatsAggregator {
                     rate_ema_a = ALPHA * instant_rate_a + (1.0 - ALPHA) * rate_ema_a;
                     rate_ema_b = ALPHA * instant_rate_b + (1.0 - ALPHA) * rate_ema_b;
 
-<<<<<<< Updated upstream
-                    let (uptime_a, uptime_b, connected_a, connected_b) = {
-                        let up = uptime.read().unwrap();
-                        let (a, b) = up.get_current_uptime_seconds();
-                        (a, b, up.connected_a, up.connected_b)
-=======
                     let (
-                        uptime_a, uptime_b, 
-                        connected_a, connected_b,
-                        latency_a, latency_b,
-                        streak_a, streak_b
+                        uptime_a,
+                        uptime_b,
+                        connected_a,
+                        connected_b,
+                        latency_a,
+                        latency_b,
+                        streak_a,
+                        streak_b,
                     ) = {
                         let up = uptime.read().unwrap();
                         let (a, b) = up.get_current_uptime_seconds();
                         (
-                            a, b, 
-                            up.connected_a, up.connected_b,
+                            a,
+                            b,
+                            up.connected_a,
+                            up.connected_b,
                             up.get_avg_latency_a(),
                             up.get_avg_latency_b(),
                             up.get_current_streak_a(),
-                            up.get_current_streak_b()
+                            up.get_current_streak_b(),
                         )
->>>>>>> Stashed changes
                     };
 
                     let stats_snapshot = StreamStats {
@@ -120,13 +120,10 @@ impl StatsAggregator {
                         uptime_b: uptime_b as f64,
                         connected_a,
                         connected_b,
-<<<<<<< Updated upstream
-=======
                         latency_a_ms: latency_a,
                         latency_b_ms: latency_b,
                         current_streak_a: streak_a,
                         current_streak_b: streak_b,
->>>>>>> Stashed changes
                     };
 
                     last_a = internal.count_a;
@@ -163,8 +160,6 @@ pub struct UptimeTracker {
     pub connected_b: bool,
     pub connected_at_a: Option<Instant>,
     pub connected_at_b: Option<Instant>,
-<<<<<<< Updated upstream
-=======
     pub disconnect_count_a: u64,
     pub disconnect_count_b: u64,
     pub latency_sum_a_ms: u64,
@@ -173,7 +168,6 @@ pub struct UptimeTracker {
     pub latency_count_b: u64,
     pub total_messages_a: u64,
     pub total_messages_b: u64,
->>>>>>> Stashed changes
 }
 
 impl UptimeTracker {
@@ -183,51 +177,37 @@ impl UptimeTracker {
                 if status.connected {
                     self.connected_a = true;
                     self.connected_at_a = Some(Instant::now());
-<<<<<<< Updated upstream
-=======
                     if let Some(latency) = status.latency_ms {
                         self.latency_sum_a_ms += latency;
                         self.latency_count_a += 1;
                     }
->>>>>>> Stashed changes
                 } else {
                     if let Some(connected_at) = self.connected_at_a.take() {
                         self.uptime_a_seconds += connected_at.elapsed().as_secs();
                     }
                     self.connected_a = false;
-<<<<<<< Updated upstream
-=======
                     self.disconnect_count_a += 1;
->>>>>>> Stashed changes
                 }
             }
             StreamId::B => {
                 if status.connected {
                     self.connected_b = true;
                     self.connected_at_b = Some(Instant::now());
-<<<<<<< Updated upstream
-=======
                     if let Some(latency) = status.latency_ms {
                         self.latency_sum_b_ms += latency;
                         self.latency_count_b += 1;
                     }
->>>>>>> Stashed changes
                 } else {
                     if let Some(connected_at) = self.connected_at_b.take() {
                         self.uptime_b_seconds += connected_at.elapsed().as_secs();
                     }
                     self.connected_b = false;
-<<<<<<< Updated upstream
-=======
                     self.disconnect_count_b += 1;
->>>>>>> Stashed changes
                 }
             }
         }
     }
 
-<<<<<<< Updated upstream
-=======
     pub fn record_message(&mut self, stream_id: StreamId) {
         match stream_id {
             StreamId::A => self.total_messages_a += 1,
@@ -235,22 +215,19 @@ impl UptimeTracker {
         }
     }
 
->>>>>>> Stashed changes
     pub fn get_current_uptime_seconds(&self) -> (u64, u64) {
         let mut a = self.uptime_a_seconds;
         let mut b = self.uptime_b_seconds;
-        
+
         if let Some(connected_at) = self.connected_at_a {
             a += connected_at.elapsed().as_secs();
         }
         if let Some(connected_at) = self.connected_at_b {
             b += connected_at.elapsed().as_secs();
         }
-        
+
         (a, b)
     }
-<<<<<<< Updated upstream
-=======
 
     pub fn get_avg_latency_a(&self) -> u64 {
         if self.latency_count_a > 0 {
@@ -288,15 +265,31 @@ impl UptimeTracker {
         let (current_a, current_b) = self.get_current_uptime_seconds();
         let avg_latency_a = self.get_avg_latency_a();
         let avg_latency_b = self.get_avg_latency_b();
-        
-        let rate_a = if current_a > 0 { self.total_messages_a as f64 / current_a as f64 } else { 0.0 };
-        let rate_b = if current_b > 0 { self.total_messages_b as f64 / current_b as f64 } else { 0.0 };
+
+        let rate_a = if current_a > 0 {
+            self.total_messages_a as f64 / current_a as f64
+        } else {
+            0.0
+        };
+        let rate_b = if current_b > 0 {
+            self.total_messages_b as f64 / current_b as f64
+        } else {
+            0.0
+        };
 
         UptimeDetailedStats {
             uptime_a_seconds: current_a,
             uptime_b_seconds: current_b,
-            uptime_a_percent: if period_seconds > 0 { (current_a as f64 / period_seconds as f64) * 100.0 } else { 0.0 },
-            uptime_b_percent: if period_seconds > 0 { (current_b as f64 / period_seconds as f64) * 100.0 } else { 0.0 },
+            uptime_a_percent: if period_seconds > 0 {
+                (current_a as f64 / period_seconds as f64) * 100.0
+            } else {
+                0.0
+            },
+            uptime_b_percent: if period_seconds > 0 {
+                (current_b as f64 / period_seconds as f64) * 100.0
+            } else {
+                0.0
+            },
             disconnect_count_a: self.disconnect_count_a,
             disconnect_count_b: self.disconnect_count_b,
             avg_latency_a_ms: avg_latency_a,
@@ -331,5 +324,4 @@ pub struct UptimeDetailedStats {
     pub connected_b: bool,
     pub current_streak_a: f64,
     pub current_streak_b: f64,
->>>>>>> Stashed changes
 }
