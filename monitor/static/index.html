@@ -73,6 +73,25 @@
         color: #666;
         margin-top: 0.5rem;
       }
+      .counter .uptime {
+        font-size: 0.75rem;
+        color: #4ade80;
+        margin-top: 0.25rem;
+      }
+      .counter .uptime.disconnected {
+        color: #f87171;
+      }
+      .counter .connection-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #4ade80;
+        margin-right: 4px;
+      }
+      .counter .connection-dot.disconnected {
+        background: #f87171;
+      }
       .counter.winning {
         border-color: #4ade80;
         box-shadow: 0 0 20px rgba(74, 222, 128, 0.3);
@@ -272,6 +291,7 @@
         <div class="label" id="label-a">Stream A</div>
         <div class="value" id="count-a">0</div>
         <div class="rate" id="rate-a">0/s</div>
+        <div class="uptime" id="uptime-a">-</div>
       </div>
       <div class="delta neutral" id="delta">
         <div class="label">Delta</div>
@@ -281,6 +301,7 @@
         <div class="label" id="label-b">Stream B</div>
         <div class="value" id="count-b">0</div>
         <div class="rate" id="rate-b">0/s</div>
+        <div class="uptime" id="uptime-b">-</div>
       </div>
     </div>
 
@@ -344,6 +365,8 @@
       const countB = document.getElementById("count-b");
       const rateA = document.getElementById("rate-a");
       const rateB = document.getElementById("rate-b");
+      const uptimeA = document.getElementById("uptime-a");
+      const uptimeB = document.getElementById("uptime-b");
       const counterA = document.getElementById("counter-a");
       const counterB = document.getElementById("counter-b");
       const deltaEl = document.getElementById("delta");
@@ -375,6 +398,8 @@
       let streamBName = "Stream B";
       let rawData24h = [];
       let rawData28d = [];
+      let uptimeData24h = [];
+      let uptimeData28d = [];
 
       function formatDuration(ms) {
         const secs = Math.floor(ms / 1000);
@@ -383,6 +408,11 @@
           return `${mins}m ${secs % 60}s`;
         }
         return `${secs}s`;
+      }
+
+      function formatUptimePercentage(seconds, periodSeconds = 3600) {
+        const percentage = (seconds / periodSeconds) * 100;
+        return percentage.toFixed(1) + "%";
       }
 
       setInterval(() => {
@@ -617,6 +647,47 @@
       function refreshCharts() {
         fetchHistory(24, chart24h, rawData24h);
         fetchHistory(672, chart28d, rawData28d);
+        fetchUptime(24);
+        fetchUptime(672);
+      }
+
+      async function fetchUptime(hours) {
+        try {
+          const res = await fetch(`/api/uptime?hours=${hours}`);
+          const data = await res.json();
+
+          if (hours <= 24) {
+            uptimeData24h = data;
+          } else {
+            uptimeData28d = data;
+          }
+
+          updateUptimeDisplay(hours);
+        } catch (e) {
+          console.error("Failed to fetch uptime:", e);
+        }
+      }
+
+      function updateUptimeDisplay(hours) {
+        const data = hours <= 24 ? uptimeData24h : uptimeData28d;
+        if (data.length === 0) return;
+
+        const periodSeconds = hours * 3600;
+        let totalA = 0;
+        let totalB = 0;
+
+        data.forEach(d => {
+          totalA += d.stream_a_seconds;
+          totalB += d.stream_b_seconds;
+        });
+
+        const percentageA = (totalA / periodSeconds) * 100;
+        const percentageB = (totalB / periodSeconds) * 100;
+
+        if (hours <= 24) {
+          uptimeA.textContent = formatUptimePercentage(totalA, periodSeconds);
+          uptimeB.textContent = formatUptimePercentage(totalB, periodSeconds);
+        }
       }
 
       refreshCharts();
@@ -658,6 +729,13 @@
           countB.textContent = stats.stream_b.toLocaleString();
           rateA.textContent = Math.round(stats.rate_a).toLocaleString() + "/s";
           rateB.textContent = Math.round(stats.rate_b).toLocaleString() + "/s";
+
+          const uptimePercentA = formatUptimePercentage(stats.uptime_a, 3600);
+          const uptimePercentB = formatUptimePercentage(stats.uptime_b, 3600);
+          uptimeA.textContent = (stats.connected_a ? "" : "⏸ ") + uptimePercentA;
+          uptimeB.textContent = (stats.connected_b ? "" : "⏸ ") + uptimePercentB;
+          uptimeA.className = stats.connected_a ? "uptime" : "uptime disconnected";
+          uptimeB.className = stats.connected_b ? "uptime" : "uptime disconnected";
 
           const delta = stats.delta;
           const sign = delta >= 0 ? "+" : "";
