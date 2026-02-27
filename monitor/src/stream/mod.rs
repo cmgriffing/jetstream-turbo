@@ -1,3 +1,3 @@
 pub mod client;
 
-pub use client::{StreamClient, StreamId, StreamMessage};
+pub use client::{ConnectionStatus, StreamClient, StreamId, StreamMessage};

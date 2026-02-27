@@ -1,7 +1,8 @@
-use crate::stream::{StreamId, StreamMessage};
+use crate::stream::{ConnectionStatus, StreamId, StreamMessage};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::broadcast;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,6 +15,10 @@ pub struct StreamStats {
     pub stream_a_name: String,
     pub stream_b_name: String,
     pub timestamp: DateTime<Utc>,
+    pub uptime_a: f64,
+    pub uptime_b: f64,
+    pub connected_a: bool,
+    pub connected_b: bool,
 }
 
 pub struct StatsAggregator {
@@ -40,9 +45,10 @@ impl StatsAggregator {
         self.tx.clone()
     }
 
-    pub fn process(&self, stats: &Arc<std::sync::RwLock<StreamStatsInternal>>) {
+    pub fn process(&self, stats: &Arc<std::sync::RwLock<StreamStatsInternal>>, uptime: &Arc<std::sync::RwLock<UptimeTracker>>) {
         let tx = self.tx.clone();
         let stats = Arc::clone(stats);
+        let uptime = Arc::clone(uptime);
         let stream_a_name = self.stream_a_name.clone();
         let stream_b_name = self.stream_b_name.clone();
 
@@ -69,6 +75,12 @@ impl StatsAggregator {
                     rate_ema_a = ALPHA * instant_rate_a + (1.0 - ALPHA) * rate_ema_a;
                     rate_ema_b = ALPHA * instant_rate_b + (1.0 - ALPHA) * rate_ema_b;
 
+                    let (uptime_a, uptime_b, connected_a, connected_b) = {
+                        let up = uptime.read().unwrap();
+                        let (a, b) = up.get_current_uptime_seconds();
+                        (a, b, up.connected_a, up.connected_b)
+                    };
+
                     let stats_snapshot = StreamStats {
                         stream_a: internal.count_a,
                         stream_b: internal.count_b,
@@ -78,6 +90,10 @@ impl StatsAggregator {
                         stream_a_name: stream_a_name.clone(),
                         stream_b_name: stream_b_name.clone(),
                         timestamp: Utc::now(),
+                        uptime_a: uptime_a as f64,
+                        uptime_b: uptime_b as f64,
+                        connected_a,
+                        connected_b,
                     };
 
                     last_a = internal.count_a;
@@ -103,5 +119,58 @@ impl StreamStatsInternal {
             StreamId::A => self.count_a = msg.count,
             StreamId::B => self.count_b = msg.count,
         }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct UptimeTracker {
+    pub uptime_a_seconds: u64,
+    pub uptime_b_seconds: u64,
+    pub connected_a: bool,
+    pub connected_b: bool,
+    pub connected_at_a: Option<Instant>,
+    pub connected_at_b: Option<Instant>,
+}
+
+impl UptimeTracker {
+    pub fn handle_connection_status(&mut self, status: ConnectionStatus) {
+        match status.stream_id {
+            StreamId::A => {
+                if status.connected {
+                    self.connected_a = true;
+                    self.connected_at_a = Some(Instant::now());
+                } else {
+                    if let Some(connected_at) = self.connected_at_a.take() {
+                        self.uptime_a_seconds += connected_at.elapsed().as_secs();
+                    }
+                    self.connected_a = false;
+                }
+            }
+            StreamId::B => {
+                if status.connected {
+                    self.connected_b = true;
+                    self.connected_at_b = Some(Instant::now());
+                } else {
+                    if let Some(connected_at) = self.connected_at_b.take() {
+                        self.uptime_b_seconds += connected_at.elapsed().as_secs();
+                    }
+                    self.connected_b = false;
+                }
+            }
+        }
+    }
+
+    pub fn get_current_uptime_seconds(&self) -> (u64, u64) {
+        let mut a = self.uptime_a_seconds;
+        let mut b = self.uptime_b_seconds;
+        
+        if let Some(connected_at) = self.connected_at_a {
+            a += connected_at.elapsed().as_secs();
+        }
+        if let Some(connected_at) = self.connected_at_b {
+            b += connected_at.elapsed().as_secs();
+        }
+        
+        (a, b)
     }
 }
