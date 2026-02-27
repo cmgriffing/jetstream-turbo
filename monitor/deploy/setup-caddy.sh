@@ -21,7 +21,6 @@ install_caddy() {
   yum install -y -q yum-utils
 
   # Add the Caddy COPR repository
-  # Note: 'dnf' is the modern replacement for yum, but 'yum' works via alias on most systems
   yum install -y -q 'dnf-command(copr)'
   yum copr enable -y @caddy/caddy
   
@@ -30,30 +29,27 @@ install_caddy() {
   log "Caddy installed successfully"
 }
 
-configure_ufw() {
-  if ! command -v ufw &> /dev/null; then
-    log "UFW not installed, installing..."
-    yum install -y -q ufw
+configure_firewalld() {
+  if ! command -v firewall-cmd &> /dev/null; then
+    log "firewalld not installed, installing..."
+    yum install -y -q firewalld
   fi
 
-  if ufw status 2>/dev/null | grep -q "Status: active"; then
-    log "UFW already active, checking rules..."
-  else
-    log "Configuring UFW..."
-  fi
+  log "Starting and enabling firewalld..."
+  systemctl enable --now firewalld
 
-  ufw allow 22/tcp comment 'SSH' 2>/dev/null || true
-  ufw allow 80/tcp comment 'HTTP' 2>/dev/null || true
-  ufw allow 443/tcp comment 'HTTPS' 2>/dev/null || true
+  log "Configuring firewalld rules..."
   
-  if ! ufw status 2>/dev/null | grep -q "Status: active"; then
-    log "Enabling UFW..."
-    echo "y" | ufw enable
-  else
-    log "UFW rules configured"
-  fi
+  # Ensure standard services are allowed
+  firewall-cmd --permanent --add-service=ssh
+  firewall-cmd --permanent --add-service=http
+  firewall-cmd --permanent --add-service=https
   
-  ufw status numbered
+  # Reload to apply changes
+  firewall-cmd --reload
+  
+  log "firewalld rules configured and reloaded"
+  firewall-cmd --list-services
 }
 
 write_caddyfile() {
@@ -89,12 +85,15 @@ CADDYEOF
     if diff -q "$CADDYFILE" "$NEW_CADDYFILE" > /dev/null 2>&1; then
       log "Caddyfile unchanged, skipping reload"
       rm -f "$NEW_CADDYFILE"
+      CADDYFILE_CHANGED="false"
       return 0
     else
       log "Caddyfile changed, will reload"
+      CADDYFILE_CHANGED="true"
     fi
   else
     log "Creating new Caddyfile"
+    CADDYFILE_CHANGED="true"
   fi
   
   mv "$NEW_CADDYFILE" "$CADDYFILE"
@@ -109,7 +108,7 @@ start_caddy() {
   
   log "Starting/restarting Caddy..."
   if systemctl is-active --quiet caddy; then
-    if [ -f "/etc/caddy/Caddyfile.new" ] || [ "$CADDYFILE_CHANGED" = "true" ]; then
+    if [ "$CADDYFILE_CHANGED" = "true" ]; then
       systemctl reload caddy
       log "Caddy reloaded"
     else
@@ -156,7 +155,7 @@ main() {
   log "Upstream: $UPSTREAM"
   
   install_caddy
-  configure_ufw
+  configure_firewalld
   write_caddyfile
   verify_dns
   start_caddy
