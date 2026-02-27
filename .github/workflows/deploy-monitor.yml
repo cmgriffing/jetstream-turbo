@@ -168,6 +168,7 @@ jobs:
           host: ${{ secrets.VPS_MONITOR_HOST }}
           username: deploy
           key: ${{ secrets.VPS_MONITOR_SSH_KEY }}
+          strip_components: 2
           source: monitor/deploy/setup-caddy.sh
           target: "/tmp/"
 
