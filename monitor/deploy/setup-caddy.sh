@@ -17,15 +17,15 @@ install_caddy() {
 
   log "Installing Caddy..."
   
-  apt-get update -qq
-  apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl
+  # Install the yum-utils to manage repositories
+  yum install -y -q yum-utils
+
+  # Add the Caddy COPR repository
+  # Note: 'dnf' is the modern replacement for yum, but 'yum' works via alias on most systems
+  yum install -y -q 'dnf-command(copr)'
+  yum copr enable -y @caddy/caddy
   
-  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-  
-  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-  
-  apt-get update -qq
-  apt-get install -y -qq caddy
+  yum install -y -q caddy
   
   log "Caddy installed successfully"
 }
