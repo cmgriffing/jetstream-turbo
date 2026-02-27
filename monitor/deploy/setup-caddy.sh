@@ -33,7 +33,7 @@ install_caddy() {
 configure_ufw() {
   if ! command -v ufw &> /dev/null; then
     log "UFW not installed, installing..."
-    apt-get install -y -qq ufw
+    yum install -y -q ufw
   fi
 
   if ufw status 2>/dev/null | grep -q "Status: active"; then
