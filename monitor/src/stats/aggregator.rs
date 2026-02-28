@@ -152,10 +152,8 @@ impl StreamStatsInternal {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct UptimeTracker {
-    pub uptime_a_seconds: u64,
-    pub uptime_b_seconds: u64,
     pub connected_a: bool,
     pub connected_b: bool,
     pub connected_at_a: Option<Instant>,
@@ -168,40 +166,85 @@ pub struct UptimeTracker {
     pub latency_count_b: u64,
     pub total_messages_a: u64,
     pub total_messages_b: u64,
+    session_start_a: Option<Instant>,
+    session_start_b: Option<Instant>,
+    connected_seconds_a: u64,
+    connected_seconds_b: u64,
+    disconnected_at_a: Option<Instant>,
+    disconnected_at_b: Option<Instant>,
+}
+
+impl Default for UptimeTracker {
+    fn default() -> Self {
+        Self {
+            connected_a: false,
+            connected_b: false,
+            connected_at_a: None,
+            connected_at_b: None,
+            disconnect_count_a: 0,
+            disconnect_count_b: 0,
+            latency_sum_a_ms: 0,
+            latency_sum_b_ms: 0,
+            latency_count_a: 0,
+            latency_count_b: 0,
+            total_messages_a: 0,
+            total_messages_b: 0,
+            session_start_a: None,
+            session_start_b: None,
+            connected_seconds_a: 0,
+            connected_seconds_b: 0,
+            disconnected_at_a: None,
+            disconnected_at_b: None,
+        }
+    }
 }
 
 impl UptimeTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     pub fn handle_connection_status(&mut self, status: ConnectionStatus) {
+        let now = Instant::now();
+        
         match status.stream_id {
             StreamId::A => {
                 if status.connected {
+                    self.session_start_a = Some(now);
                     self.connected_a = true;
-                    self.connected_at_a = Some(Instant::now());
+                    self.connected_at_a = Some(now);
+                    self.disconnected_at_a = None;
                     if let Some(latency) = status.latency_ms {
                         self.latency_sum_a_ms += latency;
                         self.latency_count_a += 1;
                     }
                 } else {
-                    if let Some(connected_at) = self.connected_at_a.take() {
-                        self.uptime_a_seconds += connected_at.elapsed().as_secs();
+                    if let Some(session_start) = self.session_start_a.take() {
+                        let elapsed = now.duration_since(session_start).as_secs();
+                        self.connected_seconds_a = self.connected_seconds_a.saturating_add(elapsed);
                     }
                     self.connected_a = false;
+                    self.disconnected_at_a = Some(now);
                     self.disconnect_count_a += 1;
                 }
             }
             StreamId::B => {
                 if status.connected {
+                    self.session_start_b = Some(now);
                     self.connected_b = true;
-                    self.connected_at_b = Some(Instant::now());
+                    self.connected_at_b = Some(now);
+                    self.disconnected_at_b = None;
                     if let Some(latency) = status.latency_ms {
                         self.latency_sum_b_ms += latency;
                         self.latency_count_b += 1;
                     }
                 } else {
-                    if let Some(connected_at) = self.connected_at_b.take() {
-                        self.uptime_b_seconds += connected_at.elapsed().as_secs();
+                    if let Some(session_start) = self.session_start_b.take() {
+                        let elapsed = now.duration_since(session_start).as_secs();
+                        self.connected_seconds_b = self.connected_seconds_b.saturating_add(elapsed);
                     }
                     self.connected_b = false;
+                    self.disconnected_at_b = Some(now);
                     self.disconnect_count_b += 1;
                 }
             }
@@ -216,17 +259,41 @@ impl UptimeTracker {
     }
 
     pub fn get_current_uptime_seconds(&self) -> (u64, u64) {
-        let mut a = self.uptime_a_seconds;
-        let mut b = self.uptime_b_seconds;
+        let now = Instant::now();
+        
+        let uptime_a = if self.connected_a {
+            10000
+        } else {
+            let connected_time = self.connected_seconds_a;
+            let disconnected_time = self.disconnected_at_a
+                .map(|d| now.duration_since(d).as_secs())
+                .unwrap_or(0);
+            
+            if connected_time == 0 && disconnected_time == 0 {
+                0
+            } else {
+                let total = connected_time + disconnected_time;
+                ((connected_time as f64 / total as f64) * 10000.0) as u64
+            }
+        };
+        
+        let uptime_b = if self.connected_b {
+            10000
+        } else {
+            let connected_time = self.connected_seconds_b;
+            let disconnected_time = self.disconnected_at_b
+                .map(|d| now.duration_since(d).as_secs())
+                .unwrap_or(0);
+            
+            if connected_time == 0 && disconnected_time == 0 {
+                0
+            } else {
+                let total = connected_time + disconnected_time;
+                ((connected_time as f64 / total as f64) * 10000.0) as u64
+            }
+        };
 
-        if let Some(connected_at) = self.connected_at_a {
-            a += connected_at.elapsed().as_secs();
-        }
-        if let Some(connected_at) = self.connected_at_b {
-            b += connected_at.elapsed().as_secs();
-        }
-
-        (a, b)
+        (uptime_a, uptime_b)
     }
 
     pub fn get_avg_latency_a(&self) -> u64 {
