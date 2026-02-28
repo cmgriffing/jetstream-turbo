@@ -391,19 +391,27 @@
           <span class="metric-value good" id="uptime24-b">-</span>
         </div>
         <div class="metric-row">
-          <span class="metric-label">Stream A Total Up</span>
+          <span class="metric-label" id="uptime24-total-label-a"
+            >Stream A Total Up</span
+          >
           <span class="metric-value" id="uptime24-total-a">-</span>
         </div>
         <div class="metric-row">
-          <span class="metric-label">Stream B Total Up</span>
+          <span class="metric-label" id="uptime24-total-label-b"
+            >Stream B Total Up</span
+          >
           <span class="metric-value" id="uptime24-total-b">-</span>
         </div>
         <div class="metric-row">
-          <span class="metric-label">Stream A Disconnects</span>
+          <span class="metric-label" id="uptime24-disc-label-a"
+            >Stream A Disconnects</span
+          >
           <span class="metric-value" id="uptime24-disc-a">-</span>
         </div>
         <div class="metric-row">
-          <span class="metric-label">Stream B Disconnects</span>
+          <span class="metric-label" id="uptime24-disc-label-b"
+            >Stream B Disconnects</span
+          >
           <span class="metric-value" id="uptime24-disc-b">-</span>
         </div>
       </div>
@@ -423,19 +431,27 @@
           <span class="metric-value good" id="uptime28-b">-</span>
         </div>
         <div class="metric-row">
-          <span class="metric-label">Stream A Total Up</span>
+          <span class="metric-label" id="uptime28-total-label-a"
+            >Stream A Total Up</span
+          >
           <span class="metric-value" id="uptime28-total-a">-</span>
         </div>
         <div class="metric-row">
-          <span class="metric-label">Stream B Total Up</span>
+          <span class="metric-label" id="uptime28-total-label-b"
+            >Stream B Total Up</span
+          >
           <span class="metric-value" id="uptime28-total-b">-</span>
         </div>
         <div class="metric-row">
-          <span class="metric-label">Stream A Disconnects</span>
+          <span class="metric-label" id="uptime28-disc-label-a"
+            >Stream A Disconnects</span
+          >
           <span class="metric-value" id="uptime28-disc-a">-</span>
         </div>
         <div class="metric-row">
-          <span class="metric-label">Stream B Disconnects</span>
+          <span class="metric-label" id="uptime28-disc-label-b"
+            >Stream B Disconnects</span
+          >
           <span class="metric-value" id="uptime28-disc-b">-</span>
         </div>
       </div>
@@ -451,11 +467,11 @@
           <span class="metric-value" id="rate24-b">-</span>
         </div>
         <div class="metric-row">
-          <span class="metric-label">Stream A Total Msgs</span>
+          <span class="metric-label" id="msgs24-label-a">Stream A Total Msgs</span>
           <span class="metric-value" id="msgs24-a">-</span>
         </div>
         <div class="metric-row">
-          <span class="metric-label">Stream B Total Msgs</span>
+          <span class="metric-label" id="msgs24-label-b">Stream B Total Msgs</span>
           <span class="metric-value" id="msgs24-b">-</span>
         </div>
       </div>
@@ -601,14 +617,34 @@
           streamAName + " Uptime";
         document.getElementById("uptime24-label-b").textContent =
           streamBName + " Uptime";
+        document.getElementById("uptime24-total-label-a").textContent =
+          streamAName + " Total Up";
+        document.getElementById("uptime24-total-label-b").textContent =
+          streamBName + " Total Up";
+        document.getElementById("uptime24-disc-label-a").textContent =
+          streamAName + " Disconnects";
+        document.getElementById("uptime24-disc-label-b").textContent =
+          streamBName + " Disconnects";
         document.getElementById("uptime28-label-a").textContent =
           streamAName + " Uptime";
         document.getElementById("uptime28-label-b").textContent =
           streamBName + " Uptime";
+        document.getElementById("uptime28-total-label-a").textContent =
+          streamAName + " Total Up";
+        document.getElementById("uptime28-total-label-b").textContent =
+          streamBName + " Total Up";
+        document.getElementById("uptime28-disc-label-a").textContent =
+          streamAName + " Disconnects";
+        document.getElementById("uptime28-disc-label-b").textContent =
+          streamBName + " Disconnects";
         document.getElementById("rate24-label-a").textContent =
           streamAName + " Avg";
         document.getElementById("rate24-label-b").textContent =
           streamBName + " Avg";
+        document.getElementById("msgs24-label-a").textContent =
+          streamAName + " Total Msgs";
+        document.getElementById("msgs24-label-b").textContent =
+          streamBName + " Total Msgs";
       }
 
       function createUptimeChart(canvasId, titleId, title) {
