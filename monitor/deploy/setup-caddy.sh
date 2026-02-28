@@ -2,7 +2,7 @@
 set -e
 
 DOMAIN="turbo-monitor.messijo.com"
-UPSTREAM="localhost:3001"
+UPSTREAM="0.0.0.0:3001"
 LOG_PREFIX="[setup-caddy-monitor]"
 
 log() {
