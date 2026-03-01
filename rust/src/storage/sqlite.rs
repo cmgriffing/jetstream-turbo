@@ -1,10 +1,18 @@
 use crate::models::{enriched::EnrichedRecord, TurboResult};
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 use simd_json::to_string as simd_json_to_string;
 use sqlx::{sqlite::SqliteConnectOptions, sqlite::SqliteJournalMode, Row, SqlitePool};
 use std::path::Path;
 use std::time::Instant;
+use tokio::time::{sleep, Duration};
 use tracing::{info, instrument, trace};
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CleanupResult {
+    pub records_deleted: u64,
+    pub new_size_bytes: i64,
+}
 
 pub struct SQLiteStore {
     pool: SqlitePool,
@@ -13,19 +21,25 @@ pub struct SQLiteStore {
 
 impl SQLiteStore {
     pub async fn new<P: AsRef<Path>>(db_path: P) -> TurboResult<Self> {
-        let db_path = db_path.as_ref().to_string_lossy().to_string();
+        let db_path_str = db_path.as_ref().to_string_lossy().to_string();
 
-        info!("Creating SQLite database at: {}", db_path);
+        info!("Creating SQLite database at: {}", db_path_str);
 
-        // Ensure parent directory exists
-        if let Some(parent) = Path::new(&db_path).parent() {
-            tokio::fs::create_dir_all(parent).await?;
+        // Ensure parent directory exists (skip for in-memory databases)
+        if db_path_str != ":memory:" {
+            if let Some(parent) = Path::new(&db_path_str).parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
         }
 
-        let connect_options = SqliteConnectOptions::new()
-            .filename(&db_path)
-            .journal_mode(SqliteJournalMode::Wal)
+        let mut connect_options = SqliteConnectOptions::new()
+            .filename(&db_path_str)
             .create_if_missing(true);
+
+        // Skip WAL mode for in-memory databases
+        if db_path_str != ":memory:" {
+            connect_options = connect_options.journal_mode(SqliteJournalMode::Wal);
+        }
 
         let pool = SqlitePool::connect_with(connect_options).await?;
 
@@ -35,7 +49,7 @@ impl SQLiteStore {
         // Initialize schema
         Self::initialize_schema(&pool).await?;
 
-        Ok(Self { pool, db_path })
+        Ok(Self { pool, db_path: db_path_str })
     }
 
     async fn initialize_schema(pool: &SqlitePool) -> TurboResult<()> {
@@ -86,10 +100,11 @@ impl SQLiteStore {
             .execute(pool)
             .await?;
 
-        // mmap_size = 268435456: 256MB memory-mapped I/O for faster reads
-        sqlx::query("PRAGMA mmap_size = 268435456")
+        // mmap_size = 256MB memory-mapped I/O for faster reads (skip for in-memory)
+        // In-memory databases don't benefit from mmap
+        let _ = sqlx::query("PRAGMA mmap_size = 268435456")
             .execute(pool)
-            .await?;
+            .await;
 
         info!("Applied SQLite performance PRAGMAs");
         Ok(())
@@ -285,6 +300,57 @@ impl SQLiteStore {
         Ok(deleted)
     }
 
+    pub async fn get_db_size(&self) -> TurboResult<i64> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT (page_count * page_size) as size FROM pragma_page_count(), pragma_page_size()"
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    pub async fn cleanup_with_vacuum(&self, retention_days: u32, max_size_bytes: i64) -> TurboResult<CleanupResult> {
+        let mut current_retention = retention_days;
+        let mut total_deleted: u64 = 0;
+        let max_iterations = 3;
+
+        for iteration in 0..max_iterations {
+            let cutoff = Utc::now() - chrono::Duration::days(current_retention as i64);
+            let deleted = self.cleanup_old_records(cutoff).await?;
+            total_deleted += deleted;
+
+            let current_size = self.get_db_size().await?;
+
+            if current_size <= max_size_bytes {
+                break;
+            }
+
+            info!(
+                "Iteration {}: DB still {}MB over limit, reducing retention from {} to {} days",
+                iteration + 1,
+                current_size / (1024 * 1024),
+                current_retention,
+                (current_retention / 2).max(1)
+            );
+
+            current_retention = (current_retention / 2).max(1);
+
+            if iteration < max_iterations - 1 {
+                sleep(Duration::from_secs(2)).await;
+            }
+        }
+
+        sqlx::query("VACUUM").execute(&self.pool).await?;
+        info!("VACUUM completed after cleanup loop, total deleted: {}", total_deleted);
+
+        let new_size = self.get_db_size().await?;
+
+        Ok(CleanupResult {
+            records_deleted: total_deleted,
+            new_size_bytes: new_size,
+        })
+    }
+
     pub async fn get_db_path(&self) -> &str {
         &self.db_path
     }
@@ -293,5 +359,181 @@ impl SQLiteStore {
         self.pool.close().await;
         info!("SQLite connection pool closed");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    async fn create_test_db() -> SQLiteStore {
+        let temp_dir = std::env::temp_dir();
+        let db_path = temp_dir.join(format!("test_sqlite_{}.db", uuid::Uuid::new_v4()));
+        let db_path_str = db_path.to_string_lossy().to_string();
+        SQLiteStore::new(&db_path_str).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_get_db_size() {
+        let store = create_test_db().await;
+        
+        let size = store.get_db_size().await.unwrap();
+        assert!(size > 0, "Database should have some initial size");
+        
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_old_records_empty_db() {
+        let store = create_test_db().await;
+        
+        let cutoff = Utc::now() - Duration::days(7);
+        let deleted = store.cleanup_old_records(cutoff).await.unwrap();
+        
+        assert_eq!(deleted, 0, "Should delete nothing from empty DB");
+        
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_old_records_with_data() {
+        let store = create_test_db().await;
+        
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        
+        let old_time = now - Duration::days(10);
+        let old_time_str = old_time.to_rfc3339();
+        
+        sqlx::query(
+            r#"INSERT INTO records (at_uri, did, time_us, message, message_metadata, created_at, hydrated_at, hydration_time_ms, api_calls_count, cache_hit_rate, cache_hits, cache_misses)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
+        )
+        .bind("at://old.bsky.social/app.bsky.feed.post/1")
+        .bind("did:plc:old")
+        .bind(1000i64)
+        .bind(r#"{"foo":"bar"}"#)
+        .bind(r#"{}"#)
+        .bind(&old_time_str)
+        .bind(&now_str)
+        .bind(100i64)
+        .bind(1i64)
+        .bind(0.5)
+        .bind(10i64)
+        .bind(10i64)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            r#"INSERT INTO records (at_uri, did, time_us, message, message_metadata, created_at, hydrated_at, hydration_time_ms, api_calls_count, cache_hit_rate, cache_hits, cache_misses)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
+        )
+        .bind("at://new.bsky.social/app.bsky.feed.post/2")
+        .bind("did:plc:new")
+        .bind(2000i64)
+        .bind(r#"{"foo":"bar"}"#)
+        .bind(r#"{}"#)
+        .bind(&now_str)
+        .bind(&now_str)
+        .bind(100i64)
+        .bind(1i64)
+        .bind(0.5)
+        .bind(10i64)
+        .bind(10i64)
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        let cutoff = now - Duration::days(7);
+        let deleted = store.cleanup_old_records(cutoff).await.unwrap();
+        
+        assert_eq!(deleted, 1, "Should delete 1 old record");
+        
+        let count = store.count_records().await.unwrap();
+        assert_eq!(count, 1, "Should have 1 record remaining");
+        
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_with_vacuum_size_based() {
+        let store = create_test_db().await;
+        
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        
+        for i in 0..5 {
+            let old_time = now - Duration::days(10);
+            let old_time_str = old_time.to_rfc3339();
+            
+            sqlx::query(
+                r#"INSERT INTO records (at_uri, did, time_us, message, message_metadata, created_at, hydrated_at, hydration_time_ms, api_calls_count, cache_hit_rate, cache_hits, cache_misses)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
+            )
+            .bind(format!("at://test{}.bsky.social/app.bsky.feed.post/1", i))
+            .bind(format!("did:plc:test{}", i))
+            .bind(1000i64 + i as i64)
+            .bind(r#"{"foo":"bar","extra":"data"}"#)
+            .bind(r#"{}"#)
+            .bind(&old_time_str)
+            .bind(&now_str)
+            .bind(100i64)
+            .bind(1i64)
+            .bind(0.5)
+            .bind(10i64)
+            .bind(10i64)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        }
+
+        let size_before = store.get_db_size().await.unwrap();
+        assert!(size_before > 0, "DB should have size");
+
+        let max_size = size_before / 2;
+        let result = store.cleanup_with_vacuum(7, max_size).await.unwrap();
+        
+        assert!(result.records_deleted > 0, "Should have deleted some records");
+        
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_with_vacuum_under_limit() {
+        let store = create_test_db().await;
+        
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        
+        for i in 0..3 {
+            sqlx::query(
+                r#"INSERT INTO records (at_uri, did, time_us, message, message_metadata, created_at, hydrated_at, hydration_time_ms, api_calls_count, cache_hit_rate, cache_hits, cache_misses)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
+            )
+            .bind(format!("at://recent{}.bsky.social/app.bsky.feed.post/1", i))
+            .bind(format!("did:plc:recent{}", i))
+            .bind(1000i64 + i as i64)
+            .bind(r#"{"foo":"bar"}"#)
+            .bind(r#"{}"#)
+            .bind(&now_str)
+            .bind(&now_str)
+            .bind(100i64)
+            .bind(1i64)
+            .bind(0.5)
+            .bind(10i64)
+            .bind(10i64)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        }
+
+        let large_size = 100_000_000_000i64;
+        let result = store.cleanup_with_vacuum(7, large_size).await.unwrap();
+        
+        assert_eq!(result.records_deleted, 0, "Should not delete anything when under limit");
+        
+        store.close().await.unwrap();
     }
 }

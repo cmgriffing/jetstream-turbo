@@ -88,6 +88,14 @@ async fn main() -> Result<()> {
     // Start background session refresh task
     turbocharger.start_session_refresh_task();
 
+    // Start background database cleanup task
+    turbocharger.start_db_cleanup_task();
+
+    // Run initial cleanup check on startup
+    if let Err(e) = turbocharger.check_and_cleanup_db().await {
+        tracing::warn!("Initial database cleanup check failed: {}", e);
+    }
+
     // Run both turbocharger and server
     let turbocharger_clone = turbocharger.clone();
     let error_reporter_clone = error_reporter.clone();

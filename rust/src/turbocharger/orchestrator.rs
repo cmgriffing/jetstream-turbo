@@ -350,6 +350,56 @@ impl TurboCharger {
     pub fn subscribe(&self) -> broadcast::Receiver<EnrichedRecord> {
         self.broadcast_sender.subscribe()
     }
+
+    pub async fn check_and_cleanup_db(&self) -> TurboResult<Option<crate::storage::sqlite::CleanupResult>> {
+        let max_size_bytes = (self.settings.max_db_size_mb as i64) * 1024 * 1024;
+        let current_size = self.sqlite_store.get_db_size().await?;
+
+        if current_size > max_size_bytes {
+            info!(
+                "Database size {}MB exceeds limit {}MB, running cleanup",
+                current_size / (1024 * 1024),
+                self.settings.max_db_size_mb
+            );
+            let result = self.sqlite_store.cleanup_with_vacuum(self.settings.db_retention_days, max_size_bytes).await?;
+            info!(
+                "Cleanup complete: {} records deleted, new size: {}MB",
+                result.records_deleted,
+                result.new_size_bytes / (1024 * 1024)
+            );
+            return Ok(Some(result));
+        }
+
+        Ok(None)
+    }
+
+    pub fn start_db_cleanup_task(self: &Arc<Self>) {
+        let this = self.clone();
+        let interval_minutes = this.settings.cleanup_check_interval_minutes;
+
+        tokio::spawn(async move {
+            let mut cleanup_interval = interval(Duration::from_secs(interval_minutes * 60));
+            cleanup_interval.tick().await;
+
+            loop {
+                cleanup_interval.tick().await;
+
+                match this.check_and_cleanup_db().await {
+                    Ok(Some(result)) => {
+                        info!("Scheduled cleanup: {} records deleted, {}MB remaining",
+                            result.records_deleted,
+                            result.new_size_bytes / (1024 * 1024)
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        error!("Database cleanup failed: {}", e);
+                    }
+                }
+            }
+        });
+        info!("Started database cleanup task (every {} minutes)", interval_minutes);
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

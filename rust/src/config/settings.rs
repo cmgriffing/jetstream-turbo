@@ -26,6 +26,11 @@ pub struct Settings {
     pub db_dir: String,
     pub rotation_minutes: u64,
 
+    // Cleanup Configuration
+    pub max_db_size_mb: u64,
+    pub db_retention_days: u32,
+    pub cleanup_check_interval_minutes: u64,
+
     // HTTP Server Configuration
     pub http_port: u16,
 
@@ -66,6 +71,10 @@ impl Default for Settings {
             trim_maxlen: Some(100),
             db_dir: "data_store".to_string(),
             rotation_minutes: 1,
+            // 1024MB * X gigs
+            max_db_size_mb: 1024 * 20,
+            db_retention_days: 3,
+            cleanup_check_interval_minutes: 5,
             http_port: 8080,
             batch_size: 10,
             profile_batch_size: 25,
@@ -113,6 +122,20 @@ impl Settings {
         if let Ok(hosts) = std::env::var("JETSTREAM_HOSTS") {
             let hosts: Vec<String> = serde_json::from_str(&hosts)?;
             builder = builder.set_override("jetstream_hosts", hosts)?;
+        }
+
+        // Cleanup Configuration
+        if let Ok(max_db_size_mb) = std::env::var("MAX_DB_SIZE_MB") {
+            builder = builder.set_override("max_db_size_mb", max_db_size_mb)?;
+        }
+
+        if let Ok(db_retention_days) = std::env::var("DB_RETENTION_DAYS") {
+            builder = builder.set_override("db_retention_days", db_retention_days)?;
+        }
+
+        if let Ok(cleanup_check_interval) = std::env::var("CLEANUP_CHECK_INTERVAL_MINUTES") {
+            builder =
+                builder.set_override("cleanup_check_interval_minutes", cleanup_check_interval)?;
         }
 
         let settings = builder.build()?;
