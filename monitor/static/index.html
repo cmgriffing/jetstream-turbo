@@ -580,8 +580,12 @@
           messagesB += d.stream_b_messages || 0;
         });
 
-        const uptimeA = (totalA / (24 * 3600)) * 100;
-        const uptimeB = (totalB / (24 * 3600)) * 100;
+        const firstHour = new Date(data[0].hour);
+        const lastHour = new Date(data[data.length - 1].hour);
+        const actualSpanSeconds = (lastHour - firstHour) / 1000 + 3600;
+
+        const uptimeA = (totalA / actualSpanSeconds) * 100;
+        const uptimeB = (totalB / actualSpanSeconds) * 100;
 
         const el = (id, val) => document.getElementById(id);
         el("uptime24-a").textContent = uptimeA.toFixed(2) + "%";
@@ -604,6 +608,41 @@
 
         el("msgs24-a").textContent = messagesA.toLocaleString();
         el("msgs24-b").textContent = messagesB.toLocaleString();
+      }
+
+      function calculate28dStats(data) {
+        if (data.length === 0) return;
+
+        let totalA = 0,
+          totalB = 0;
+        let disconnectsA = 0,
+          disconnectsB = 0;
+
+        data.forEach((d) => {
+          totalA += d.stream_a_seconds || 0;
+          totalB += d.stream_b_seconds || 0;
+          disconnectsA += d.stream_a_disconnects || 0;
+          disconnectsB += d.stream_b_disconnects || 0;
+        });
+
+        const firstHour = new Date(data[0].hour);
+        const lastHour = new Date(data[data.length - 1].hour);
+        const actualSpanSeconds = (lastHour - firstHour) / 1000 + 3600;
+
+        const uptimeA = (totalA / actualSpanSeconds) * 100;
+        const uptimeB = (totalB / actualSpanSeconds) * 100;
+
+        const el = (id, val) => document.getElementById(id);
+        el("uptime28-a").textContent = uptimeA.toFixed(2) + "%";
+        el("uptime28-b").textContent = uptimeB.toFixed(2) + "%";
+        el("uptime28-a").className = "metric-value " + getUptimeClass(uptimeA);
+        el("uptime28-b").className = "metric-value " + getUptimeClass(uptimeB);
+
+        el("uptime28-total-a").textContent = formatDurationLong(totalA);
+        el("uptime28-total-b").textContent = formatDurationLong(totalB);
+
+        el("uptime28-disc-a").textContent = disconnectsA;
+        el("uptime28-disc-b").textContent = disconnectsB;
       }
 
       setInterval(() => {
@@ -752,8 +791,19 @@
                 });
           });
 
-          const uptimeA = data.map((d) => (d.stream_a_seconds / 3600) * 100);
-          const uptimeB = data.map((d) => (d.stream_b_seconds / 3600) * 100);
+          const firstHour = new Date(data[0].hour).getTime();
+          const uptimeA = data.map((d, i) => {
+            const currentHour = new Date(d.hour).getTime();
+            const elapsedSeconds = (currentHour - firstHour) / 1000 + 3600;
+            const cumulativeSeconds = data.slice(0, i + 1).reduce((sum, item) => sum + (item.stream_a_seconds || 0), 0);
+            return (cumulativeSeconds / elapsedSeconds) * 100;
+          });
+          const uptimeB = data.map((d, i) => {
+            const currentHour = new Date(d.hour).getTime();
+            const elapsedSeconds = (currentHour - firstHour) / 1000 + 3600;
+            const cumulativeSeconds = data.slice(0, i + 1).reduce((sum, item) => sum + (item.stream_b_seconds || 0), 0);
+            return (cumulativeSeconds / elapsedSeconds) * 100;
+          });
 
           if (uptimeChart && hours <= 24) {
             uptimeChart.data.labels = labels;
@@ -785,24 +835,29 @@
               dailyUptime[day].count++;
             });
             const days = Object.keys(dailyUptime).slice(-28);
+            const firstDayTimestamp = new Date(days[0]).getTime();
             uptimeChart.data.labels = days;
             uptimeChart.data.datasets = [
               {
                 label: streamAName,
-                data: days.map(
-                  (d) =>
-                    (dailyUptime[d].a / (dailyUptime[d].count * 3600)) * 100,
-                ),
+                data: days.map((d, i) => {
+                  const currentDayTimestamp = new Date(d).getTime();
+                  const elapsedSeconds = (currentDayTimestamp - firstDayTimestamp) / 1000 + (i + 1) * 86400;
+                  const cumulativeSeconds = days.slice(0, i + 1).reduce((sum, day) => sum + dailyUptime[day].a, 0);
+                  return (cumulativeSeconds / elapsedSeconds) * 100;
+                }),
                 backgroundColor: "rgba(34, 197, 94, 0.7)",
                 borderColor: "#22c55e",
                 borderWidth: 1,
               },
               {
                 label: streamBName,
-                data: days.map(
-                  (d) =>
-                    (dailyUptime[d].b / (dailyUptime[d].count * 3600)) * 100,
-                ),
+                data: days.map((d, i) => {
+                  const currentDayTimestamp = new Date(d).getTime();
+                  const elapsedSeconds = (currentDayTimestamp - firstDayTimestamp) / 1000 + (i + 1) * 86400;
+                  const cumulativeSeconds = days.slice(0, i + 1).reduce((sum, day) => sum + dailyUptime[day].b, 0);
+                  return (cumulativeSeconds / elapsedSeconds) * 100;
+                }),
                 backgroundColor: "rgba(59, 130, 246, 0.7)",
                 borderColor: "#3b82f6",
                 borderWidth: 1,
@@ -839,6 +894,7 @@
             calculate24hStats(data);
           } else {
             rawUptimeData28d = data;
+            calculate28dStats(data);
           }
         } catch (e) {
           console.error("Failed to fetch uptime history:", e);
