@@ -7,8 +7,7 @@ use jetstream_monitor::{
     websocket,
 };
 use std::sync::Arc;
-
-const INDEX_HTML: &str = include_str!("../static/index.html");
+use tower_http::services::ServeDir;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -118,10 +117,7 @@ async fn main() -> Result<()> {
     });
 
     let app = axum::Router::new()
-        .route(
-            "/",
-            axum::routing::get(|| async { axum::response::Html(INDEX_HTML.to_string()) }),
-        )
+        .nest_service("/", ServeDir::new("frontend/dist"))
         .route("/ws", axum::routing::get(websocket::ws_handler))
         .route("/api/history", axum::routing::get(get_history))
         .route("/api/uptime", axum::routing::get(get_uptime))

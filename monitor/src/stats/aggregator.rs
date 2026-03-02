@@ -94,7 +94,7 @@ impl StatsAggregator {
                         streak_b,
                     ) = {
                         let up = uptime.read().unwrap();
-                        let (a, b) = up.get_current_uptime_seconds();
+                        let (a, b) = up.get_current_uptime_percentage();
                         (
                             a,
                             b,
@@ -116,8 +116,8 @@ impl StatsAggregator {
                         stream_a_name: stream_a_name.clone(),
                         stream_b_name: stream_b_name.clone(),
                         timestamp: Utc::now(),
-                        uptime_a: uptime_a as f64,
-                        uptime_b: uptime_b as f64,
+                        uptime_a,
+                        uptime_b,
                         connected_a,
                         connected_b,
                         latency_a_ms: latency_a,
@@ -258,11 +258,11 @@ impl UptimeTracker {
         }
     }
 
-    pub fn get_current_uptime_seconds(&self) -> (u64, u64) {
+    pub fn get_current_uptime_percentage(&self) -> (f64, f64) {
         let now = Instant::now();
         
         let uptime_a = if self.connected_a {
-            10000
+            100.0
         } else {
             let connected_time = self.connected_seconds_a;
             let disconnected_time = self.disconnected_at_a
@@ -270,15 +270,15 @@ impl UptimeTracker {
                 .unwrap_or(0);
             
             if connected_time == 0 && disconnected_time == 0 {
-                0
+                0.0
             } else {
                 let total = connected_time + disconnected_time;
-                ((connected_time as f64 / total as f64) * 10000.0) as u64
+                (connected_time as f64 / total as f64) * 100.0
             }
         };
         
         let uptime_b = if self.connected_b {
-            10000
+            100.0
         } else {
             let connected_time = self.connected_seconds_b;
             let disconnected_time = self.disconnected_at_b
@@ -286,10 +286,10 @@ impl UptimeTracker {
                 .unwrap_or(0);
             
             if connected_time == 0 && disconnected_time == 0 {
-                0
+                0.0
             } else {
                 let total = connected_time + disconnected_time;
-                ((connected_time as f64 / total as f64) * 10000.0) as u64
+                (connected_time as f64 / total as f64) * 100.0
             }
         };
 
@@ -329,7 +329,9 @@ impl UptimeTracker {
     }
 
     pub fn get_detailed_stats(&self, period_seconds: u64) -> UptimeDetailedStats {
-        let (current_a, current_b) = self.get_current_uptime_seconds();
+        let (current_a_secs, current_b_secs) = self.get_current_uptime_percentage();
+        let current_a = current_a_secs as u64;
+        let current_b = current_b_secs as u64;
         let avg_latency_a = self.get_avg_latency_a();
         let avg_latency_b = self.get_avg_latency_b();
 

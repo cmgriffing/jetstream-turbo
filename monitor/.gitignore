@@ -1,4 +1,6 @@
 .env
 target
 monitor.db
+frontend/node_modules
+frontend/dist
 
