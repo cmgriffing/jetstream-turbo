@@ -121,8 +121,8 @@ export function UptimeChart24h({ data, streamAName, streamBName }: UptimeChartPr
   }
 
   return (
-    <div className="chart-card bg-[#141414] border border-[#1f1f1f] rounded-2xl p-6 mb-5 transition-all duration-300 hover:border-[#2a2a2a] hover:shadow-[0_4px_24px_rgba(0,0,0,0.3)]">
-      <div className="chart-header flex justify-between items-center mb-5">
+    <div className="chart-card bg-[#141414] border border-[#1f1f1f] rounded-3xl p-8 mb-8 transition-all duration-300 hover:border-[#2a2a2a] hover:shadow-[0_4px_24px_rgba(0,0,0,0.3)]">
+      <div className="chart-header flex justify-between items-center mb-6">
         <h3 className="text-[0.875rem] font-semibold flex items-center gap-2">
           <span className="text-[1rem]">📈</span> Uptime (24h)
         </h3>
@@ -230,8 +230,8 @@ export function UptimeChart28d({ data, streamAName, streamBName }: UptimeChartPr
   }
 
   return (
-    <div className="chart-card bg-[#141414] border border-[#1f1f1f] rounded-2xl p-6 mb-5 transition-all duration-300 hover:border-[#2a2a2a] hover:shadow-[0_4px_24px_rgba(0,0,0,0.3)]">
-      <div className="chart-header flex justify-between items-center mb-5">
+    <div className="chart-card bg-[#141414] border border-[#1f1f1f] rounded-3xl p-8 mb-8 transition-all duration-300 hover:border-[#2a2a2a] hover:shadow-[0_4px_24px_rgba(0,0,0,0.3)]">
+      <div className="chart-header flex justify-between items-center mb-6">
         <h3 className="text-[0.875rem] font-semibold flex items-center gap-2">
           <span className="text-[1rem]">📈</span> Uptime (28 days)
         </h3>
@@ -318,8 +318,8 @@ export function RateChart({ data, streamAName, streamBName }: UptimeChartProps) 
   }
 
   return (
-    <div className="chart-card bg-[#141414] border border-[#1f1f1f] rounded-2xl p-6 mb-5 transition-all duration-300 hover:border-[#2a2a2a] hover:shadow-[0_4px_24px_rgba(0,0,0,0.3)]">
-      <div className="chart-header flex justify-between items-center mb-5">
+    <div className="chart-card bg-[#141414] border border-[#1f1f1f] rounded-3xl p-8 mb-8 transition-all duration-300 hover:border-[#2a2a2a] hover:shadow-[0_4px_24px_rgba(0,0,0,0.3)]">
+      <div className="chart-header flex justify-between items-center mb-6">
         <h3 className="text-[0.875rem] font-semibold flex items-center gap-2">
           <span className="text-[1rem]">💬</span> Message Rate (24h)
         </h3>

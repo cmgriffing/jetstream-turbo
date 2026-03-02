@@ -1,6 +1,21 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+@theme {
+  --color-bg-primary: #0d0d0d;
+  --color-bg-card: #141414;
+  --color-bg-card-hover: #181818;
+  --color-border-subtle: #252525;
+  --color-border-accent: #333;
+  --color-text-primary: #e5e5e5;
+  --color-text-secondary: #737373;
+  --color-text-muted: #525252;
+  --color-accent-green: #22c55e;
+  --color-accent-red: #ef4444;
+  --color-accent-blue: #3b82f6;
+  --color-accent-yellow: #eab308;
+  --color-stream-a: #22c55e;
+  --color-stream-b: #3b82f6;
+}
 
 :root {
   --bg-primary: #0a0a0a;
@@ -25,10 +40,11 @@ body {
   background: radial-gradient(ellipse at top, #111111 0%, var(--bg-primary) 70%);
   color: var(--text-primary);
   min-height: 100vh;
-  padding: 2.5rem;
+  padding: 1.5rem;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
 }
 
 * {

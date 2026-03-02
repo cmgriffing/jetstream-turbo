@@ -69,8 +69,8 @@ export function MetricsTable({ title, icon, data, streamAName, streamBName }: Me
 
   if (!stats) {
     return (
-      <div className="metric-card bg-[#141414] border border-[#1f1f1f] rounded-2xl p-6 transition-all duration-300 hover:border-[#2a2a2a]">
-        <h3 className="text-[0.875rem] font-semibold mb-6 flex items-center gap-2">
+      <div className="metric-card bg-[#141414] border border-[#1f1f1f] rounded-3xl p-8 transition-all duration-300 hover:border-[#2a2a2a]">
+        <h3 className="text-[0.875rem] font-semibold mb-8 flex items-center gap-2">
           <span className="text-[1rem]">{icon}</span> {title}
         </h3>
         <p className="text-[#525252] text-sm">No data available</p>
@@ -79,70 +79,70 @@ export function MetricsTable({ title, icon, data, streamAName, streamBName }: Me
   }
 
   return (
-    <div className="metric-card bg-[#141414] border border-[#1f1f1f] rounded-2xl p-6 transition-all duration-300 hover:border-[#2a2a2a] hover:shadow-[0_4px_24px_rgba(0,0,0,0.3)]">
-      <h3 className="text-[0.875rem] font-semibold mb-6 flex items-center gap-2">
+    <div className="metric-card bg-[#141414] border border-[#1f1f1f] rounded-3xl p-8 transition-all duration-300 hover:border-[#2a2a2a] hover:shadow-[0_4px_24px_rgba(0,0,0,0.3)]">
+      <h3 className="text-[0.875rem] font-semibold mb-8 flex items-center gap-2">
         <span className="text-[1rem]">{icon}</span> {title}
       </h3>
       <table className="w-full border-collapse">
         <thead>
           <tr>
-            <th className="text-left text-[0.6875rem] text-[#525252] uppercase tracking-wider py-3 border-b border-[#1f1f1f] font-medium w-2/5">
+            <th className="text-left text-[0.6875rem] text-[#525252] uppercase tracking-wider py-4 border-b border-[#1f1f1f] font-medium w-2/5">
               Metric
             </th>
-            <th className="text-right text-[0.6875rem] text-[#525252] uppercase tracking-wider py-3 border-b border-[#1f1f1f] font-medium w-3/10">
+            <th className="text-right text-[0.6875rem] text-[#525252] uppercase tracking-wider py-4 border-b border-[#1f1f1f] font-medium w-3/10">
               {streamAName}
             </th>
-            <th className="text-right text-[0.6875rem] text-[#525252] uppercase tracking-wider py-3 border-b border-[#1f1f1f] font-medium w-3/10">
+            <th className="text-right text-[0.6875rem] text-[#525252] uppercase tracking-wider py-4 border-b border-[#1f1f1f] font-medium w-3/10">
               {streamBName}
             </th>
           </tr>
         </thead>
         <tbody>
           <tr className="transition-colors duration-150 hover:bg-[#181818]">
-            <td className="py-4 text-[#a3a3a3] text-[0.9375rem] border-b border-[#1f1f1f]">Uptime</td>
-            <td className={`py-4 text-right text-[0.9375rem] font-semibold tabular-nums border-b border-[#1f1f1f] ${getUptimeClass(stats.uptimeA)}`}>
+            <td className="py-5 text-[#a3a3a3] text-[0.9375rem] border-b border-[#1f1f1f]">Uptime</td>
+            <td className={`py-5 text-right text-[0.9375rem] font-semibold tabular-nums border-b border-[#1f1f1f] ${getUptimeClass(stats.uptimeA)}`}>
               {stats.uptimeA.toFixed(2)}%
             </td>
-            <td className={`py-4 text-right text-[0.9375rem] font-semibold tabular-nums border-b border-[#1f1f1f] ${getUptimeClass(stats.uptimeB)}`}>
+            <td className={`py-5 text-right text-[0.9375rem] font-semibold tabular-nums border-b border-[#1f1f1f] ${getUptimeClass(stats.uptimeB)}`}>
               {stats.uptimeB.toFixed(2)}%
             </td>
           </tr>
           <tr className="transition-colors duration-150 hover:bg-[#181818]">
-            <td className="py-4 text-[#a3a3a3] text-[0.9375rem] border-b border-[#1f1f1f]">Total Up Time</td>
-            <td className="py-4 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5] border-b border-[#1f1f1f]">
+            <td className="py-5 text-[#a3a3a3] text-[0.9375rem] border-b border-[#1f1f1f]">Total Up Time</td>
+            <td className="py-5 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5] border-b border-[#1f1f1f]">
               {formatDurationLong(stats.totalA)}
             </td>
-            <td className="py-4 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5] border-b border-[#1f1f1f]">
+            <td className="py-5 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5] border-b border-[#1f1f1f]">
               {formatDurationLong(stats.totalB)}
             </td>
           </tr>
           {!is28d && (
             <tr className="transition-colors duration-150 hover:bg-[#181818]">
-              <td className="py-4 text-[#a3a3a3] text-[0.9375rem] border-b border-[#1f1f1f]">Messages/sec</td>
-              <td className="py-4 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5] border-b border-[#1f1f1f]">
+              <td className="py-5 text-[#a3a3a3] text-[0.9375rem] border-b border-[#1f1f1f]">Messages/sec</td>
+              <td className="py-5 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5] border-b border-[#1f1f1f]">
                 {stats.rateA.toFixed(1)}/s
               </td>
-              <td className="py-4 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5] border-b border-[#1f1f1f]">
+              <td className="py-5 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5] border-b border-[#1f1f1f]">
                 {stats.rateB.toFixed(1)}/s
               </td>
             </tr>
           )}
           <tr className="transition-colors duration-150 hover:bg-[#181818]">
-            <td className="py-4 text-[#a3a3a3] text-[0.9375rem] border-b border-[#1f1f1f]">Disconnects</td>
-            <td className="py-4 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5] border-b border-[#1f1f1f]">
+            <td className="py-5 text-[#a3a3a3] text-[0.9375rem] border-b border-[#1f1f1f]">Disconnects</td>
+            <td className="py-5 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5] border-b border-[#1f1f1f]">
               {stats.disconnectsA}
             </td>
-            <td className="py-4 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5] border-b border-[#1f1f1f]">
+            <td className="py-5 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5] border-b border-[#1f1f1f]">
               {stats.disconnectsB}
             </td>
           </tr>
           {!is28d && (
             <tr className="transition-colors duration-150 hover:bg-[#181818]">
-              <td className="py-4 text-[#a3a3a3] text-[0.9375rem]">Total Messages</td>
-              <td className="py-4 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5]">
+              <td className="py-5 text-[#a3a3a3] text-[0.9375rem]">Total Messages</td>
+              <td className="py-5 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5]">
                 {stats.messagesA.toLocaleString()}
               </td>
-              <td className="py-4 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5]">
+              <td className="py-5 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5]">
                 {stats.messagesB.toLocaleString()}
               </td>
             </tr>
