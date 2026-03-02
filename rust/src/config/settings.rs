@@ -72,7 +72,7 @@ impl Default for Settings {
             db_dir: "data_store".to_string(),
             rotation_minutes: 1,
             // 1024MB * X gigs
-            max_db_size_mb: 1024 * 20,
+            max_db_size_mb: 1024 * 10,
             db_retention_days: 3,
             cleanup_check_interval_minutes: 5,
             http_port: 8080,
