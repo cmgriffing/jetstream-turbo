@@ -13,6 +13,8 @@ export interface StreamStats {
   uptime_b?: number
   uptime_a_all_time?: number
   uptime_b_all_time?: number
+  downtime_a?: number
+  downtime_b?: number
   connected_a?: boolean
   connected_b?: boolean
   stream_a_name?: string
@@ -103,6 +105,8 @@ export interface HourlyUptime {
   hour: string
   stream_a_seconds: number
   stream_b_seconds: number
+  stream_a_downtime_seconds: number
+  stream_b_downtime_seconds: number
   stream_a_disconnects: number
   stream_b_disconnects: number
   stream_a_messages: number

@@ -39,15 +39,15 @@ export function UptimeChart24h({ data, streamAName, streamBName }: UptimeChartPr
   const uptimeA = data.map((d, i) => {
     const currentHour = new Date(d.hour).getTime()
     const elapsedSeconds = (currentHour - firstHour) / 1000 + 3600
-    const cumulativeSeconds = data.slice(0, i + 1).reduce((sum, item) => sum + (item.stream_a_seconds || 0), 0)
-    return (cumulativeSeconds / elapsedSeconds) * 100
+    const cumulativeDowntime = data.slice(0, i + 1).reduce((sum, item) => sum + (item.stream_a_downtime_seconds || 0), 0)
+    return 100.0 - ((cumulativeDowntime / elapsedSeconds) * 100)
   })
   
   const uptimeB = data.map((d, i) => {
     const currentHour = new Date(d.hour).getTime()
     const elapsedSeconds = (currentHour - firstHour) / 1000 + 3600
-    const cumulativeSeconds = data.slice(0, i + 1).reduce((sum, item) => sum + (item.stream_b_seconds || 0), 0)
-    return (cumulativeSeconds / elapsedSeconds) * 100
+    const cumulativeDowntime = data.slice(0, i + 1).reduce((sum, item) => sum + (item.stream_b_downtime_seconds || 0), 0)
+    return 100.0 - ((cumulativeDowntime / elapsedSeconds) * 100)
   })
 
   const labels = data.map((d) => {
@@ -146,8 +146,8 @@ export function UptimeChart28d({ data, streamAName, streamBName }: UptimeChartPr
     if (!dailyUptime[day]) {
       dailyUptime[day] = { a: 0, b: 0, count: 0 }
     }
-    dailyUptime[day].a += d.stream_a_seconds
-    dailyUptime[day].b += d.stream_b_seconds
+    dailyUptime[day].a += d.stream_a_downtime_seconds || 0
+    dailyUptime[day].b += d.stream_b_downtime_seconds || 0
     dailyUptime[day].count++
   })
   
@@ -157,15 +157,15 @@ export function UptimeChart28d({ data, streamAName, streamBName }: UptimeChartPr
   const uptimeA = days.map((d, i) => {
     const currentDayTimestamp = new Date(d).getTime()
     const elapsedSeconds = (currentDayTimestamp - firstDayTimestamp) / 1000 + (i + 1) * 86400
-    const cumulativeSeconds = days.slice(0, i + 1).reduce((sum, day) => sum + dailyUptime[day].a, 0)
-    return (cumulativeSeconds / elapsedSeconds) * 100
+    const cumulativeDowntime = days.slice(0, i + 1).reduce((sum, day) => sum + dailyUptime[day].a, 0)
+    return 100.0 - ((cumulativeDowntime / elapsedSeconds) * 100)
   })
   
   const uptimeB = days.map((d, i) => {
     const currentDayTimestamp = new Date(d).getTime()
     const elapsedSeconds = (currentDayTimestamp - firstDayTimestamp) / 1000 + (i + 1) * 86400
-    const cumulativeSeconds = days.slice(0, i + 1).reduce((sum, day) => sum + dailyUptime[day].b, 0)
-    return (cumulativeSeconds / elapsedSeconds) * 100
+    const cumulativeDowntime = days.slice(0, i + 1).reduce((sum, day) => sum + dailyUptime[day].b, 0)
+    return 100.0 - ((cumulativeDowntime / elapsedSeconds) * 100)
   })
 
   const chartData = {

@@ -19,6 +19,8 @@ pub struct StreamStats {
     pub uptime_b: f64,
     pub uptime_a_all_time: f64,
     pub uptime_b_all_time: f64,
+    pub downtime_a: f64,
+    pub downtime_b: f64,
     pub connected_a: bool,
     pub connected_b: bool,
     pub latency_a_ms: u64,
@@ -89,6 +91,7 @@ impl StatsAggregator {
                     streak_a,
                     streak_b,
                     (uptime_a_all_time, uptime_b_all_time),
+                    (downtime_a, downtime_b),
                 ) = {
                     let up = uptime.read().unwrap();
                     let (a, b) = up.get_current_uptime_percentage();
@@ -97,7 +100,8 @@ impl StatsAggregator {
                         b,
                         up.get_current_streak_a(),
                         up.get_current_streak_b(),
-                        up.get_all_time_uptime_percentage(),
+                        up.get_all_time_uptime_from_downtime(),
+                        up.get_all_time_downtime_seconds(),
                     )
                 };
 
@@ -114,6 +118,8 @@ impl StatsAggregator {
                     uptime_b,
                     uptime_a_all_time,
                     uptime_b_all_time,
+                    downtime_a: downtime_a as f64,
+                    downtime_b: downtime_b as f64,
                     connected_a,
                     connected_b,
                     latency_a_ms: latency_a,
@@ -166,8 +172,12 @@ pub struct UptimeTracker {
     session_start_b: Option<Instant>,
     connected_seconds_a: u64,
     connected_seconds_b: u64,
+    disconnected_seconds_a: u64,
+    disconnected_seconds_b: u64,
     disconnected_at_a: Option<Instant>,
     disconnected_at_b: Option<Instant>,
+    session_start_disconnected_a: Option<Instant>,
+    session_start_disconnected_b: Option<Instant>,
     server_start_time: Instant,
 }
 
@@ -190,8 +200,12 @@ impl Default for UptimeTracker {
             session_start_b: None,
             connected_seconds_a: 0,
             connected_seconds_b: 0,
+            disconnected_seconds_a: 0,
+            disconnected_seconds_b: 0,
             disconnected_at_a: None,
             disconnected_at_b: None,
+            session_start_disconnected_a: None,
+            session_start_disconnected_b: None,
             server_start_time: Instant::now(),
         }
     }
@@ -208,6 +222,12 @@ impl UptimeTracker {
         match status.stream_id {
             StreamId::A => {
                 if status.connected {
+                    if !self.connected_a {
+                        if let Some(session_start) = self.session_start_disconnected_a.take() {
+                            let elapsed = now.duration_since(session_start).as_secs();
+                            self.disconnected_seconds_a = self.disconnected_seconds_a.saturating_add(elapsed);
+                        }
+                    }
                     self.session_start_a = Some(now);
                     self.connected_a = true;
                     self.connected_at_a = Some(now);
@@ -223,11 +243,18 @@ impl UptimeTracker {
                     }
                     self.connected_a = false;
                     self.disconnected_at_a = Some(now);
+                    self.session_start_disconnected_a = Some(now);
                     self.disconnect_count_a += 1;
                 }
             }
             StreamId::B => {
                 if status.connected {
+                    if !self.connected_b {
+                        if let Some(session_start) = self.session_start_disconnected_b.take() {
+                            let elapsed = now.duration_since(session_start).as_secs();
+                            self.disconnected_seconds_b = self.disconnected_seconds_b.saturating_add(elapsed);
+                        }
+                    }
                     self.session_start_b = Some(now);
                     self.connected_b = true;
                     self.connected_at_b = Some(now);
@@ -243,6 +270,7 @@ impl UptimeTracker {
                     }
                     self.connected_b = false;
                     self.disconnected_at_b = Some(now);
+                    self.session_start_disconnected_b = Some(now);
                     self.disconnect_count_b += 1;
                 }
             }
@@ -321,6 +349,46 @@ impl UptimeTracker {
         (uptime_a.min(100.0), uptime_b.min(100.0))
     }
 
+    pub fn get_all_time_downtime_seconds(&self) -> (u64, u64) {
+        let now = Instant::now();
+        
+        let downtime_a = if self.connected_a {
+            self.disconnected_seconds_a
+        } else {
+            let current_disconnect = self.disconnected_at_a
+                .map(|d| now.duration_since(d).as_secs())
+                .unwrap_or(0);
+            self.disconnected_seconds_a.saturating_add(current_disconnect)
+        };
+        
+        let downtime_b = if self.connected_b {
+            self.disconnected_seconds_b
+        } else {
+            let current_disconnect = self.disconnected_at_b
+                .map(|d| now.duration_since(d).as_secs())
+                .unwrap_or(0);
+            self.disconnected_seconds_b.saturating_add(current_disconnect)
+        };
+        
+        (downtime_a, downtime_b)
+    }
+
+    pub fn get_all_time_uptime_from_downtime(&self) -> (f64, f64) {
+        let now = Instant::now();
+        let server_run_time = now.duration_since(self.server_start_time).as_secs();
+        
+        if server_run_time == 0 {
+            return (0.0, 0.0);
+        }
+        
+        let (downtime_a, downtime_b) = self.get_all_time_downtime_seconds();
+        
+        let uptime_a = 100.0 - ((downtime_a as f64 / server_run_time as f64) * 100.0);
+        let uptime_b = 100.0 - ((downtime_b as f64 / server_run_time as f64) * 100.0);
+        
+        (uptime_a.max(0.0).min(100.0), uptime_b.max(0.0).min(100.0))
+    }
+
     pub fn load_totals(&mut self, total_a: u64, total_b: u64) {
         self.total_messages_a = total_a;
         self.total_messages_b = total_b;
@@ -380,6 +448,7 @@ impl UptimeTracker {
         let current_b = current_b_secs as u64;
         let avg_latency_a = self.get_avg_latency_a();
         let avg_latency_b = self.get_avg_latency_b();
+        let (downtime_a, downtime_b) = self.get_all_time_downtime_seconds();
 
         let rate_a = if current_a > 0 {
             self.total_messages_a as f64 / current_a as f64
@@ -395,6 +464,8 @@ impl UptimeTracker {
         UptimeDetailedStats {
             uptime_a_seconds: current_a,
             uptime_b_seconds: current_b,
+            downtime_a_seconds: downtime_a,
+            downtime_b_seconds: downtime_b,
             uptime_a_percent: if period_seconds > 0 {
                 (current_a as f64 / period_seconds as f64) * 100.0
             } else {
@@ -425,6 +496,8 @@ impl UptimeTracker {
 pub struct UptimeDetailedStats {
     pub uptime_a_seconds: u64,
     pub uptime_b_seconds: u64,
+    pub downtime_a_seconds: u64,
+    pub downtime_b_seconds: u64,
     pub uptime_a_percent: f64,
     pub uptime_b_percent: f64,
     pub disconnect_count_a: u64,

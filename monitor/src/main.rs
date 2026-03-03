@@ -105,6 +105,8 @@ async fn main() -> Result<()> {
                         chrono::Utc::now(),
                         detailed.uptime_a_seconds,
                         detailed.uptime_b_seconds,
+                        detailed.downtime_a_seconds,
+                        detailed.downtime_b_seconds,
                         detailed.disconnect_count_a,
                         detailed.disconnect_count_b,
                         detailed.avg_latency_a_ms,

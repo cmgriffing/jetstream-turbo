@@ -38,6 +38,8 @@ function calculateStats(data: HourlyUptime[], spanSeconds: number) {
 
   let totalA = 0
   let totalB = 0
+  let downtimeA = 0
+  let downtimeB = 0
   let disconnectsA = 0
   let disconnectsB = 0
   let messagesA = 0
@@ -46,6 +48,8 @@ function calculateStats(data: HourlyUptime[], spanSeconds: number) {
   data.forEach((d) => {
     totalA += d.stream_a_seconds || 0
     totalB += d.stream_b_seconds || 0
+    downtimeA += d.stream_a_downtime_seconds || 0
+    downtimeB += d.stream_b_downtime_seconds || 0
     disconnectsA += d.stream_a_disconnects || 0
     disconnectsB += d.stream_b_disconnects || 0
     messagesA += d.stream_a_messages || 0
@@ -54,14 +58,20 @@ function calculateStats(data: HourlyUptime[], spanSeconds: number) {
 
   const actualSpanSeconds = spanSeconds > 0 ? spanSeconds : (data.length * 3600)
 
-  const uptimeA = (totalA / actualSpanSeconds) * 100
-  const uptimeB = (totalB / actualSpanSeconds) * 100
+  const uptimeA = actualSpanSeconds > 0 
+    ? 100.0 - ((downtimeA / actualSpanSeconds) * 100.0)
+    : 0.0
+  const uptimeB = actualSpanSeconds > 0 
+    ? 100.0 - ((downtimeB / actualSpanSeconds) * 100.0)
+    : 0.0
 
   return {
     uptimeA,
     uptimeB,
     totalA,
     totalB,
+    downtimeA,
+    downtimeB,
     disconnectsA,
     disconnectsB,
     messagesA,
