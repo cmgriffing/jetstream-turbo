@@ -39,6 +39,12 @@ pub struct LifetimeTotals {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct UptimeResponse {
+    pub data: Vec<HourlyUptime>,
+    pub span_seconds: i64,
+}
+
 pub struct Storage {
     pool: SqlitePool,
 }

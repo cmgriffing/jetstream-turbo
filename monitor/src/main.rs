@@ -2,7 +2,7 @@ use anyhow::Result;
 use jetstream_monitor::{
     config::Settings,
     stats::{StatsAggregator, StreamStatsInternal, UptimeDetailedStats, UptimeTracker},
-    storage::{HourlyStat, Storage},
+    storage::{HourlyStat, Storage, UptimeResponse},
     stream::{StreamClient, StreamId},
     websocket,
 };
@@ -180,7 +180,7 @@ async fn get_uptime(
         Arc<Storage>,
         Arc<std::sync::RwLock<UptimeTracker>>,
     )>,
-) -> axum::Json<Vec<jetstream_monitor::storage::HourlyUptime>> {
+) -> axum::Json<UptimeResponse> {
     let hours: i64 = params
         .get("hours")
         .and_then(|h| h.parse().ok())
@@ -189,8 +189,21 @@ async fn get_uptime(
     let since = chrono::Utc::now() - chrono::Duration::hours(hours);
 
     match storage.get_uptime_since(since).await {
-        Ok(uptime) => axum::Json(uptime),
-        Err(_) => axum::Json(vec![]),
+        Ok(data) => {
+            let span_seconds = if data.is_empty() {
+                hours * 3600
+            } else {
+                let first = chrono::DateTime::parse_from_rfc3339(&format!("{}:00+00:00", data.first().unwrap().hour))
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now() - chrono::Duration::hours(hours));
+                let last = chrono::DateTime::parse_from_rfc3339(&format!("{}:00+00:00", data.last().unwrap().hour))
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+                (last - first).num_seconds() + 3600
+            };
+            axum::Json(UptimeResponse { data, span_seconds })
+        }
+        Err(_) => axum::Json(UptimeResponse { data: vec![], span_seconds: hours * 3600 }),
     }
 }
 

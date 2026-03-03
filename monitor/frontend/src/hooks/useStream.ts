@@ -61,6 +61,7 @@ export function useWebSocket(url: string, onMessage: (stats: StreamStats) => voi
 
 export function useUptimeHistory(hours: number, refreshInterval: number = 60000) {
   const [data, setData] = useState<HourlyUptime[]>([])
+  const [spanSeconds, setSpanSeconds] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -69,7 +70,8 @@ export function useUptimeHistory(hours: number, refreshInterval: number = 60000)
       const res = await fetch(`/api/uptime?hours=${hours}`)
       if (!res.ok) throw new Error('Failed to fetch')
       const json = await res.json()
-      setData(json)
+      setData(json.data || [])
+      setSpanSeconds(json.span_seconds || hours * 3600)
       setError(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unknown error')
@@ -84,7 +86,7 @@ export function useUptimeHistory(hours: number, refreshInterval: number = 60000)
     return () => clearInterval(interval)
   }, [fetchData, refreshInterval])
 
-  return { data, loading, error, refetch: fetchData }
+  return { data, spanSeconds, loading, error, refetch: fetchData }
 }
 
 export interface HourlyUptime {

@@ -25,8 +25,8 @@ function App() {
   const [connected, setConnected] = useState(false);
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
 
-  const { data: uptimeData24h } = useUptimeHistory(24);
-  const { data: uptimeData28d } = useUptimeHistory(672);
+  const { data: uptimeData24h, spanSeconds: span24h } = useUptimeHistory(24);
+  const { data: uptimeData28d, spanSeconds: span28d } = useUptimeHistory(672);
 
   const handleMessage = useCallback(
     (stats: StreamStats) => {
@@ -120,6 +120,7 @@ function App() {
               title="24-Hour Summary"
               icon="📊"
               data={uptimeData24h}
+              spanSeconds={span24h}
               streamAName={streamAName}
               streamBName={streamBName}
             />
@@ -127,6 +128,7 @@ function App() {
               title="28-Day Summary"
               icon="📅"
               data={uptimeData28d}
+              spanSeconds={span28d}
               streamAName={streamAName}
               streamBName={streamBName}
             />

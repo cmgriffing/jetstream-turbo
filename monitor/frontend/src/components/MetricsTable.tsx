@@ -4,6 +4,7 @@ interface MetricsTableProps {
   title: string
   icon: string
   data: HourlyUptime[]
+  spanSeconds: number
   streamAName: string
   streamBName: string
 }
@@ -23,8 +24,8 @@ function getUptimeClass(percentage: number): string {
   return 'bad text-[#ef4444]'
 }
 
-function calculateStats(data: HourlyUptime[], _hours: number) {
-  if (data.length === 0) return null
+function calculateStats(data: HourlyUptime[], spanSeconds: number) {
+  if (data.length === 0 && spanSeconds === 0) return null
 
   let totalA = 0
   let totalB = 0
@@ -42,9 +43,7 @@ function calculateStats(data: HourlyUptime[], _hours: number) {
     messagesB += d.stream_b_messages || 0
   })
 
-  const firstHour = new Date(data[0].hour)
-  const lastHour = new Date(data[data.length - 1].hour)
-  const actualSpanSeconds = (lastHour.getTime() - firstHour.getTime()) / 1000 + 3600
+  const actualSpanSeconds = spanSeconds > 0 ? spanSeconds : (data.length * 3600)
 
   const uptimeA = (totalA / actualSpanSeconds) * 100
   const uptimeB = (totalB / actualSpanSeconds) * 100
@@ -63,8 +62,8 @@ function calculateStats(data: HourlyUptime[], _hours: number) {
   }
 }
 
-export function MetricsTable({ title, icon, data, streamAName, streamBName }: MetricsTableProps) {
-  const stats = calculateStats(data, data.length > 24 * 7 ? 28 * 24 : 24)
+export function MetricsTable({ title, icon, data, spanSeconds, streamAName, streamBName }: MetricsTableProps) {
+  const stats = calculateStats(data, spanSeconds)
   const is28d = data.length > 24
 
   if (!stats) {
