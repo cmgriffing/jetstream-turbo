@@ -9,6 +9,8 @@ export interface StreamStats {
   current_streak_b?: number
   uptime_a?: number
   uptime_b?: number
+  uptime_a_all_time?: number
+  uptime_b_all_time?: number
   connected_a?: boolean
   connected_b?: boolean
   stream_a_name?: string

@@ -31,6 +31,14 @@ pub struct HourlyUptimeSimple {
     pub stream_b_seconds: i64,
 }
 
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct LifetimeTotals {
+    pub id: i64,
+    pub stream_a_messages: i64,
+    pub stream_b_messages: i64,
+    pub updated_at: String,
+}
+
 pub struct Storage {
     pool: SqlitePool,
 }
@@ -63,6 +71,19 @@ impl Storage {
                 stream_b_disconnects INTEGER NOT NULL DEFAULT 0,
                 stream_a_latency_ms INTEGER NOT NULL DEFAULT 0,
                 stream_b_latency_ms INTEGER NOT NULL DEFAULT 0,
+                stream_a_messages INTEGER NOT NULL DEFAULT 0,
+                stream_b_messages INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS lifetime_totals (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
                 stream_a_messages INTEGER NOT NULL DEFAULT 0,
                 stream_b_messages INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -191,5 +212,41 @@ impl Storage {
         .await?;
 
         Ok(rows)
+    }
+
+    pub async fn save_lifetime_totals(
+        &self,
+        stream_a_messages: u64,
+        stream_b_messages: u64,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO lifetime_totals (id, stream_a_messages, stream_b_messages)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                stream_a_messages = excluded.stream_a_messages,
+                stream_b_messages = excluded.stream_b_messages,
+                updated_at = CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(stream_a_messages as i64)
+        .bind(stream_b_messages as i64)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn get_lifetime_totals(&self) -> Result<(u64, u64)> {
+        let result = sqlx::query_as::<_, LifetimeTotals>(
+            "SELECT * FROM lifetime_totals WHERE id = 1"
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match result {
+            Some(row) => Ok((row.stream_a_messages as u64, row.stream_b_messages as u64)),
+            None => Ok((0, 0)),
+        }
     }
 }

@@ -18,6 +18,8 @@ function App() {
   const [streakB, setStreakB] = useState<number | undefined>();
   const [uptimeA, setUptimeA] = useState<number | undefined>();
   const [uptimeB, setUptimeB] = useState<number | undefined>();
+  const [uptimeAAllTime, setUptimeAAllTime] = useState<number | undefined>();
+  const [uptimeBAllTime, setUptimeBAllTime] = useState<number | undefined>();
   const [connectedA, setConnectedA] = useState(false);
   const [connectedB, setConnectedB] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -38,6 +40,7 @@ function App() {
         setRateA(stats.rate_a || 0);
         setStreakA(stats.current_streak_a);
         setUptimeA(stats.uptime_a);
+        setUptimeAAllTime(stats.uptime_a_all_time);
         setConnectedA(stats.connected_a ?? false);
       }
 
@@ -46,6 +49,7 @@ function App() {
         setRateB(stats.rate_b || 0);
         setStreakB(stats.current_streak_b);
         setUptimeB(stats.uptime_b);
+        setUptimeBAllTime(stats.uptime_b_all_time);
         setConnectedB(stats.connected_b ?? false);
       }
 
@@ -82,6 +86,7 @@ function App() {
             rate={rateA}
             streak={streakA}
             uptime={uptimeA}
+            uptimeAllTime={uptimeAAllTime}
             connected={connectedA}
           />
 
@@ -94,6 +99,7 @@ function App() {
             rate={rateB}
             streak={streakB}
             uptime={uptimeB}
+            uptimeAllTime={uptimeBAllTime}
             connected={connectedB}
           />
         </div>

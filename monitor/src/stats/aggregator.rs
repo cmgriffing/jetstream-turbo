@@ -1,6 +1,7 @@
 use crate::stream::{ConnectionStatus, StreamId, StreamMessage};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::broadcast;
@@ -17,12 +18,70 @@ pub struct StreamStats {
     pub timestamp: DateTime<Utc>,
     pub uptime_a: f64,
     pub uptime_b: f64,
+    pub uptime_a_all_time: f64,
+    pub uptime_b_all_time: f64,
     pub connected_a: bool,
     pub connected_b: bool,
     pub latency_a_ms: u64,
     pub latency_b_ms: u64,
     pub current_streak_a: f64,
     pub current_streak_b: f64,
+}
+
+const RATE_WINDOW_SECS: u64 = 60;
+
+#[derive(Debug, Clone)]
+struct SlidingWindowRate {
+    timestamps: VecDeque<Instant>,
+    window_secs: u64,
+}
+
+impl SlidingWindowRate {
+    fn new(window_secs: u64) -> Self {
+        Self {
+            timestamps: VecDeque::new(),
+            window_secs,
+        }
+    }
+
+    fn add_message(&mut self) {
+        let now = Instant::now();
+        self.timestamps.push_back(now);
+        self.cleanup(now);
+    }
+
+    fn cleanup(&mut self, now: Instant) {
+        let cutoff = now - std::time::Duration::from_secs(self.window_secs);
+        while let Some(oldest) = self.timestamps.front() {
+            if *oldest < cutoff {
+                self.timestamps.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn get_rate(&mut self) -> f64 {
+        let now = Instant::now();
+        self.cleanup(now);
+        
+        if self.timestamps.is_empty() {
+            return 0.0;
+        }
+
+        let first = *self.timestamps.front().unwrap();
+        let elapsed = now.duration_since(first).as_secs_f64();
+        
+        if elapsed > 0.0 {
+            self.timestamps.len() as f64 / elapsed
+        } else {
+            0.0
+        }
+    }
+
+    fn reset(&mut self) {
+        self.timestamps.clear();
+    }
 }
 
 pub struct StatsAggregator {
@@ -62,12 +121,9 @@ impl StatsAggregator {
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
-            let mut last_a: u64 = 0;
-            let mut last_b: u64 = 0;
             let mut last_time = std::time::Instant::now();
-            let mut rate_ema_a: f64 = 0.0;
-            let mut rate_ema_b: f64 = 0.0;
-            const ALPHA: f64 = 0.3;
+            let mut rate_window_a = SlidingWindowRate::new(RATE_WINDOW_SECS);
+            let mut rate_window_b = SlidingWindowRate::new(RATE_WINDOW_SECS);
 
             loop {
                 interval.tick().await;
@@ -76,48 +132,65 @@ impl StatsAggregator {
                 let now = std::time::Instant::now();
                 let elapsed = now.duration_since(last_time).as_secs_f64();
 
-                if elapsed > 0.0 {
-                    let instant_rate_a = (internal.count_a.saturating_sub(last_a)) as f64 / elapsed;
-                    let instant_rate_b = (internal.count_b.saturating_sub(last_b)) as f64 / elapsed;
+                let (rate_a, rate_b, connected_a, connected_b) = {
+                    let up = uptime.read().unwrap();
+                    
+                    if up.connected_a {
+                        rate_window_a.add_message();
+                    } else {
+                        rate_window_a.reset();
+                    }
+                    
+                    if up.connected_b {
+                        rate_window_b.add_message();
+                    } else {
+                        rate_window_b.reset();
+                    }
 
-                    rate_ema_a = ALPHA * instant_rate_a + (1.0 - ALPHA) * rate_ema_a;
-                    rate_ema_b = ALPHA * instant_rate_b + (1.0 - ALPHA) * rate_ema_b;
+                    (
+                        rate_window_a.get_rate(),
+                        rate_window_b.get_rate(),
+                        up.connected_a,
+                        up.connected_b,
+                    )
+                };
 
-                    let (
-                        uptime_a,
-                        uptime_b,
-                        connected_a,
-                        connected_b,
-                        latency_a,
-                        latency_b,
-                        streak_a,
-                        streak_b,
-                    ) = {
-                        let up = uptime.read().unwrap();
-                        let (a, b) = up.get_current_uptime_percentage();
-                        (
-                            a,
-                            b,
-                            up.connected_a,
-                            up.connected_b,
-                            up.get_avg_latency_a(),
-                            up.get_avg_latency_b(),
-                            up.get_current_streak_a(),
-                            up.get_current_streak_b(),
-                        )
-                    };
+                let (
+                    uptime_a,
+                    uptime_b,
+                    latency_a,
+                    latency_b,
+                    streak_a,
+                    streak_b,
+                    (uptime_a_all_time, uptime_b_all_time),
+                ) = {
+                    let up = uptime.read().unwrap();
+                    let (a, b) = up.get_current_uptime_percentage();
+                    (
+                        a,
+                        b,
+                        up.get_avg_latency_a(),
+                        up.get_avg_latency_b(),
+                        up.get_current_streak_a(),
+                        up.get_current_streak_b(),
+                        up.get_all_time_uptime_percentage(),
+                    )
+                };
 
+                if elapsed > 0.0 || true {
                     let stats_snapshot = StreamStats {
-                        stream_a: internal.count_a,
-                        stream_b: internal.count_b,
-                        delta: internal.count_a as i64 - internal.count_b as i64,
-                        rate_a: rate_ema_a,
-                        rate_b: rate_ema_b,
+                        stream_a: internal.total_a,
+                        stream_b: internal.total_b,
+                        delta: internal.total_a as i64 - internal.total_b as i64,
+                        rate_a,
+                        rate_b,
                         stream_a_name: stream_a_name.clone(),
                         stream_b_name: stream_b_name.clone(),
                         timestamp: Utc::now(),
                         uptime_a,
                         uptime_b,
+                        uptime_a_all_time,
+                        uptime_b_all_time,
                         connected_a,
                         connected_b,
                         latency_a_ms: latency_a,
@@ -126,8 +199,6 @@ impl StatsAggregator {
                         current_streak_b: streak_b,
                     };
 
-                    last_a = internal.count_a;
-                    last_b = internal.count_b;
                     last_time = now;
 
                     let _ = tx.send(stats_snapshot);
@@ -139,16 +210,21 @@ impl StatsAggregator {
 
 #[derive(Debug, Default)]
 pub struct StreamStatsInternal {
-    pub count_a: u64,
-    pub count_b: u64,
+    pub total_a: u64,
+    pub total_b: u64,
 }
 
 impl StreamStatsInternal {
     pub fn update(&mut self, msg: StreamMessage) {
         match msg.stream_id {
-            StreamId::A => self.count_a = msg.count,
-            StreamId::B => self.count_b = msg.count,
+            StreamId::A => self.total_a = msg.count,
+            StreamId::B => self.total_b = msg.count,
         }
+    }
+
+    pub fn load_totals(&mut self, total_a: u64, total_b: u64) {
+        self.total_a = total_a;
+        self.total_b = total_b;
     }
 }
 
@@ -172,6 +248,7 @@ pub struct UptimeTracker {
     connected_seconds_b: u64,
     disconnected_at_a: Option<Instant>,
     disconnected_at_b: Option<Instant>,
+    server_start_time: Instant,
 }
 
 impl Default for UptimeTracker {
@@ -195,6 +272,7 @@ impl Default for UptimeTracker {
             connected_seconds_b: 0,
             disconnected_at_a: None,
             disconnected_at_b: None,
+            server_start_time: Instant::now(),
         }
     }
 }
@@ -294,6 +372,38 @@ impl UptimeTracker {
         };
 
         (uptime_a, uptime_b)
+    }
+
+    pub fn get_all_time_uptime_percentage(&self) -> (f64, f64) {
+        let now = Instant::now();
+        let server_run_time = now.duration_since(self.server_start_time).as_secs();
+        
+        if server_run_time == 0 {
+            return (0.0, 0.0);
+        }
+
+        let uptime_a = if self.connected_a {
+            let current_session = now.duration_since(self.connected_at_a.unwrap_or(self.server_start_time)).as_secs();
+            let total = self.connected_seconds_a + current_session;
+            (total as f64 / server_run_time as f64) * 100.0
+        } else {
+            (self.connected_seconds_a as f64 / server_run_time as f64) * 100.0
+        };
+
+        let uptime_b = if self.connected_b {
+            let current_session = now.duration_since(self.connected_at_b.unwrap_or(self.server_start_time)).as_secs();
+            let total = self.connected_seconds_b + current_session;
+            (total as f64 / server_run_time as f64) * 100.0
+        } else {
+            (self.connected_seconds_b as f64 / server_run_time as f64) * 100.0
+        };
+
+        (uptime_a.min(100.0), uptime_b.min(100.0))
+    }
+
+    pub fn load_totals(&mut self, total_a: u64, total_b: u64) {
+        self.total_messages_a = total_a;
+        self.total_messages_b = total_b;
     }
 
     pub fn get_avg_latency_a(&self) -> u64 {

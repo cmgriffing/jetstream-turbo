@@ -23,8 +23,14 @@ async fn main() -> Result<()> {
     let storage = Storage::new(&settings.database_url).await?;
     tracing::info!("Initialized database");
 
+    let (lifetime_a, lifetime_b) = storage.get_lifetime_totals().await.unwrap_or((0, 0));
+    tracing::info!("Loaded lifetime totals: stream_a={}, stream_b={}", lifetime_a, lifetime_b);
+
     let stats_internal = Arc::new(std::sync::RwLock::new(StreamStatsInternal::default()));
+    stats_internal.write().unwrap().load_totals(lifetime_a, lifetime_b);
+    
     let uptime_tracker = Arc::new(std::sync::RwLock::new(UptimeTracker::default()));
+    uptime_tracker.write().unwrap().load_totals(lifetime_a, lifetime_b);
     let aggregator = StatsAggregator::new(
         settings.stream_a_name.clone(),
         settings.stream_b_name.clone(),
@@ -80,7 +86,7 @@ async fn main() -> Result<()> {
             if current_hour != last_hour {
                 let (count_a, count_b) = {
                     let internal = stats_for_storage.read().unwrap();
-                    (internal.count_a, internal.count_b)
+                    (internal.total_a, internal.total_b)
                 };
                 if let Err(e) = storage_arc
                     .save_hourly(chrono::Utc::now(), count_a, count_b)
@@ -109,6 +115,16 @@ async fn main() -> Result<()> {
                     .await
                 {
                     tracing::error!("Failed to save hourly uptime: {}", e);
+                }
+
+                if let Err(e) = storage_arc
+                    .save_lifetime_totals(
+                        detailed.total_messages_a,
+                        detailed.total_messages_b,
+                    )
+                    .await
+                {
+                    tracing::error!("Failed to save lifetime totals: {}", e);
                 }
 
                 last_hour = current_hour;

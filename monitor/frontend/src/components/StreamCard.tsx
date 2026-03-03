@@ -5,6 +5,7 @@ interface StreamCardProps {
   rate: number
   streak?: number
   uptime?: number
+  uptimeAllTime?: number
   connected: boolean
 }
 
@@ -17,7 +18,7 @@ function formatDuration(ms: number): string {
   return `${secs}s`
 }
 
-export function StreamCard({ streamId, name, count, rate, streak, uptime, connected }: StreamCardProps) {
+export function StreamCard({ streamId, name, count, rate, streak, uptime, uptimeAllTime, connected }: StreamCardProps) {
   const streamClass = streamId === 'a' ? 'stream-a' : 'stream-b'
   const accentColor = streamId === 'a' ? '#22c55e' : '#3b82f6'
   const glowColor = streamId === 'a' ? 'rgba(34, 197, 94, 0.15)' : 'rgba(59, 130, 246, 0.15)'
@@ -81,7 +82,25 @@ export function StreamCard({ streamId, name, count, rate, streak, uptime, connec
           </span>
         </div>
         <div className="border-l border-[#1f1f1f] pl-4">
-          <span className="text-[0.6875rem] text-[#525252] uppercase tracking-wider block mb-2">Session Uptime</span>
+          <span className="text-[0.6875rem] text-[#525252] uppercase tracking-wider block mb-2">Uptime (All Time)</span>
+          <span className="text-[1.125rem] font-semibold tabular-nums text-[#e5e5e5]">
+            {uptimeAllTime !== undefined ? `${uptimeAllTime.toFixed(1)}%` : '-'}
+          </span>
+        </div>
+      </div>
+      <div className="grid grid-cols-3 gap-4 pt-4 border-t border-[#1f1f1f]">
+        <div className="text-left pl-2">
+          <span className="text-[0.6875rem] text-[#525252] uppercase tracking-wider block mb-2">Rate (1m avg)</span>
+          <span className="text-[1.125rem] font-semibold tabular-nums text-[#e5e5e5]">{rate.toFixed(0)}/s</span>
+        </div>
+        <div className="border-l border-[#1f1f1f] pl-4">
+          <span className="text-[0.6875rem] text-[#525252] uppercase tracking-wider block mb-2">Streak</span>
+          <span className="text-[1.125rem] font-semibold tabular-nums text-[#e5e5e5]">
+            {streak ? formatDuration(streak * 1000) : '-'}
+          </span>
+        </div>
+        <div className="border-l border-[#1f1f1f] pl-4">
+          <span className="text-[0.6875rem] text-[#525252] uppercase tracking-wider block mb-2">Uptime (Rolling)</span>
           <span className="text-[1.125rem] font-semibold tabular-nums text-[#e5e5e5]">
             {uptime ? `${uptime.toFixed(1)}%` : '-'}
           </span>
