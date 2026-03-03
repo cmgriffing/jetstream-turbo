@@ -72,7 +72,17 @@ export function StreamCard({ streamId, name, count, rate, streak, uptime, uptime
       
       <div className="grid grid-cols-3 gap-4 pt-6 border-t border-[#1f1f1f]">
         <div className="text-left pl-2">
-          <span className="text-[0.6875rem] text-[#525252] uppercase tracking-wider block mb-2">Rate</span>
+          <span className="text-[0.6875rem] text-[#525252] uppercase tracking-wider block mb-2 flex items-center gap-1">
+            Rate
+            <div className="group relative inline-block">
+              <svg className="w-3.5 h-3.5 text-[#525252] hover:text-[#888]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" />
+              </svg>
+              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 p-2 bg-[#1f1f1f] text-[#a3a3a3] text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
+                Average messages/second while connected since server started
+              </div>
+            </div>
+          </span>
           <span className="text-[1.125rem] font-semibold tabular-nums text-[#e5e5e5]">{rate.toFixed(0)}/s</span>
         </div>
         <div className="border-l border-[#1f1f1f] pl-4">
@@ -88,12 +98,8 @@ export function StreamCard({ streamId, name, count, rate, streak, uptime, uptime
           </span>
         </div>
       </div>
-      <div className="grid grid-cols-3 gap-4 pt-4 border-t border-[#1f1f1f]">
+      <div className="grid grid-cols-2 gap-4 pt-4 border-t border-[#1f1f1f]">
         <div className="text-left pl-2">
-          <span className="text-[0.6875rem] text-[#525252] uppercase tracking-wider block mb-2">Rate (1m avg)</span>
-          <span className="text-[1.125rem] font-semibold tabular-nums text-[#e5e5e5]">{rate.toFixed(0)}/s</span>
-        </div>
-        <div className="border-l border-[#1f1f1f] pl-4">
           <span className="text-[0.6875rem] text-[#525252] uppercase tracking-wider block mb-2">Streak</span>
           <span className="text-[1.125rem] font-semibold tabular-nums text-[#e5e5e5]">
             {streak ? formatDuration(streak * 1000) : '-'}
