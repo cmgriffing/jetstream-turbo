@@ -1,4 +1,13 @@
 import { HourlyUptime } from '../hooks/useStream'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 
 interface MetricsTableProps {
   title: string
@@ -19,9 +28,9 @@ function formatDurationLong(seconds: number): string {
 }
 
 function getUptimeClass(percentage: number): string {
-  if (percentage >= 99) return 'good text-[#22c55e]'
-  if (percentage >= 95) return 'warning text-[#eab308]'
-  return 'bad text-[#ef4444]'
+  if (percentage >= 99) return 'text-green-600 dark:text-green-500'
+  if (percentage >= 95) return 'text-yellow-600 dark:text-yellow-500'
+  return 'text-red-600 dark:text-red-500'
 }
 
 function calculateStats(data: HourlyUptime[], spanSeconds: number) {
@@ -68,86 +77,88 @@ export function MetricsTable({ title, icon, data, spanSeconds, streamAName, stre
 
   if (!stats) {
     return (
-      <div className="metric-card bg-[#141414] border border-[#1f1f1f] rounded-3xl p-8 transition-all duration-300 hover:border-[#2a2a2a]">
-        <h3 className="text-[0.875rem] font-semibold mb-8 flex items-center gap-2">
-          <span className="text-[1rem]">{icon}</span> {title}
-        </h3>
-        <p className="text-[#525252] text-sm">No data available</p>
-      </div>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm font-semibold flex items-center gap-2">
+            {icon} {title}
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-muted-foreground text-sm">No data available</p>
+        </CardContent>
+      </Card>
     )
   }
 
   return (
-    <div className="metric-card bg-[#141414] border border-[#1f1f1f] rounded-3xl p-8 transition-all duration-300 hover:border-[#2a2a2a] hover:shadow-[0_4px_24px_rgba(0,0,0,0.3)]">
-      <h3 className="text-[0.875rem] font-semibold mb-8 flex items-center gap-2">
-        <span className="text-[1rem]">{icon}</span> {title}
-      </h3>
-      <table className="w-full border-collapse">
-        <thead>
-          <tr>
-            <th className="text-left text-[0.6875rem] text-[#525252] uppercase tracking-wider py-4 border-b border-[#1f1f1f] font-medium w-2/5">
-              Metric
-            </th>
-            <th className="text-right text-[0.6875rem] text-[#525252] uppercase tracking-wider py-4 border-b border-[#1f1f1f] font-medium w-3/10">
-              {streamAName}
-            </th>
-            <th className="text-right text-[0.6875rem] text-[#525252] uppercase tracking-wider py-4 border-b border-[#1f1f1f] font-medium w-3/10">
-              {streamBName}
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr className="transition-colors duration-150 hover:bg-[#181818]">
-            <td className="py-5 text-[#a3a3a3] text-[0.9375rem] border-b border-[#1f1f1f]">Uptime</td>
-            <td className={`py-5 text-right text-[0.9375rem] font-semibold tabular-nums border-b border-[#1f1f1f] ${getUptimeClass(stats.uptimeA)}`}>
-              {stats.uptimeA.toFixed(2)}%
-            </td>
-            <td className={`py-5 text-right text-[0.9375rem] font-semibold tabular-nums border-b border-[#1f1f1f] ${getUptimeClass(stats.uptimeB)}`}>
-              {stats.uptimeB.toFixed(2)}%
-            </td>
-          </tr>
-          <tr className="transition-colors duration-150 hover:bg-[#181818]">
-            <td className="py-5 text-[#a3a3a3] text-[0.9375rem] border-b border-[#1f1f1f]">Total Up Time</td>
-            <td className="py-5 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5] border-b border-[#1f1f1f]">
-              {formatDurationLong(stats.totalA)}
-            </td>
-            <td className="py-5 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5] border-b border-[#1f1f1f]">
-              {formatDurationLong(stats.totalB)}
-            </td>
-          </tr>
-          {!is28d && (
-            <tr className="transition-colors duration-150 hover:bg-[#181818]">
-              <td className="py-5 text-[#a3a3a3] text-[0.9375rem] border-b border-[#1f1f1f]">Messages/sec</td>
-              <td className="py-5 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5] border-b border-[#1f1f1f]">
-                {stats.rateA.toFixed(1)}/s
-              </td>
-              <td className="py-5 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5] border-b border-[#1f1f1f]">
-                {stats.rateB.toFixed(1)}/s
-              </td>
-            </tr>
-          )}
-          <tr className="transition-colors duration-150 hover:bg-[#181818]">
-            <td className="py-5 text-[#a3a3a3] text-[0.9375rem] border-b border-[#1f1f1f]">Disconnects</td>
-            <td className="py-5 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5] border-b border-[#1f1f1f]">
-              {stats.disconnectsA}
-            </td>
-            <td className="py-5 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5] border-b border-[#1f1f1f]">
-              {stats.disconnectsB}
-            </td>
-          </tr>
-          {!is28d && (
-            <tr className="transition-colors duration-150 hover:bg-[#181818]">
-              <td className="py-5 text-[#a3a3a3] text-[0.9375rem]">Total Messages</td>
-              <td className="py-5 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5]">
-                {stats.messagesA.toLocaleString()}
-              </td>
-              <td className="py-5 text-right text-[0.9375rem] font-semibold tabular-nums text-[#e5e5e5]">
-                {stats.messagesB.toLocaleString()}
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
-    </div>
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm font-semibold flex items-center gap-2">
+          {icon} {title}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-2/5">Metric</TableHead>
+              <TableHead className="text-right w-3/10">{streamAName}</TableHead>
+              <TableHead className="text-right w-3/10">{streamBName}</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            <TableRow>
+              <TableCell className="text-muted-foreground">Uptime</TableCell>
+              <TableCell className={`text-right font-semibold tabular-nums ${getUptimeClass(stats.uptimeA)}`}>
+                {stats.uptimeA.toFixed(2)}%
+              </TableCell>
+              <TableCell className={`text-right font-semibold tabular-nums ${getUptimeClass(stats.uptimeB)}`}>
+                {stats.uptimeB.toFixed(2)}%
+              </TableCell>
+            </TableRow>
+            <TableRow>
+              <TableCell className="text-muted-foreground">Total Up Time</TableCell>
+              <TableCell className="text-right font-semibold tabular-nums">
+                {formatDurationLong(stats.totalA)}
+              </TableCell>
+              <TableCell className="text-right font-semibold tabular-nums">
+                {formatDurationLong(stats.totalB)}
+              </TableCell>
+            </TableRow>
+            {!is28d && (
+              <TableRow>
+                <TableCell className="text-muted-foreground">Messages/sec</TableCell>
+                <TableCell className="text-right font-semibold tabular-nums">
+                  {stats.rateA.toFixed(1)}/s
+                </TableCell>
+                <TableCell className="text-right font-semibold tabular-nums">
+                  {stats.rateB.toFixed(1)}/s
+                </TableCell>
+              </TableRow>
+            )}
+            <TableRow>
+              <TableCell className="text-muted-foreground">Disconnects</TableCell>
+              <TableCell className="text-right font-semibold tabular-nums">
+                {stats.disconnectsA}
+              </TableCell>
+              <TableCell className="text-right font-semibold tabular-nums">
+                {stats.disconnectsB}
+              </TableCell>
+            </TableRow>
+            {!is28d && (
+              <TableRow>
+                <TableCell className="text-muted-foreground">Total Messages</TableCell>
+                <TableCell className="text-right font-semibold tabular-nums">
+                  {stats.messagesA.toLocaleString()}
+                </TableCell>
+                <TableCell className="text-right font-semibold tabular-nums">
+                  {stats.messagesB.toLocaleString()}
+                </TableCell>
+              </TableRow>
+            )}
+          </TableBody>
+        </Table>
+      </CardContent>
+    </Card>
   )
 }

@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 
+export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected'
+
 export interface StreamStats {
   stream_a?: number
   stream_b?: number
@@ -17,24 +19,32 @@ export interface StreamStats {
   stream_b_name?: string
 }
 
-export function useWebSocket(url: string, onMessage: (stats: StreamStats) => void) {
+export function useWebSocket(
+  url: string, 
+  onMessage: (stats: StreamStats) => void,
+  onConnectionChange?: (status: ConnectionStatus) => void
+) {
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimeoutRef = useRef<number>()
 
   const connect = useCallback(() => {
+    onConnectionChange?.('connecting')
     const ws = new WebSocket(url)
 
     ws.onopen = () => {
       console.log('WebSocket connected')
+      onConnectionChange?.('connected')
     }
 
     ws.onclose = () => {
       console.log('WebSocket disconnected, reconnecting...')
+      onConnectionChange?.('disconnected')
       reconnectTimeoutRef.current = window.setTimeout(connect, 3000)
     }
 
     ws.onerror = (error) => {
       console.error('WebSocket error:', error)
+      onConnectionChange?.('disconnected')
     }
 
     ws.onmessage = (event) => {
@@ -43,7 +53,7 @@ export function useWebSocket(url: string, onMessage: (stats: StreamStats) => voi
     }
 
     wsRef.current = ws
-  }, [url, onMessage])
+  }, [url, onMessage, onConnectionChange])
 
   useEffect(() => {
     connect()

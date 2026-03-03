@@ -1,4 +1,7 @@
 import { useState, useEffect } from 'react'
+import { Wifi, WifiOff } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { cn } from '@/lib/utils'
 
 interface StatusIndicatorProps {
   connected: boolean
@@ -33,21 +36,24 @@ export function StatusIndicator({ connected, connectedAt }: StatusIndicatorProps
   }, [connected, connectedAt])
 
   return (
-    <div 
-      className={`status fixed bottom-6 right-6 px-4 py-2.5 rounded-full text-[0.75rem] bg-[#141414] border border-[#1f1f1f] flex items-center gap-2.5 uppercase tracking-wider shadow-lg transition-all duration-300 hover:border-[#2a2a2a] ${
-        connected ? 'text-[#22c55e]' : 'text-[#ef4444]'
-      }`}
-    >
-      <span 
-        className={`w-2 h-2 rounded-full ${
-          connected 
-            ? 'bg-[#22c55e] shadow-[0_0_8px_#22c55e] animate-pulse' 
-            : 'bg-[#ef4444]'
-        }`}
-      />
-      <span>{connected ? 'Connected' : 'Disconnected'}</span>
-      {connected && duration && <span className="text-[#525252]">•</span>}
-      {connected && duration && <span className="text-[#525252] normal-case tracking-normal">{duration}</span>}
+    <div className="fixed bottom-6 right-6 flex items-center gap-2">
+      <Badge 
+        variant={connected ? "default" : "destructive"}
+        className={cn(
+          "flex items-center gap-1.5 uppercase tracking-wider",
+          connected && "bg-green-600 hover:bg-green-600 dark:bg-green-500 dark:hover:bg-green-500"
+        )}
+      >
+        {connected ? (
+          <Wifi className="w-3 h-3" />
+        ) : (
+          <WifiOff className="w-3 h-3" />
+        )}
+        {connected ? 'Connected' : 'Disconnected'}
+      </Badge>
+      {connected && duration && (
+        <span className="text-muted-foreground text-sm">{duration}</span>
+      )}
     </div>
   )
 }
