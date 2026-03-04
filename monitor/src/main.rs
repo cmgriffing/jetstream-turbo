@@ -7,7 +7,6 @@ use jetstream_monitor::{
     websocket,
 };
 use std::sync::Arc;
-use tower_http::services::ServeDir;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -134,8 +133,61 @@ async fn main() -> Result<()> {
         }
     });
 
+    async fn serve_spa(
+        req: axum::http::Request<axum::body::Body>,
+    ) -> std::result::Result<axum::http::Response<axum::body::Body>, axum::response::ErrorResponse> {
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+            .or_else(|_| {
+                std::env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+            })
+            .unwrap_or_default();
+
+        let static_base = std::path::Path::new(&manifest_dir).join("frontend/dist");
+        let path = req.uri().path().to_string();
+        
+        if path != "/" {
+            let file_path = static_base.join(&path[1..]);
+            if let Ok(content) = tokio::fs::read(&file_path).await {
+                let mime_type = match std::path::Path::new(&file_path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                {
+                    Some("js") => "application/javascript",
+                    Some("css") => "text/css",
+                    Some("html") | Some("htm") => "text/html",
+                    Some("woff2") => "font/woff2",
+                    Some("json") => "application/json",
+                    _ => "application/octet-stream",
+                };
+                let mut response = axum::http::Response::new(axum::body::Body::from(content));
+                response.headers_mut().insert(
+                    axum::http::header::CONTENT_TYPE,
+                    mime_type.parse().unwrap(),
+                );
+                return Ok(response);
+            }
+        }
+        
+        let index_path = static_base.join("index.html");
+        if let Ok(content) = tokio::fs::read(&index_path).await {
+            let mut response = axum::http::Response::new(axum::body::Body::from(content));
+            response.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                "text/html".parse().unwrap(),
+            );
+            return Ok(response);
+        }
+        
+        let mut response = axum::http::Response::new(axum::body::Body::from("<html><body>404</body></html>"));
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_TYPE,
+            "text/html".parse().unwrap(),
+        );
+        Ok(response)
+    }
+
     let app = axum::Router::new()
-        .nest_service("/", ServeDir::new("frontend/dist"))
         .route("/ws", axum::routing::get(websocket::ws_handler))
         .route("/api/history", axum::routing::get(get_history))
         .route("/api/uptime", axum::routing::get(get_uptime))
@@ -144,7 +196,8 @@ async fn main() -> Result<()> {
             axum::routing::get(get_uptime_detailed),
         )
         .with_state((broadcast_tx, storage_for_api, uptime_for_api))
-        .layer(tower_http::trace::TraceLayer::new_for_http());
+        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .fallback(serve_spa);
 
     let listener = tokio::net::TcpListener::bind(&settings.bind_address).await?;
     tracing::info!("Listening on {}", settings.bind_address);
