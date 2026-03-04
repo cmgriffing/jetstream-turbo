@@ -32,6 +32,8 @@ pub struct Settings {
     pub cleanup_check_interval_minutes: u64,
     pub vacuum_min_bytes_freed: u64,
     pub vacuum_min_percent_freed: f64,
+    pub cleanup_backoff_max_minutes: u64,
+    pub cleanup_backoff_reset_count: u32,
 
     // HTTP Server Configuration
     pub http_port: u16,
@@ -79,6 +81,8 @@ impl Default for Settings {
             cleanup_check_interval_minutes: 5,
             vacuum_min_bytes_freed: 100 * 1024 * 1024,
             vacuum_min_percent_freed: 10.0,
+            cleanup_backoff_max_minutes: 60,
+            cleanup_backoff_reset_count: 3,
             http_port: 8080,
             batch_size: 10,
             profile_batch_size: 25,
@@ -148,6 +152,14 @@ impl Settings {
 
         if let Ok(vacuum_min_percent) = std::env::var("VACUUM_MIN_PERCENT_FREED") {
             builder = builder.set_override("vacuum_min_percent_freed", vacuum_min_percent)?;
+        }
+
+        if let Ok(backoff_max) = std::env::var("CLEANUP_BACKOFF_MAX_MINUTES") {
+            builder = builder.set_override("cleanup_backoff_max_minutes", backoff_max)?;
+        }
+
+        if let Ok(reset_count) = std::env::var("CLEANUP_BACKOFF_RESET_COUNT") {
+            builder = builder.set_override("cleanup_backoff_reset_count", reset_count)?;
         }
 
         let settings = builder.build()?;

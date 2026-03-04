@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Semaphore};
-use tokio::time::interval;
+use tokio::time::{interval, sleep};
 use tracing::{error, info, trace};
 
 const BATCH_SIZE: usize = 25;
@@ -381,30 +381,51 @@ impl TurboCharger {
 
     pub fn start_db_cleanup_task(self: &Arc<Self>) {
         let this = self.clone();
-        let interval_minutes = this.settings.cleanup_check_interval_minutes;
+        let base_interval_minutes = this.settings.cleanup_check_interval_minutes;
+        let max_interval_minutes = this.settings.cleanup_backoff_max_minutes;
+        let reset_skip_count = this.settings.cleanup_backoff_reset_count;
 
         tokio::spawn(async move {
-            let mut cleanup_interval = interval(Duration::from_secs(interval_minutes * 60));
-            cleanup_interval.tick().await;
+            let mut current_interval_minutes = base_interval_minutes;
+            let mut consecutive_skip_count = 0u32;
 
             loop {
-                cleanup_interval.tick().await;
+                sleep(Duration::from_secs(current_interval_minutes * 60)).await;
 
                 match this.check_and_cleanup_db().await {
                     Ok(Some(result)) => {
-                        info!("Scheduled cleanup: {} records deleted, {}MB remaining",
+                        info!(
+                            "Scheduled cleanup: {} records deleted, {}MB remaining, next check in {}min",
                             result.records_deleted,
-                            result.new_size_bytes / (1024 * 1024)
+                            result.new_size_bytes / (1024 * 1024),
+                            current_interval_minutes
                         );
+                        current_interval_minutes = (current_interval_minutes * 2).min(max_interval_minutes);
+                        consecutive_skip_count = 0;
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        consecutive_skip_count += 1;
+                        if consecutive_skip_count >= reset_skip_count {
+                            info!(
+                                "Resetting cleanup backoff: {} consecutive skips under threshold",
+                                consecutive_skip_count
+                            );
+                            current_interval_minutes = base_interval_minutes;
+                            consecutive_skip_count = 0;
+                        }
+                    }
                     Err(e) => {
                         error!("Database cleanup failed: {}", e);
+                        current_interval_minutes = (current_interval_minutes * 2).min(max_interval_minutes);
+                        consecutive_skip_count = 0;
                     }
                 }
             }
         });
-        info!("Started database cleanup task (every {} minutes)", interval_minutes);
+        info!(
+            "Started database cleanup task (base: {}min, max: {}min, reset after {} skips)",
+            base_interval_minutes, max_interval_minutes, reset_skip_count
+        );
     }
 }
 
