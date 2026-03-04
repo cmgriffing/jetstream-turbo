@@ -109,7 +109,7 @@ jobs:
           host: ${{ secrets.VPS_MONITOR_HOST }}
           username: deploy
           key: ${{ secrets.VPS_MONITOR_SSH_KEY }}
-          source: dist/
+          source: monitor/frontend/dist/
           target: "/tmp/${{ env.DEPLOY_PATH }}/frontend/"
 
       - name: Move frontend dist on Host
