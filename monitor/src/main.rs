@@ -149,21 +149,24 @@ async fn main() -> Result<()> {
         if path != "/" {
             let file_path = static_base.join(&path[1..]);
             if let Ok(content) = tokio::fs::read(&file_path).await {
-                let mime_type = match std::path::Path::new(&file_path)
+                let (mime_type, cache_control) = match std::path::Path::new(&file_path)
                     .extension()
                     .and_then(|e| e.to_str())
                 {
-                    Some("js") => "application/javascript",
-                    Some("css") => "text/css",
-                    Some("html") | Some("htm") => "text/html",
-                    Some("woff2") => "font/woff2",
-                    Some("json") => "application/json",
-                    _ => "application/octet-stream",
+                    Some("js") => ("application/javascript", "public, max-age=31536000, immutable"),
+                    Some("css") => ("text/css", "public, max-age=31536000, immutable"),
+                    Some("woff2") => ("font/woff2", "public, max-age=31536000, immutable"),
+                    Some("json") => ("application/json", "public, max-age=3600"),
+                    _ => ("application/octet-stream", "public, max-age=31536000, immutable"),
                 };
                 let mut response = axum::http::Response::new(axum::body::Body::from(content));
                 response.headers_mut().insert(
                     axum::http::header::CONTENT_TYPE,
                     mime_type.parse().unwrap(),
+                );
+                response.headers_mut().insert(
+                    axum::http::header::CACHE_CONTROL,
+                    cache_control.parse().unwrap(),
                 );
                 return Ok(response);
             }
@@ -176,6 +179,10 @@ async fn main() -> Result<()> {
                 axum::http::header::CONTENT_TYPE,
                 "text/html".parse().unwrap(),
             );
+            response.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                "no-cache".parse().unwrap(),
+            );
             return Ok(response);
         }
         
@@ -183,6 +190,10 @@ async fn main() -> Result<()> {
         response.headers_mut().insert(
             axum::http::header::CONTENT_TYPE,
             "text/html".parse().unwrap(),
+        );
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            "no-cache".parse().unwrap(),
         );
         Ok(response)
     }
