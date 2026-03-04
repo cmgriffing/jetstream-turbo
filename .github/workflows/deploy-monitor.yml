@@ -105,6 +105,9 @@ jobs:
           name: frontend-dist
           merge-multiple: true
 
+      - name: Debug - List downloaded files
+        run: ls -la && ls -la dist/ 2>/dev/null || echo "No dist/ folder found"
+
       - name: Copy frontend dist to VPS
         uses: appleboy/scp-action@master
         with:
