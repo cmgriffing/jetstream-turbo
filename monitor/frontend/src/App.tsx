@@ -5,7 +5,6 @@ import { MetricsTable } from "@/components/MetricsTable"
 import { StatusIndicator } from "@/components/StatusIndicator"
 import { ConnectionBanner } from "@/components/ConnectionBanner"
 import { UptimeChart24h, RateChart } from "@/components/Charts"
-import { ModeToggle } from "@/components/ui/mode-toggle"
 import { StreamStats, useWebSocket, useUptimeHistory, ConnectionStatus } from "@/hooks/useStream"
 
 function App() {
@@ -24,16 +23,15 @@ function App() {
   const { data: hourlyData, spanSeconds } = useUptimeHistory(24)
 
   return (
-    <div className="min-h-screen bg-background p-8">
+    <div className="min-h-screen bg-background p-8 relative" style={{ zIndex: 1 }}>
       <ConnectionBanner status={connectionStatus} />
-      <ModeToggle />
       
       <Header />
       
-      <div className="flex gap-6 mb-8 justify-center flex-wrap">
+      <div className="flex gap-6 mb-10 justify-center flex-wrap">
         <StreamCard
           streamId="a"
-          name={stats.stream_a_name || "Stream A"}
+          name={stats.stream_a_name || "STREAM_A"}
           count={stats.stream_a || 0}
           rate={stats.rate_a || 0}
           streak={stats.current_streak_a}
@@ -42,7 +40,7 @@ function App() {
         />
         <StreamCard
           streamId="b"
-          name={stats.stream_b_name || "Stream B"}
+          name={stats.stream_b_name || "STREAM_B"}
           count={stats.stream_b || 0}
           rate={stats.rate_b || 0}
           streak={stats.current_streak_b}
@@ -51,7 +49,7 @@ function App() {
         />
       </div>
 
-      <div className="max-w-4xl mx-auto space-y-8">
+      <div className="max-w-4xl mx-auto space-y-6">
         <UptimeChart24h 
           data={hourlyData}
           streamAName={stats.stream_a_name || "Stream A"}

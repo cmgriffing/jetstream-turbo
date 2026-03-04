@@ -1,3 +1,7 @@
+import { memo } from "react"
+import { Zap, Info, Circle } from "lucide-react"
+import { cn } from "@/lib/utils"
+
 interface StreamCardProps {
   streamId: "a" | "b";
   name: string;
@@ -9,16 +13,6 @@ interface StreamCardProps {
   connected: boolean;
 }
 
-import { Zap, Info } from "lucide-react"
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
-import { Badge } from "@/components/ui/badge"
-import { cn } from "@/lib/utils"
-
 function formatDuration(ms: number): string {
   const secs = Math.floor(ms / 1000);
   const hrs = Math.floor(secs / 3600);
@@ -28,7 +22,7 @@ function formatDuration(ms: number): string {
   return `${secs}s`;
 }
 
-export function StreamCard({
+export const StreamCard = memo(function StreamCard({
   streamId,
   name,
   count,
@@ -37,76 +31,80 @@ export function StreamCard({
   uptimeAllTime,
   connected,
 }: StreamCardProps) {
+  const streamColor = streamId === "a" ? "#3fb950" : "#58a6ff";
 
   return (
-    <Card className={cn(
-      "flex-1 min-w-[280px] max-w-[400px]",
-      streamId === "a" && "border-l-4 border-l-green-600 dark:border-l-green-500",
-      streamId === "b" && "border-l-4 border-l-blue-600 dark:border-l-blue-500"
+    <div className={cn(
+      "flex-1 min-w-[320px] max-w-[420px] bg-[#0f0f0f] border border-[#1a1a1a] rounded-sm p-5 transition-all duration-200 hover:border-[#252525] hover:bg-[#111111]",
+      streamId === "a" && "border-l-[2px] border-l-[#3fb950]",
+      streamId === "b" && "border-l-[2px] border-l-[#58a6ff]"
     )}>
-      <CardHeader className="flex flex-row items-center justify-between pb-2">
-        <CardTitle className={cn(
-          "text-sm font-semibold uppercase tracking-wider",
-          streamId === "a" && "text-green-600 dark:text-green-500",
-          streamId === "b" && "text-blue-600 dark:text-blue-500"
-        )}>
-          {name}
-        </CardTitle>
-        <Badge variant={connected ? "default" : "destructive"} className={cn(
-          "text-xs uppercase tracking-wider",
-          connected && "bg-green-600 hover:bg-green-600 dark:bg-green-500 dark:hover:bg-green-500"
-        )}>
-          {connected ? "Connected" : "Disconnected"}
-        </Badge>
-      </CardHeader>
-      <CardContent>
-        <div className="mb-2">
-          <div className="text-5xl font-bold tabular-nums">
-            {count.toLocaleString()}
-          </div>
-          <div className="text-sm text-muted-foreground uppercase tracking-wider flex items-center gap-2 mt-1">
-            <Zap className="w-4 h-4" />
-            messages
-          </div>
+      <div className="flex flex-row items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] font-mono text-[#525252]">$</span>
+          <span className="text-sm font-semibold tracking-wide" style={{ color: streamColor }}>
+            {name}
+          </span>
         </div>
+        <div className="flex items-center gap-1.5">
+          <Circle 
+            className="w-2 h-2 fill-current" 
+            style={{ color: connected ? streamColor : '#f85149' }}
+          />
+          <span className="text-[10px] font-mono tracking-wider" style={{ color: connected ? streamColor : '#f85149' }}>
+            {connected ? 'CONNECTED' : 'DISCONNECTED'}
+          </span>
+        </div>
+      </div>
 
-        <div className="grid grid-cols-3 gap-4 pt-4 border-t">
-          <div>
-            <span className="text-xs text-muted-foreground uppercase tracking-wider block mb-1 flex items-center gap-1">
-              Rate
-              <button
-                  type="button"
-                  className="group relative cursor-pointer"
-                  aria-label="More info about rate"
-                >
-                  <Info className="w-3 h-3" />
-                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 p-2 bg-popover text-popover-foreground text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10 shadow-md">
-                  Average messages/second while connected since server started
-                </div>
-              </button>
-            </span>
-            <span className="text-lg font-semibold tabular-nums">
-              {rate.toFixed(0)}/s
-            </span>
-          </div>
-          <div>
-            <span className="text-xs text-muted-foreground uppercase tracking-wider block mb-1">
-              Streak
-            </span>
-            <span className="text-lg font-semibold tabular-nums">
-              {streak ? formatDuration(streak * 1000) : "-"}
-            </span>
-          </div>
-          <div>
-            <span className="text-xs text-muted-foreground uppercase tracking-wider block mb-1">
-              Uptime (All Time)
-            </span>
-            <span className="text-lg font-semibold tabular-nums">
-              {uptimeAllTime !== undefined ? `${uptimeAllTime.toFixed(1)}%` : "-"}
-            </span>
-          </div>
+      <div className="mb-4">
+        <div className="text-4xl font-mono font-medium tracking-tight text-[#e5e5e5]">
+          {count.toLocaleString()}
         </div>
-      </CardContent>
-    </Card>
+        <div className="text-[10px] text-[#525252] font-mono tracking-[0.15em] flex items-center gap-1.5 mt-1">
+          <Zap className="w-3 h-3" />
+          TOTAL_MESSAGES
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-4 pt-3 border-t border-[#1a1a1a]">
+        <div>
+          <span className="text-[10px] text-[#525252] font-mono tracking-[0.1em] block mb-1 flex items-center gap-1">
+            RATE
+            <button
+                type="button"
+                className="group relative cursor-pointer"
+                aria-label="More info about rate"
+              >
+                <Info className="w-2.5 h-2.5" />
+              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 p-2 bg-[#1a1a1a] text-[#8a8a8a] text-[10px] font-mono rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10 border border-[#252525]">
+                Average messages/second while connected since server started
+              </div>
+            </button>
+          </span>
+          <span className="text-base font-mono text-[#e5e5e5]">
+            {rate.toFixed(0)}<span className="text-[#525252] text-xs">/s</span>
+          </span>
+        </div>
+        <div>
+          <span className="text-[10px] text-[#525252] font-mono tracking-[0.1em] block mb-1">
+            STREAK
+          </span>
+          <span className="text-base font-mono text-[#e5e5e5]">
+            {streak ? formatDuration(streak * 1000) : <span className="text-[#525252]">--</span>}
+          </span>
+        </div>
+        <div>
+          <span className="text-[10px] text-[#525252] font-mono tracking-[0.1em] block mb-1">
+            UPTIME
+          </span>
+          <span className="text-base font-mono text-[#e5e5e5]">
+            {uptimeAllTime !== undefined ? (
+              <>{uptimeAllTime.toFixed(1)}<span className="text-[#525252] text-xs">%</span></>
+            ) : <span className="text-[#525252]">--</span>}
+          </span>
+        </div>
+      </div>
+    </div>
   );
-}
+})
