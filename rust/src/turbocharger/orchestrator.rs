@@ -366,6 +366,8 @@ impl TurboCharger {
                 max_size_bytes,
                 self.settings.vacuum_min_bytes_freed,
                 self.settings.vacuum_min_percent_freed,
+                self.settings.cleanup_chunk_size,
+                self.settings.cleanup_chunk_delay_ms,
             ).await?;
             info!(
                 "Cleanup complete: {} records deleted, new size: {}MB, vacuum_pending: {}",

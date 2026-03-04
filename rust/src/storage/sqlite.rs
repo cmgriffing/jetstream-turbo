@@ -289,16 +289,38 @@ impl SQLiteStore {
         Ok(count)
     }
 
-    pub async fn cleanup_old_records(&self, older_than: DateTime<Utc>) -> TurboResult<u64> {
+    pub async fn cleanup_old_records(
+        &self,
+        older_than: DateTime<Utc>,
+        chunk_size: u32,
+        chunk_delay_ms: u64,
+    ) -> TurboResult<u64> {
         let older_than_str = older_than.to_rfc3339();
-        let result = sqlx::query("DELETE FROM records WHERE created_at < ?")
+        let mut total_deleted = 0u64;
+
+        loop {
+            let result = sqlx::query(
+                "DELETE FROM records WHERE rowid IN (SELECT rowid FROM records WHERE created_at < ? LIMIT ?)"
+            )
             .bind(&older_than_str)
+            .bind(chunk_size)
             .execute(&self.pool)
             .await?;
 
-        let deleted = result.rows_affected();
-        info!("Cleaned up {} old records", deleted);
-        Ok(deleted)
+            let deleted = result.rows_affected();
+            if deleted == 0 {
+                break;
+            }
+
+            total_deleted += deleted;
+
+            if deleted as u32 == chunk_size {
+                sleep(Duration::from_millis(chunk_delay_ms)).await;
+            }
+        }
+
+        info!("Cleaned up {} old records", total_deleted);
+        Ok(total_deleted)
     }
 
     pub async fn get_db_size(&self) -> TurboResult<i64> {
@@ -316,6 +338,8 @@ impl SQLiteStore {
         max_size_bytes: i64,
         vacuum_min_bytes_freed: u64,
         vacuum_min_percent_freed: f64,
+        cleanup_chunk_size: u32,
+        cleanup_chunk_delay_ms: u64,
     ) -> TurboResult<CleanupResult> {
         let initial_size = self.get_db_size().await?;
         let mut current_retention = retention_days;
@@ -324,7 +348,7 @@ impl SQLiteStore {
 
         for iteration in 0..max_iterations {
             let cutoff = Utc::now() - chrono::Duration::days(current_retention as i64);
-            let deleted = self.cleanup_old_records(cutoff).await?;
+            let deleted = self.cleanup_old_records(cutoff, cleanup_chunk_size, cleanup_chunk_delay_ms).await?;
             total_deleted += deleted;
 
             let current_size = self.get_db_size().await?;
@@ -431,7 +455,7 @@ mod tests {
         let store = create_test_db().await;
         
         let cutoff = Utc::now() - Duration::days(7);
-        let deleted = store.cleanup_old_records(cutoff).await.unwrap();
+        let deleted = store.cleanup_old_records(cutoff, 1000, 50).await.unwrap();
         
         assert_eq!(deleted, 0, "Should delete nothing from empty DB");
         
@@ -489,7 +513,7 @@ mod tests {
         .unwrap();
 
         let cutoff = now - Duration::days(7);
-        let deleted = store.cleanup_old_records(cutoff).await.unwrap();
+        let deleted = store.cleanup_old_records(cutoff, 1000, 50).await.unwrap();
         
         assert_eq!(deleted, 1, "Should delete 1 old record");
         
@@ -535,7 +559,7 @@ mod tests {
         assert!(size_before > 0, "DB should have size");
 
         let max_size = size_before / 2;
-        let result = store.cleanup_with_vacuum(7, max_size, 1024, 1.0).await.unwrap();
+        let result = store.cleanup_with_vacuum(7, max_size, 1024, 1.0, 1000, 50).await.unwrap();
         
         assert!(result.records_deleted > 0, "Should have deleted some records");
         
@@ -572,7 +596,7 @@ mod tests {
         }
 
         let large_size = 100_000_000_000i64;
-        let result = store.cleanup_with_vacuum(7, large_size, 1024, 1.0).await.unwrap();
+        let result = store.cleanup_with_vacuum(7, large_size, 1024, 1.0, 1000, 50).await.unwrap();
         
         assert_eq!(result.records_deleted, 0, "Should not delete anything when under limit");
         
