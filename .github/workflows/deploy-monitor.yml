@@ -32,8 +32,8 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: "20"
+          cache: "npm"
           cache-dependency-path: monitor/frontend/package-lock.json
 
       - name: Build frontend
@@ -109,8 +109,9 @@ jobs:
           host: ${{ secrets.VPS_MONITOR_HOST }}
           username: deploy
           key: ${{ secrets.VPS_MONITOR_SSH_KEY }}
+          strip_components: 1
           source: monitor/frontend/dist/
-          target: "/tmp/${{ env.DEPLOY_PATH }}/frontend/"
+          target: "/tmp/${{ env.DEPLOY_PATH }}"
 
       - name: Move frontend dist on Host
         uses: appleboy/ssh-action@master
