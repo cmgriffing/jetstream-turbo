@@ -107,6 +107,11 @@ impl SQLiteStore {
             .execute(pool)
             .await;
 
+        // Limit WAL size to 5GB to prevent unbounded growth
+        sqlx::query("PRAGMA journal_size_limit = 5368709120")
+            .execute(pool)
+            .await?;
+
         info!("Applied SQLite performance PRAGMAs");
         Ok(())
     }
