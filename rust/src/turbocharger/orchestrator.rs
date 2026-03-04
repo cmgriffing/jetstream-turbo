@@ -361,11 +361,17 @@ impl TurboCharger {
                 current_size / (1024 * 1024),
                 self.settings.max_db_size_mb
             );
-            let result = self.sqlite_store.cleanup_with_vacuum(self.settings.db_retention_days, max_size_bytes).await?;
+            let result = self.sqlite_store.cleanup_with_vacuum(
+                self.settings.db_retention_days,
+                max_size_bytes,
+                self.settings.vacuum_min_bytes_freed,
+                self.settings.vacuum_min_percent_freed,
+            ).await?;
             info!(
-                "Cleanup complete: {} records deleted, new size: {}MB",
+                "Cleanup complete: {} records deleted, new size: {}MB, vacuum_pending: {}",
                 result.records_deleted,
-                result.new_size_bytes / (1024 * 1024)
+                result.new_size_bytes / (1024 * 1024),
+                result.vacuum_pending
             );
             return Ok(Some(result));
         }

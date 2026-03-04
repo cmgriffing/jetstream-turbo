@@ -12,6 +12,7 @@ use tracing::{info, instrument, trace};
 pub struct CleanupResult {
     pub records_deleted: u64,
     pub new_size_bytes: i64,
+    pub vacuum_pending: bool,
 }
 
 pub struct SQLiteStore {
@@ -309,7 +310,14 @@ impl SQLiteStore {
         Ok(row.0)
     }
 
-    pub async fn cleanup_with_vacuum(&self, retention_days: u32, max_size_bytes: i64) -> TurboResult<CleanupResult> {
+    pub async fn cleanup_with_vacuum(
+        &self,
+        retention_days: u32,
+        max_size_bytes: i64,
+        vacuum_min_bytes_freed: u64,
+        vacuum_min_percent_freed: f64,
+    ) -> TurboResult<CleanupResult> {
+        let initial_size = self.get_db_size().await?;
         let mut current_retention = retention_days;
         let mut total_deleted: u64 = 0;
         let max_iterations = 3;
@@ -340,14 +348,48 @@ impl SQLiteStore {
             }
         }
 
-        sqlx::query("VACUUM").execute(&self.pool).await?;
-        info!("VACUUM completed after cleanup loop, total deleted: {}", total_deleted);
+        let post_delete_size = self.get_db_size().await?;
+        let bytes_freed = initial_size.saturating_sub(post_delete_size);
+        let percent_freed = if initial_size > 0 {
+            (bytes_freed as f64 / initial_size as f64) * 100.0
+        } else {
+            0.0
+        };
 
-        let new_size = self.get_db_size().await?;
+        let should_vacuum = bytes_freed as i64 >= vacuum_min_bytes_freed as i64
+            || percent_freed >= vacuum_min_percent_freed;
+
+        let mut vacuum_pending = false;
+
+        if should_vacuum {
+            let pool = self.pool.clone();
+            let freed_mb = bytes_freed / (1024 * 1024);
+            let freed_percent = percent_freed as u64;
+            tokio::spawn(async move {
+                info!(
+                    "Starting background VACUUM (freed {}MB, {}%)",
+                    freed_mb, freed_percent
+                );
+                sqlx::query("VACUUM").execute(&pool).await.unwrap();
+                info!("Background VACUUM completed");
+            });
+
+            sleep(Duration::from_millis(500)).await;
+            vacuum_pending = true;
+        } else {
+            info!(
+                "Skipping VACUUM: freed {}MB ({}%), below threshold ({}MB, {}%)",
+                bytes_freed / (1024 * 1024),
+                percent_freed as u64,
+                vacuum_min_bytes_freed / (1024 * 1024),
+                vacuum_min_percent_freed as u64
+            );
+        }
 
         Ok(CleanupResult {
             records_deleted: total_deleted,
-            new_size_bytes: new_size,
+            new_size_bytes: post_delete_size,
+            vacuum_pending,
         })
     }
 
@@ -493,7 +535,7 @@ mod tests {
         assert!(size_before > 0, "DB should have size");
 
         let max_size = size_before / 2;
-        let result = store.cleanup_with_vacuum(7, max_size).await.unwrap();
+        let result = store.cleanup_with_vacuum(7, max_size, 1024, 1.0).await.unwrap();
         
         assert!(result.records_deleted > 0, "Should have deleted some records");
         
@@ -530,7 +572,7 @@ mod tests {
         }
 
         let large_size = 100_000_000_000i64;
-        let result = store.cleanup_with_vacuum(7, large_size).await.unwrap();
+        let result = store.cleanup_with_vacuum(7, large_size, 1024, 1.0).await.unwrap();
         
         assert_eq!(result.records_deleted, 0, "Should not delete anything when under limit");
         

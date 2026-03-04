@@ -30,6 +30,8 @@ pub struct Settings {
     pub max_db_size_mb: u64,
     pub db_retention_days: u32,
     pub cleanup_check_interval_minutes: u64,
+    pub vacuum_min_bytes_freed: u64,
+    pub vacuum_min_percent_freed: f64,
 
     // HTTP Server Configuration
     pub http_port: u16,
@@ -75,6 +77,8 @@ impl Default for Settings {
             max_db_size_mb: 1024 * 10,
             db_retention_days: 3,
             cleanup_check_interval_minutes: 5,
+            vacuum_min_bytes_freed: 100 * 1024 * 1024,
+            vacuum_min_percent_freed: 10.0,
             http_port: 8080,
             batch_size: 10,
             profile_batch_size: 25,
@@ -136,6 +140,14 @@ impl Settings {
         if let Ok(cleanup_check_interval) = std::env::var("CLEANUP_CHECK_INTERVAL_MINUTES") {
             builder =
                 builder.set_override("cleanup_check_interval_minutes", cleanup_check_interval)?;
+        }
+
+        if let Ok(vacuum_min_bytes) = std::env::var("VACUUM_MIN_BYTES_FREED") {
+            builder = builder.set_override("vacuum_min_bytes_freed", vacuum_min_bytes)?;
+        }
+
+        if let Ok(vacuum_min_percent) = std::env::var("VACUUM_MIN_PERCENT_FREED") {
+            builder = builder.set_override("vacuum_min_percent_freed", vacuum_min_percent)?;
         }
 
         let settings = builder.build()?;
