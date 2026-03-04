@@ -97,11 +97,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: binary-monitor-${{ env.TARGET }}
+          merge-multiple: true
 
       - name: Download frontend dist
         uses: actions/download-artifact@v4
         with:
           name: frontend-dist
+          merge-multiple: true
 
       - name: Copy frontend dist to VPS
         uses: appleboy/scp-action@master
@@ -109,9 +111,8 @@ jobs:
           host: ${{ secrets.VPS_MONITOR_HOST }}
           username: deploy
           key: ${{ secrets.VPS_MONITOR_SSH_KEY }}
-          strip_components: 1
-          source: monitor/frontend/dist/
-          target: "/tmp/${{ env.DEPLOY_PATH }}"
+          source: dist/
+          target: "/tmp/${{ env.DEPLOY_PATH }}/frontend/"
 
       - name: Move frontend dist on Host
         uses: appleboy/ssh-action@master
@@ -120,8 +121,8 @@ jobs:
           username: deploy
           key: ${{ secrets.VPS_MONITOR_SSH_KEY }}
           script: |
-            sudo rm -rf ${{ env.DEPLOY_PATH }}/frontend/dist
-            sudo mv /tmp/${{ env.DEPLOY_PATH }}/frontend/dist ${{ env.DEPLOY_PATH }}/frontend/dist
+            sudo rm -rf ${{ env.DEPLOY_PATH }}/frontend
+            sudo mv /tmp/${{ env.DEPLOY_PATH }}/frontend ${{ env.DEPLOY_PATH }}/frontend
             sudo chown -R ${{ env.SERVICE_NAME }}:${{ env.SERVICE_NAME }} ${{ env.DEPLOY_PATH }}/frontend
 
       - name: Create directories on VPS
