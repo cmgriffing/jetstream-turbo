@@ -74,12 +74,16 @@ export function StreamCard({
           <div>
             <span className="text-xs text-muted-foreground uppercase tracking-wider block mb-1 flex items-center gap-1">
               Rate
-              <div className="group relative">
-                <Info className="w-3 h-3" />
+              <button
+                  type="button"
+                  className="group relative cursor-pointer"
+                  aria-label="More info about rate"
+                >
+                  <Info className="w-3 h-3" />
                 <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 p-2 bg-popover text-popover-foreground text-xs rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10 shadow-md">
                   Average messages/second while connected since server started
                 </div>
-              </div>
+              </button>
             </span>
             <span className="text-lg font-semibold tabular-nums">
               {rate.toFixed(0)}/s

@@ -45,9 +45,9 @@ export function StatusIndicator({ connected, connectedAt }: StatusIndicatorProps
         )}
       >
         {connected ? (
-          <Wifi className="w-3 h-3" />
+          <Wifi className="w-3 h-3" aria-hidden="true" />
         ) : (
-          <WifiOff className="w-3 h-3" />
+          <WifiOff className="w-3 h-3" aria-hidden="true" />
         )}
         {connected ? 'Connected' : 'Disconnected'}
       </Badge>
