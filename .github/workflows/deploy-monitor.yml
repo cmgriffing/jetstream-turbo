@@ -21,6 +21,7 @@ env:
   CARGO_TERM_COLOR: always
   TARGET: ${{ github.event.inputs.target || 'x86_64-unknown-linux-musl' }}
   DEPLOY_PATH: /opt/jetstream-monitor
+  TMP_DEPLOY_PATH: /tmp/jetstream-monitor
   SERVICE_NAME: jetstream-monitor
   BINARY_NAME: jetstream-monitor
 
@@ -132,7 +133,7 @@ jobs:
           echo "=== Source for frontend SCP ==="
           ls -laR frontend-dist/ 2>/dev/null || echo "Not found"
           echo "=== Target path ==="
-          echo "/tmp/${{ env.DEPLOY_PATH }}/frontend/"
+          echo "${{ env.TMP_DEPLOY_PATH }}/"
 
       - name: Copy frontend dist to VPS
         uses: appleboy/scp-action@master
@@ -141,7 +142,7 @@ jobs:
           username: deploy
           key: ${{ secrets.VPS_MONITOR_SSH_KEY }}
           source: frontend-dist/
-          target: "/tmp/jetstream-monitor/frontend/"
+          target: "${{ env.TMP_DEPLOY_PATH }}/"
 
       - name: Move frontend dist on Host
         uses: appleboy/ssh-action@master
@@ -150,8 +151,10 @@ jobs:
           username: deploy
           key: ${{ secrets.VPS_MONITOR_SSH_KEY }}
           script: |
-            sudo rm -rf ${{ env.DEPLOY_PATH }}/frontend
-            sudo mv /tmp/jetstream-monitor/frontend ${{ env.DEPLOY_PATH }}/frontend
+            sudo mkdir -p ${{ env.DEPLOY_PATH }}/frontend
+            sudo rm -rf ${{ env.DEPLOY_PATH }}/frontend/dist
+            sudo mv ${{ env.TMP_DEPLOY_PATH }}/frontend-dist ${{ env.DEPLOY_PATH }}/frontend/dist
+            sudo useradd -r -s /bin/false ${{ env.SERVICE_NAME }} 2>/dev/null || true
             sudo chown -R ${{ env.SERVICE_NAME }}:${{ env.SERVICE_NAME }} ${{ env.DEPLOY_PATH }}/frontend
 
       - name: Create directories on VPS
@@ -161,7 +164,7 @@ jobs:
           username: deploy
           key: ${{ secrets.VPS_MONITOR_SSH_KEY }}
           script: |
-            sudo mkdir -p ${{ env.DEPLOY_PATH }}/frontend
+            sudo mkdir -p ${{ env.DEPLOY_PATH }}/frontend/dist
             sudo useradd -r -s /bin/false ${{ env.SERVICE_NAME }} 2>/dev/null || true
             sudo chown ${{ env.SERVICE_NAME }}:${{ env.SERVICE_NAME }} ${{ env.DEPLOY_PATH }}
 
@@ -172,7 +175,7 @@ jobs:
           username: deploy
           key: ${{ secrets.VPS_MONITOR_SSH_KEY }}
           script: |
-            sudo rm -rf /tmp/${{ env.DEPLOY_PATH }}
+            sudo rm -rf ${{ env.TMP_DEPLOY_PATH }}
 
       - name: Debug - Before SCP binary
         if: github.event.inputs.debug == 'true'
@@ -180,7 +183,7 @@ jobs:
           echo "=== Source for binary SCP ==="
           ls -laR binary-monitor-${{ env.TARGET }}/ 2>/dev/null || echo "Not found"
           echo "=== Target path ==="
-          echo "/tmp/${{ env.DEPLOY_PATH }}/"
+          echo "${{ env.TMP_DEPLOY_PATH }}/"
 
       - name: Copy binary to VPS
         uses: appleboy/scp-action@master
@@ -189,7 +192,7 @@ jobs:
           username: deploy
           key: ${{ secrets.VPS_MONITOR_SSH_KEY }}
           source: binary-monitor-${{ env.TARGET }}/
-          target: "/tmp/${{ env.DEPLOY_PATH }}/"
+          target: "${{ env.TMP_DEPLOY_PATH }}/"
 
       - name: Update binary permissions on Host
         uses: appleboy/ssh-action@master
@@ -198,7 +201,7 @@ jobs:
           username: deploy
           key: ${{ secrets.VPS_MONITOR_SSH_KEY }}
           script: |
-            sudo mv /tmp/${{ env.DEPLOY_PATH }}/binary-monitor-${{ env.TARGET }}/${{ env.BINARY_NAME }} ${{ env.DEPLOY_PATH }}/${{ env.BINARY_NAME }}
+            sudo mv ${{ env.TMP_DEPLOY_PATH }}/binary-monitor-${{ env.TARGET }}/${{ env.BINARY_NAME }} ${{ env.DEPLOY_PATH }}/${{ env.BINARY_NAME }}
             sudo chmod +x ${{ env.DEPLOY_PATH }}/${{ env.BINARY_NAME }}
             sudo chown ${{ env.SERVICE_NAME }}:${{ env.SERVICE_NAME }} ${{ env.DEPLOY_PATH }}/${{ env.BINARY_NAME }}
 
