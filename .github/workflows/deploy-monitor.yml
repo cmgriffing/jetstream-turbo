@@ -139,7 +139,7 @@ jobs:
           username: deploy
           key: ${{ secrets.VPS_MONITOR_SSH_KEY }}
           source: frontend-dist/
-          target: "/tmp/${{ env.DEPLOY_PATH }}/frontend/"
+          target: "/tmp/jetstream-monitor/frontend/"
 
       - name: Move frontend dist on Host
         uses: appleboy/ssh-action@master
@@ -149,7 +149,7 @@ jobs:
           key: ${{ secrets.VPS_MONITOR_SSH_KEY }}
           script: |
             sudo rm -rf ${{ env.DEPLOY_PATH }}/frontend
-            sudo mv /tmp/${{ env.DEPLOY_PATH }}/frontend ${{ env.DEPLOY_PATH }}/frontend
+            sudo mv /tmp/jetstream-monitor/frontend ${{ env.DEPLOY_PATH }}/frontend
             sudo chown -R ${{ env.SERVICE_NAME }}:${{ env.SERVICE_NAME }} ${{ env.DEPLOY_PATH }}/frontend
 
       - name: Create directories on VPS
