@@ -9,6 +9,7 @@ use tokio::sync::broadcast;
 pub struct StreamStats {
     pub stream_a: u64,
     pub stream_b: u64,
+    pub counting_started_at: DateTime<Utc>,
     pub delta: i64,
     pub rate_a: f64,
     pub rate_b: f64,
@@ -63,6 +64,7 @@ impl StatsAggregator {
         let uptime = Arc::clone(uptime);
         let stream_a_name = self.stream_a_name.clone();
         let stream_b_name = self.stream_b_name.clone();
+        let counting_started_at = Utc::now();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
@@ -108,6 +110,7 @@ impl StatsAggregator {
                 let stats_snapshot = StreamStats {
                     stream_a: internal.total_a,
                     stream_b: internal.total_b,
+                    counting_started_at: counting_started_at.clone(),
                     delta: internal.total_a as i64 - internal.total_b as i64,
                     rate_a,
                     rate_b,
@@ -411,14 +414,38 @@ impl UptimeTracker {
     }
 
     pub fn get_average_rates(&self) -> (f64, f64) {
-        let rate_a = if self.connected_seconds_a > 0 {
-            self.total_messages_a as f64 / self.connected_seconds_a as f64
+        let now = Instant::now();
+
+        let connected_seconds_a = if self.connected_a {
+            if let Some(session_start) = self.session_start_a {
+                self.connected_seconds_a
+                    .saturating_add(now.duration_since(session_start).as_secs())
+            } else {
+                self.connected_seconds_a
+            }
+        } else {
+            self.connected_seconds_a
+        };
+
+        let connected_seconds_b = if self.connected_b {
+            if let Some(session_start) = self.session_start_b {
+                self.connected_seconds_b
+                    .saturating_add(now.duration_since(session_start).as_secs())
+            } else {
+                self.connected_seconds_b
+            }
+        } else {
+            self.connected_seconds_b
+        };
+
+        let rate_a = if connected_seconds_a > 0 {
+            self.total_messages_a as f64 / connected_seconds_a as f64
         } else {
             0.0
         };
         
-        let rate_b = if self.connected_seconds_b > 0 {
-            self.total_messages_b as f64 / self.connected_seconds_b as f64
+        let rate_b = if connected_seconds_b > 0 {
+            self.total_messages_b as f64 / connected_seconds_b as f64
         } else {
             0.0
         };

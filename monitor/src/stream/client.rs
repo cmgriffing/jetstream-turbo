@@ -48,6 +48,8 @@ impl StreamClient {
         let reconnect_delay = self.reconnect_delay;
 
         tokio::spawn(async move {
+            let mut cumulative_count: u64 = 0;
+
             loop {
                 info!(stream = ?stream_id, "Connecting to {}", url);
 
@@ -64,7 +66,13 @@ impl StreamClient {
                                 Ok(Message::Text(_)) => {
                                     count += 1;
                                     if last_send.elapsed() >= update_interval {
-                                        if tx.send(StreamMessage { stream_id, count }).is_err() {
+                                        if tx
+                                            .send(StreamMessage {
+                                                stream_id,
+                                                count: cumulative_count.saturating_add(count),
+                                            })
+                                            .is_err()
+                                        {
                                             debug!(stream = ?stream_id, "Receiver dropped");
                                             return;
                                         }
@@ -83,7 +91,15 @@ impl StreamClient {
                             }
                         }
 
-                        if tx.send(StreamMessage { stream_id, count }).is_err() {
+                        cumulative_count = cumulative_count.saturating_add(count);
+
+                        if tx
+                            .send(StreamMessage {
+                                stream_id,
+                                count: cumulative_count,
+                            })
+                            .is_err()
+                        {
                             return;
                         }
                     }
@@ -113,6 +129,8 @@ impl StreamClient {
         let reconnect_delay = self.reconnect_delay;
 
         tokio::spawn(async move {
+            let mut cumulative_count: u64 = 0;
+
             loop {
                 info!(stream = ?stream_id, "Connecting to {}", url);
                 let connect_start = Instant::now();
@@ -139,7 +157,12 @@ impl StreamClient {
                                 Ok(Message::Text(_)) => {
                                     count += 1;
                                     if last_send.elapsed() >= update_interval {
-                                        if tx_msg.send(StreamMessage { stream_id, count }).is_err()
+                                        if tx_msg
+                                            .send(StreamMessage {
+                                                stream_id,
+                                                count: cumulative_count.saturating_add(count),
+                                            })
+                                            .is_err()
                                         {
                                             debug!(stream = ?stream_id, "Receiver dropped");
                                             return;
@@ -159,7 +182,15 @@ impl StreamClient {
                             }
                         }
 
-                        if tx_msg.send(StreamMessage { stream_id, count }).is_err() {
+                        cumulative_count = cumulative_count.saturating_add(count);
+
+                        if tx_msg
+                            .send(StreamMessage {
+                                stream_id,
+                                count: cumulative_count,
+                            })
+                            .is_err()
+                        {
                             return;
                         }
                     }

@@ -5,6 +5,7 @@ export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected'
 export interface StreamStats {
   stream_a?: number
   stream_b?: number
+  counting_started_at?: string
   rate_a?: number
   rate_b?: number
   current_streak_a?: number

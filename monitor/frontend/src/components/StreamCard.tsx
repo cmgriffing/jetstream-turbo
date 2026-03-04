@@ -6,6 +6,7 @@ interface StreamCardProps {
   streamId: "a" | "b";
   name: string;
   count: number;
+  countingStartedAt?: string;
   rate: number;
   streak?: number;
   uptime?: number;
@@ -22,10 +23,28 @@ function formatDuration(ms: number): string {
   return `${secs}s`;
 }
 
+function formatCountingStartedAt(timestamp?: string): string {
+  if (!timestamp) return "--";
+
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "--";
+
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+  });
+}
+
 export const StreamCard = memo(function StreamCard({
   streamId,
   name,
   count,
+  countingStartedAt,
   rate,
   streak,
   uptimeAllTime,
@@ -64,6 +83,9 @@ export const StreamCard = memo(function StreamCard({
         <div className="text-[10px] text-[#525252] font-mono tracking-[0.15em] flex items-center gap-1.5 mt-1">
           <Zap className="w-3 h-3" />
           TOTAL_MESSAGES
+        </div>
+        <div className="text-[10px] text-[#525252] font-mono tracking-[0.1em] mt-1">
+          SINCE {formatCountingStartedAt(countingStartedAt)}
         </div>
       </div>
 
