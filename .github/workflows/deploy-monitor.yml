@@ -12,6 +12,10 @@ on:
         description: "Target architecture (e.g., x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu)"
         required: false
         default: "x86_64-unknown-linux-musl"
+      debug:
+        description: "Enable debug output"
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -98,10 +102,30 @@ jobs:
         with:
           name: binary-monitor-${{ env.TARGET }}
 
+      - name: Debug - Binary artifact
+        if: github.event.inputs.debug == 'true'
+        run: |
+          echo "=== Binary artifact contents ==="
+          ls -laR binary-monitor-${{ env.TARGET }}/ 2>/dev/null || echo "Not found"
+
       - name: Download frontend dist
         uses: actions/download-artifact@v4
         with:
           name: frontend-dist
+
+      - name: Debug - Frontend artifact
+        if: github.event.inputs.debug == 'true'
+        run: |
+          echo "=== Frontend artifact contents ==="
+          ls -laR frontend-dist/ 2>/dev/null || echo "Not found"
+
+      - name: Debug - Before SCP frontend
+        if: github.event.inputs.debug == 'true'
+        run: |
+          echo "=== Source for frontend SCP ==="
+          ls -laR frontend-dist/ 2>/dev/null || echo "Not found"
+          echo "=== Target path ==="
+          echo "/tmp/${{ env.DEPLOY_PATH }}/frontend/"
 
       - name: Copy frontend dist to VPS
         uses: appleboy/scp-action@master
@@ -143,6 +167,14 @@ jobs:
           script: |
             sudo rm -rf /tmp/${{ env.DEPLOY_PATH }}
 
+      - name: Debug - Before SCP binary
+        if: github.event.inputs.debug == 'true'
+        run: |
+          echo "=== Source for binary SCP ==="
+          ls -laR binary-monitor-${{ env.TARGET }}/ 2>/dev/null || echo "Not found"
+          echo "=== Target path ==="
+          echo "/tmp/${{ env.DEPLOY_PATH }}/"
+
       - name: Copy binary to VPS
         uses: appleboy/scp-action@master
         with:
@@ -162,6 +194,14 @@ jobs:
             sudo mv /tmp/${{ env.DEPLOY_PATH }}/binary-monitor-${{ env.TARGET }}/${{ env.BINARY_NAME }} ${{ env.DEPLOY_PATH }}/${{ env.BINARY_NAME }}
             sudo chmod +x ${{ env.DEPLOY_PATH }}/${{ env.BINARY_NAME }}
             sudo chown ${{ env.SERVICE_NAME }}:${{ env.SERVICE_NAME }} ${{ env.DEPLOY_PATH }}/${{ env.BINARY_NAME }}
+
+      - name: Debug - Before SCP systemd
+        if: github.event.inputs.debug == 'true'
+        run: |
+          echo "=== Source for systemd SCP ==="
+          ls -la monitor/deploy/systemd/${{ env.SERVICE_NAME }}.service 2>/dev/null || echo "Not found"
+          echo "=== Target path ==="
+          echo "/tmp/"
 
       - name: Copy systemd service file to Host
         uses: appleboy/scp-action@master
@@ -206,6 +246,14 @@ jobs:
           script: |
             sudo systemctl enable ${{ env.SERVICE_NAME }}
             sudo systemctl restart ${{ env.SERVICE_NAME }}
+
+      - name: Debug - Before SCP Caddy script
+        if: github.event.inputs.debug == 'true'
+        run: |
+          echo "=== Source for Caddy SCP ==="
+          ls -la monitor/deploy/setup-caddy.sh 2>/dev/null || echo "Not found"
+          echo "=== Target path ==="
+          echo "/tmp/"
 
       - name: Copy Caddy setup script to Host
         uses: appleboy/scp-action@master
