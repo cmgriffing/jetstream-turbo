@@ -119,6 +119,11 @@ jobs:
           echo "=== Frontend artifact contents ==="
           ls -laR frontend-dist/ 2>/dev/null || echo "Not found"
 
+      - name: Debug - Frontend artifact
+        run: |
+          echo "=== Root contents ==="
+          ls -laR ./ 2>/dev/null || echo "Not found"
+
       - name: Debug - Before SCP frontend
         if: github.event.inputs.debug == 'true'
         run: |
