@@ -44,6 +44,14 @@ function calculateStats(data: HourlyUptime[], spanSeconds: number) {
   let disconnectsB = 0
   let messagesA = 0
   let messagesB = 0
+  let deliveryLatencySumA = 0
+  let deliveryLatencySumB = 0
+  let deliveryLatencyCountA = 0
+  let deliveryLatencyCountB = 0
+  let mttrSumA = 0
+  let mttrSumB = 0
+  let mttrCountA = 0
+  let mttrCountB = 0
 
   data.forEach((d) => {
     totalA += d.stream_a_seconds || 0
@@ -54,6 +62,22 @@ function calculateStats(data: HourlyUptime[], spanSeconds: number) {
     disconnectsB += d.stream_b_disconnects || 0
     messagesA += d.stream_a_messages || 0
     messagesB += d.stream_b_messages || 0
+    if (d.stream_a_delivery_latency_ms > 0) {
+      deliveryLatencySumA += d.stream_a_delivery_latency_ms
+      deliveryLatencyCountA++
+    }
+    if (d.stream_b_delivery_latency_ms > 0) {
+      deliveryLatencySumB += d.stream_b_delivery_latency_ms
+      deliveryLatencyCountB++
+    }
+    if (d.stream_a_mttr_ms > 0) {
+      mttrSumA += d.stream_a_mttr_ms
+      mttrCountA++
+    }
+    if (d.stream_b_mttr_ms > 0) {
+      mttrSumB += d.stream_b_mttr_ms
+      mttrCountB++
+    }
   })
 
   const actualSpanSeconds = spanSeconds > 0 ? spanSeconds : (data.length * 3600)
@@ -78,6 +102,10 @@ function calculateStats(data: HourlyUptime[], spanSeconds: number) {
     messagesB,
     rateA: messagesA > 0 && totalA > 0 ? messagesA / totalA : 0,
     rateB: messagesB > 0 && totalB > 0 ? messagesB / totalB : 0,
+    deliveryLatencyA: deliveryLatencyCountA > 0 ? deliveryLatencySumA / deliveryLatencyCountA : 0,
+    deliveryLatencyB: deliveryLatencyCountB > 0 ? deliveryLatencySumB / deliveryLatencyCountB : 0,
+    mttrA: mttrCountA > 0 ? mttrSumA / mttrCountA : 0,
+    mttrB: mttrCountB > 0 ? mttrSumB / mttrCountB : 0,
   }
 }
 
@@ -157,6 +185,28 @@ export function MetricsTable({ data, spanSeconds, streamAName, streamBName }: Me
                 {stats.disconnectsB}
               </TableCell>
             </TableRow>
+            {!is28d && (
+              <TableRow className="border-b-[#1a1a1a]">
+                <TableCell className="text-[#8a8a8a] text-xs font-mono">DELIVERY_LATENCY</TableCell>
+                <TableCell className="text-right font-mono text-xs text-[#e5e5e5]">
+                  {stats.deliveryLatencyA > 0 ? `${stats.deliveryLatencyA.toFixed(0)}ms` : '--'}
+                </TableCell>
+                <TableCell className="text-right font-mono text-xs text-[#e5e5e5]">
+                  {stats.deliveryLatencyB > 0 ? `${stats.deliveryLatencyB.toFixed(0)}ms` : '--'}
+                </TableCell>
+              </TableRow>
+            )}
+            {!is28d && (stats.mttrA > 0 || stats.mttrB > 0) && (
+              <TableRow className="border-b-[#1a1a1a]">
+                <TableCell className="text-[#8a8a8a] text-xs font-mono">MTTR</TableCell>
+                <TableCell className="text-right font-mono text-xs text-[#e5e5e5]">
+                  {stats.mttrA > 0 ? formatDurationLong(stats.mttrA / 1000) : '--'}
+                </TableCell>
+                <TableCell className="text-right font-mono text-xs text-[#e5e5e5]">
+                  {stats.mttrB > 0 ? formatDurationLong(stats.mttrB / 1000) : '--'}
+                </TableCell>
+              </TableRow>
+            )}
             {!is28d && (
               <TableRow>
                 <TableCell className="text-[#8a8a8a] text-xs font-mono">MESSAGES</TableCell>

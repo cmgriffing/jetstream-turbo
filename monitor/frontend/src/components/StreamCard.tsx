@@ -12,6 +12,7 @@ interface StreamCardProps {
   uptime?: number;
   uptimeAllTime?: number;
   connected: boolean;
+  deliveryLatencyMs?: number;
 }
 
 function formatDuration(ms: number): string {
@@ -49,6 +50,7 @@ export const StreamCard = memo(function StreamCard({
   streak,
   uptimeAllTime,
   connected,
+  deliveryLatencyMs,
 }: StreamCardProps) {
   const streamColor = streamId === "a" ? "#3fb950" : "#58a6ff";
 
@@ -89,7 +91,7 @@ export const StreamCard = memo(function StreamCard({
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-4 pt-3 border-t border-[#1a1a1a]">
+      <div className="grid grid-cols-4 gap-4 pt-3 border-t border-[#1a1a1a]">
         <div>
           <span className="text-[10px] text-[#525252] font-mono tracking-[0.1em] block mb-1 flex items-center gap-1">
             RATE
@@ -106,6 +108,26 @@ export const StreamCard = memo(function StreamCard({
           </span>
           <span className="text-base font-mono text-[#e5e5e5]">
             {rate.toFixed(0)}<span className="text-[#525252] text-xs">/s</span>
+          </span>
+        </div>
+        <div>
+          <span className="text-[10px] text-[#525252] font-mono tracking-[0.1em] block mb-1 flex items-center gap-1">
+            LATENCY
+            <button
+                type="button"
+                className="group relative cursor-pointer"
+                aria-label="More info about delivery latency"
+              >
+                <Info className="w-2.5 h-2.5" />
+              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 p-2 bg-[#1a1a1a] text-[#8a8a8a] text-[10px] font-mono rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10 border border-[#252525]">
+                Message delivery latency (avg over last 10s)
+              </div>
+            </button>
+          </span>
+          <span className="text-base font-mono text-[#e5e5e5]">
+            {deliveryLatencyMs !== undefined && deliveryLatencyMs > 0 ? (
+              <>{deliveryLatencyMs < 1000 ? `${deliveryLatencyMs.toFixed(0)}` : `${(deliveryLatencyMs / 1000).toFixed(1)}s`}<span className="text-[#525252] text-xs">{deliveryLatencyMs < 1000 ? 'ms' : ''}</span></>
+            ) : <span className="text-[#525252]">--</span>}
           </span>
         </div>
         <div>
