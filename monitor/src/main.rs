@@ -49,12 +49,20 @@ async fn main() -> Result<()> {
         loop {
             tokio::select! {
                 Some(msg) = stream_a.next() => {
+                    let count = msg.count;
                     stats_for_stream.write().unwrap().update(msg);
-                    uptime_for_status.write().unwrap().record_message(StreamId::A);
+                    uptime_for_status
+                        .write()
+                        .unwrap()
+                        .record_total_count(StreamId::A, count);
                 }
                 Some(msg) = stream_b.next() => {
+                    let count = msg.count;
                     stats_for_stream.write().unwrap().update(msg);
-                    uptime_for_status.write().unwrap().record_message(StreamId::B);
+                    uptime_for_status
+                        .write()
+                        .unwrap()
+                        .record_total_count(StreamId::B, count);
                 }
                 Some(status) = status_a.next() => {
                     uptime_for_status.write().unwrap().handle_connection_status(status);
