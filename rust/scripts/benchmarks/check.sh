@@ -3,10 +3,9 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-BASELINE_DIR="$PROJECT_ROOT/benches/baselines"
-BENCHMARK_OUTPUT="$PROJECT_ROOT/target/criterion"
-
-REGRESSION_THRESHOLD=2.0
+BASELINE_DIR="${BASELINE_DIR:-$PROJECT_ROOT/benches/baselines}"
+BENCHMARK_OUTPUT="${BENCHMARK_OUTPUT:-$PROJECT_ROOT/target/criterion}"
+REGRESSION_THRESHOLD="${REGRESSION_THRESHOLD:-2.0}"
 
 echo "=========================================="
 echo "Benchmark Regression Check"
@@ -35,12 +34,17 @@ for bench_dir in "$BENCHMARK_OUTPUT"/*/; do
     fi
     
     BASELINE_FILE="$BASELINE_DIR/${BENCH_NAME}.json"
+    BASELINE_CRITERION_FILE="$BASELINE_DIR/${BENCH_NAME}/new/estimates.json"
     NEW_FILE="$bench_dir/new/estimates.json"
     
     if [ ! -f "$NEW_FILE" ]; then
         continue
     fi
     
+    if [ ! -f "$BASELINE_FILE" ] && [ -f "$BASELINE_CRITERION_FILE" ]; then
+        BASELINE_FILE="$BASELINE_CRITERION_FILE"
+    fi
+
     if [ ! -f "$BASELINE_FILE" ]; then
         echo "[NEW] $BENCH_NAME - no baseline to compare"
         continue

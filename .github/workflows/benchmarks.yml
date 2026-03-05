@@ -24,6 +24,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Checkout main baseline source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: main-baseline
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -48,7 +54,16 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run benchmarks
+        working-directory: main-baseline/rust
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/main-baseline/rust/target
+        run: |
+          cargo bench --bench hydration_benchmark
+
+      - name: Run benchmarks (candidate)
         working-directory: rust
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/rust/target
         run: |
           cargo bench --bench hydration_benchmark
 
@@ -56,22 +71,13 @@ jobs:
         id: compare
         working-directory: rust
         run: |
-          cd scripts/benchmarks
-          chmod +x check.sh
-          ./check.sh
+          chmod +x scripts/benchmarks/check.sh
+          BASELINE_DIR="${{ github.workspace }}/main-baseline/rust/target/criterion" \
+          BENCHMARK_OUTPUT="${{ github.workspace }}/rust/target/criterion" \
+          REGRESSION_THRESHOLD="${{ env.REGRESSION_THRESHOLD }}" \
+          scripts/benchmarks/check.sh 2>&1 | tee compare_output.txt
+          exit ${PIPESTATUS[0]}
         continue-on-error: true
-
-      - name: Update baselines on main branch
-        if: github.ref == 'refs/heads/main' && steps.compare.outcome == 'success'
-        working-directory: rust
-        run: |
-          cd scripts/benchmarks
-          chmod +x update.sh
-          ./update.sh
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add benches/baselines/
-          git commit -m "Update benchmark baselines" || true
 
       - name: Post regression comment on PR
         if: github.event_name == 'pull_request' && steps.compare.outcome == 'failure'
@@ -86,7 +92,7 @@ jobs:
             
             // Try to get detailed comparison
             try {
-              const output = execSync('./rust/scripts/benchmarks/check.sh 2>&1', { encoding: 'utf8' });
+              const output = fs.readFileSync('./rust/compare_output.txt', 'utf8');
               const lines = output.split('\n').filter(l => l.includes('[REGRESSION]'));
               for (const line of lines) {
                 comment += '- ' + line.replace('[REGRESSION]', '').trim() + '\n';
@@ -94,7 +100,7 @@ jobs:
             } catch (e) {}
             
             comment += '\n**Action Required:**\n';
-            comment += '- If this regression is intentional, update baselines with `./rust/scripts/benchmarks/update.sh`\n';
+            comment += '- If this is intentional, include rationale in the PR description and expected impact\n';
             comment += '- If unintended, please investigate and fix the performance regression\n';
             
             github.rest.issues.createComment({

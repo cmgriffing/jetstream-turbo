@@ -339,7 +339,7 @@ Before committing changes, run the benchmark check script to detect any performa
 ./scripts/benchmarks/check.sh
 ```
 
-This compares current results against stored baselines. If any benchmark regresses beyond the 2% threshold, the check will fail and block the commit.
+By default this compares current results against stored local baselines. In CI, the baseline is generated fresh from the repository default branch on every run. If any benchmark regresses beyond the 2% threshold, the check will fail.
 
 ### Updating Baselines
 
@@ -354,10 +354,18 @@ Then commit the updated baseline files.
 ### CI Protection
 
 Benchmarks run automatically on every PR and push to main via GitHub Actions. The workflow:
-1. Runs all benchmarks
-2. Compares against baselines
-3. Fails if any benchmark regresses beyond 2%
-4. Posts a comment on the PR with regression details
+1. Benchmarks the default branch to generate a fresh baseline
+2. Benchmarks the candidate branch/commit
+3. Compares candidate results against the freshly generated default-branch baseline
+4. Fails if any benchmark regresses beyond 2%
+5. Posts a comment on the PR with regression details
+
+### Turbostream PR Policy
+
+All turbostream changes (`rust/**`) must come from a separate branch and pull request.
+
+- Repository rulesets / branch protection should require pull requests for `main` / `master` (hard enforcement)
+- The `Enforce Turbostream PR Policy` workflow validates that pushed commits touching `rust/**` are associated with PRs (CI visibility/audit)
 
 ### Benchmark Categories
 
