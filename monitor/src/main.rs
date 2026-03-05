@@ -50,19 +50,23 @@ async fn main() -> Result<()> {
             tokio::select! {
                 Some(msg) = stream_a.next() => {
                     let count = msg.count;
+                    let delivery_latency_us = msg.delivery_latency_us;
                     stats_for_stream.write().unwrap().update(msg);
-                    uptime_for_status
-                        .write()
-                        .unwrap()
-                        .record_total_count(StreamId::A, count);
+                    let mut tracker = uptime_for_status.write().unwrap();
+                    tracker.record_total_count(StreamId::A, count);
+                    if let Some(lat) = delivery_latency_us {
+                        tracker.record_delivery_latency(StreamId::A, lat);
+                    }
                 }
                 Some(msg) = stream_b.next() => {
                     let count = msg.count;
+                    let delivery_latency_us = msg.delivery_latency_us;
                     stats_for_stream.write().unwrap().update(msg);
-                    uptime_for_status
-                        .write()
-                        .unwrap()
-                        .record_total_count(StreamId::B, count);
+                    let mut tracker = uptime_for_status.write().unwrap();
+                    tracker.record_total_count(StreamId::B, count);
+                    if let Some(lat) = delivery_latency_us {
+                        tracker.record_delivery_latency(StreamId::B, lat);
+                    }
                 }
                 Some(status) = status_a.next() => {
                     uptime_for_status.write().unwrap().handle_connection_status(status);
@@ -116,10 +120,14 @@ async fn main() -> Result<()> {
                         detailed.downtime_b_seconds,
                         detailed.disconnect_count_a,
                         detailed.disconnect_count_b,
-                        detailed.avg_latency_a_ms,
-                        detailed.avg_latency_b_ms,
+                        detailed.avg_connect_time_a_ms,
+                        detailed.avg_connect_time_b_ms,
                         detailed.total_messages_a,
                         detailed.total_messages_b,
+                        detailed.delivery_latency_a_ms,
+                        detailed.delivery_latency_b_ms,
+                        detailed.mttr_a_ms,
+                        detailed.mttr_b_ms,
                     )
                     .await
                 {

@@ -20,10 +20,14 @@ pub struct HourlyUptime {
     pub stream_b_downtime_seconds: i64,
     pub stream_a_disconnects: i64,
     pub stream_b_disconnects: i64,
-    pub stream_a_latency_ms: i64,
-    pub stream_b_latency_ms: i64,
+    pub stream_a_connect_time_ms: i64,
+    pub stream_b_connect_time_ms: i64,
     pub stream_a_messages: i64,
     pub stream_b_messages: i64,
+    pub stream_a_delivery_latency_ms: f64,
+    pub stream_b_delivery_latency_ms: f64,
+    pub stream_a_mttr_ms: i64,
+    pub stream_b_mttr_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -79,10 +83,14 @@ impl Storage {
                 stream_b_downtime_seconds INTEGER NOT NULL DEFAULT 0,
                 stream_a_disconnects INTEGER NOT NULL DEFAULT 0,
                 stream_b_disconnects INTEGER NOT NULL DEFAULT 0,
-                stream_a_latency_ms INTEGER NOT NULL DEFAULT 0,
-                stream_b_latency_ms INTEGER NOT NULL DEFAULT 0,
+                stream_a_connect_time_ms INTEGER NOT NULL DEFAULT 0,
+                stream_b_connect_time_ms INTEGER NOT NULL DEFAULT 0,
                 stream_a_messages INTEGER NOT NULL DEFAULT 0,
                 stream_b_messages INTEGER NOT NULL DEFAULT 0,
+                stream_a_delivery_latency_ms REAL NOT NULL DEFAULT 0.0,
+                stream_b_delivery_latency_ms REAL NOT NULL DEFAULT 0.0,
+                stream_a_mttr_ms INTEGER NOT NULL DEFAULT 0,
+                stream_b_mttr_ms INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             "#,
@@ -90,6 +98,7 @@ impl Storage {
         .execute(&pool)
         .await?;
 
+        // Migration: add columns if they don't exist (for existing databases)
         sqlx::query(
             "ALTER TABLE hourly_uptime ADD COLUMN stream_a_downtime_seconds INTEGER NOT NULL DEFAULT 0"
         )
@@ -99,6 +108,34 @@ impl Storage {
 
         sqlx::query(
             "ALTER TABLE hourly_uptime ADD COLUMN stream_b_downtime_seconds INTEGER NOT NULL DEFAULT 0"
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN stream_a_delivery_latency_ms REAL NOT NULL DEFAULT 0.0"
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN stream_b_delivery_latency_ms REAL NOT NULL DEFAULT 0.0"
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN stream_a_mttr_ms INTEGER NOT NULL DEFAULT 0"
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN stream_b_mttr_ms INTEGER NOT NULL DEFAULT 0"
         )
         .execute(&pool)
         .await
@@ -176,10 +213,14 @@ impl Storage {
         stream_b_downtime_seconds: u64,
         stream_a_disconnects: u64,
         stream_b_disconnects: u64,
-        stream_a_latency_ms: u64,
-        stream_b_latency_ms: u64,
+        stream_a_connect_time_ms: u64,
+        stream_b_connect_time_ms: u64,
         stream_a_messages: u64,
         stream_b_messages: u64,
+        stream_a_delivery_latency_ms: f64,
+        stream_b_delivery_latency_ms: f64,
+        stream_a_mttr_ms: u64,
+        stream_b_mttr_ms: u64,
     ) -> Result<()> {
         let hour_str = hour.format("%Y-%m-%d %H:00:00").to_string();
 
@@ -189,10 +230,12 @@ impl Storage {
                 hour, stream_a_seconds, stream_b_seconds,
                 stream_a_downtime_seconds, stream_b_downtime_seconds,
                 stream_a_disconnects, stream_b_disconnects,
-                stream_a_latency_ms, stream_b_latency_ms,
-                stream_a_messages, stream_b_messages
+                stream_a_connect_time_ms, stream_b_connect_time_ms,
+                stream_a_messages, stream_b_messages,
+                stream_a_delivery_latency_ms, stream_b_delivery_latency_ms,
+                stream_a_mttr_ms, stream_b_mttr_ms
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(hour) DO UPDATE SET
                 stream_a_seconds = excluded.stream_a_seconds,
                 stream_b_seconds = excluded.stream_b_seconds,
@@ -200,10 +243,14 @@ impl Storage {
                 stream_b_downtime_seconds = excluded.stream_b_downtime_seconds,
                 stream_a_disconnects = excluded.stream_a_disconnects,
                 stream_b_disconnects = excluded.stream_b_disconnects,
-                stream_a_latency_ms = excluded.stream_a_latency_ms,
-                stream_b_latency_ms = excluded.stream_b_latency_ms,
+                stream_a_connect_time_ms = excluded.stream_a_connect_time_ms,
+                stream_b_connect_time_ms = excluded.stream_b_connect_time_ms,
                 stream_a_messages = excluded.stream_a_messages,
                 stream_b_messages = excluded.stream_b_messages,
+                stream_a_delivery_latency_ms = excluded.stream_a_delivery_latency_ms,
+                stream_b_delivery_latency_ms = excluded.stream_b_delivery_latency_ms,
+                stream_a_mttr_ms = excluded.stream_a_mttr_ms,
+                stream_b_mttr_ms = excluded.stream_b_mttr_ms,
                 updated_at = CURRENT_TIMESTAMP
             "#,
         )
@@ -214,10 +261,14 @@ impl Storage {
         .bind(stream_b_downtime_seconds as i64)
         .bind(stream_a_disconnects as i64)
         .bind(stream_b_disconnects as i64)
-        .bind(stream_a_latency_ms as i64)
-        .bind(stream_b_latency_ms as i64)
+        .bind(stream_a_connect_time_ms as i64)
+        .bind(stream_b_connect_time_ms as i64)
         .bind(stream_a_messages as i64)
         .bind(stream_b_messages as i64)
+        .bind(stream_a_delivery_latency_ms)
+        .bind(stream_b_delivery_latency_ms)
+        .bind(stream_a_mttr_ms as i64)
+        .bind(stream_b_mttr_ms as i64)
         .execute(&self.pool)
         .await?;
 
@@ -232,8 +283,10 @@ impl Storage {
             SELECT hour, stream_a_seconds, stream_b_seconds,
                    stream_a_downtime_seconds, stream_b_downtime_seconds,
                    stream_a_disconnects, stream_b_disconnects,
-                   stream_a_latency_ms, stream_b_latency_ms,
-                   stream_a_messages, stream_b_messages
+                   stream_a_connect_time_ms, stream_b_connect_time_ms,
+                   stream_a_messages, stream_b_messages,
+                   stream_a_delivery_latency_ms, stream_b_delivery_latency_ms,
+                   stream_a_mttr_ms, stream_b_mttr_ms
             FROM hourly_uptime
             WHERE hour >= ?
             ORDER BY hour ASC

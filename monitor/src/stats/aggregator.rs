@@ -25,8 +25,12 @@ pub struct StreamStats {
     pub downtime_b: f64,
     pub connected_a: bool,
     pub connected_b: bool,
-    pub latency_a_ms: u64,
-    pub latency_b_ms: u64,
+    pub connect_time_a_ms: u64,
+    pub connect_time_b_ms: u64,
+    pub delivery_latency_a_ms: f64,
+    pub delivery_latency_b_ms: f64,
+    pub mttr_a_ms: u64,
+    pub mttr_b_ms: u64,
     pub current_streak_a: f64,
     pub current_streak_b: f64,
 }
@@ -75,7 +79,7 @@ impl StatsAggregator {
 
                 let internal = stats.read().unwrap();
 
-                let (rate_a, rate_b, connected_a, connected_b, latency_a, latency_b) = {
+                let (rate_a, rate_b, connected_a, connected_b, connect_time_a, connect_time_b, delivery_latency_a, delivery_latency_b, mttr_a, mttr_b) = {
                     let up = uptime.read().unwrap();
                     let (rate_a, rate_b) = up.get_average_rates();
                     (
@@ -83,8 +87,12 @@ impl StatsAggregator {
                         rate_b,
                         up.connected_a,
                         up.connected_b,
-                        up.get_avg_latency_a(),
-                        up.get_avg_latency_b(),
+                        up.get_avg_connect_time_a(),
+                        up.get_avg_connect_time_b(),
+                        up.get_delivery_latency_a_ms(),
+                        up.get_delivery_latency_b_ms(),
+                        up.get_mttr_a_ms(),
+                        up.get_mttr_b_ms(),
                     )
                 };
 
@@ -126,8 +134,12 @@ impl StatsAggregator {
                     downtime_b: downtime_b as f64,
                     connected_a,
                     connected_b,
-                    latency_a_ms: latency_a,
-                    latency_b_ms: latency_b,
+                    connect_time_a_ms: connect_time_a,
+                    connect_time_b_ms: connect_time_b,
+                    delivery_latency_a_ms: delivery_latency_a,
+                    delivery_latency_b_ms: delivery_latency_b,
+                    mttr_a_ms: mttr_a,
+                    mttr_b_ms: mttr_b,
                     current_streak_a: streak_a,
                     current_streak_b: streak_b,
                 };
@@ -166,10 +178,10 @@ pub struct UptimeTracker {
     pub connected_at_b: Option<Instant>,
     pub disconnect_count_a: u64,
     pub disconnect_count_b: u64,
-    pub latency_sum_a_ms: u64,
-    pub latency_sum_b_ms: u64,
-    pub latency_count_a: u64,
-    pub latency_count_b: u64,
+    pub connect_time_sum_a_ms: u64,
+    pub connect_time_sum_b_ms: u64,
+    pub connect_time_count_a: u64,
+    pub connect_time_count_b: u64,
     pub total_messages_a: u64,
     pub total_messages_b: u64,
     message_samples_a: VecDeque<(Instant, u64)>,
@@ -185,6 +197,12 @@ pub struct UptimeTracker {
     session_start_disconnected_a: Option<Instant>,
     session_start_disconnected_b: Option<Instant>,
     server_start_time: Instant,
+    delivery_latency_samples_a: VecDeque<(Instant, u64)>,
+    delivery_latency_samples_b: VecDeque<(Instant, u64)>,
+    total_recovery_time_a_ms: u64,
+    total_recovery_time_b_ms: u64,
+    recovery_count_a: u64,
+    recovery_count_b: u64,
 }
 
 impl Default for UptimeTracker {
@@ -196,10 +214,10 @@ impl Default for UptimeTracker {
             connected_at_b: None,
             disconnect_count_a: 0,
             disconnect_count_b: 0,
-            latency_sum_a_ms: 0,
-            latency_sum_b_ms: 0,
-            latency_count_a: 0,
-            latency_count_b: 0,
+            connect_time_sum_a_ms: 0,
+            connect_time_sum_b_ms: 0,
+            connect_time_count_a: 0,
+            connect_time_count_b: 0,
             total_messages_a: 0,
             total_messages_b: 0,
             message_samples_a: VecDeque::new(),
@@ -215,6 +233,12 @@ impl Default for UptimeTracker {
             session_start_disconnected_a: None,
             session_start_disconnected_b: None,
             server_start_time: Instant::now(),
+            delivery_latency_samples_a: VecDeque::new(),
+            delivery_latency_samples_b: VecDeque::new(),
+            total_recovery_time_a_ms: 0,
+            total_recovery_time_b_ms: 0,
+            recovery_count_a: 0,
+            recovery_count_b: 0,
         }
     }
 }
@@ -237,14 +261,19 @@ impl UptimeTracker {
                             let elapsed = now.duration_since(session_start).as_secs();
                             self.disconnected_seconds_a = self.disconnected_seconds_a.saturating_add(elapsed);
                         }
+                        if let Some(disc_at) = self.disconnected_at_a {
+                            let recovery_ms = now.duration_since(disc_at).as_millis() as u64;
+                            self.total_recovery_time_a_ms += recovery_ms;
+                            self.recovery_count_a += 1;
+                        }
                     }
                     self.session_start_a = Some(now);
                     self.connected_a = true;
                     self.connected_at_a = Some(now);
                     self.disconnected_at_a = None;
-                    if let Some(latency) = status.latency_ms {
-                        self.latency_sum_a_ms += latency;
-                        self.latency_count_a += 1;
+                    if let Some(ct) = status.connect_time_ms {
+                        self.connect_time_sum_a_ms += ct;
+                        self.connect_time_count_a += 1;
                     }
                 } else {
                     if let Some(session_start) = self.session_start_a.take() {
@@ -264,14 +293,19 @@ impl UptimeTracker {
                             let elapsed = now.duration_since(session_start).as_secs();
                             self.disconnected_seconds_b = self.disconnected_seconds_b.saturating_add(elapsed);
                         }
+                        if let Some(disc_at) = self.disconnected_at_b {
+                            let recovery_ms = now.duration_since(disc_at).as_millis() as u64;
+                            self.total_recovery_time_b_ms += recovery_ms;
+                            self.recovery_count_b += 1;
+                        }
                     }
                     self.session_start_b = Some(now);
                     self.connected_b = true;
                     self.connected_at_b = Some(now);
                     self.disconnected_at_b = None;
-                    if let Some(latency) = status.latency_ms {
-                        self.latency_sum_b_ms += latency;
-                        self.latency_count_b += 1;
+                    if let Some(ct) = status.connect_time_ms {
+                        self.connect_time_sum_b_ms += ct;
+                        self.connect_time_count_b += 1;
                     }
                 } else {
                     if let Some(session_start) = self.session_start_b.take() {
@@ -306,6 +340,67 @@ impl UptimeTracker {
                 self.total_messages_b = total_count;
                 Self::record_sample(&mut self.message_samples_b, now, total_count);
             }
+        }
+    }
+
+    pub fn record_delivery_latency(&mut self, stream_id: StreamId, latency_us: u64) {
+        let now = Instant::now();
+        match stream_id {
+            StreamId::A => {
+                self.delivery_latency_samples_a.push_back((now, latency_us));
+                while let Some((t, _)) = self.delivery_latency_samples_a.front() {
+                    if now.duration_since(*t) > Self::RATE_WINDOW {
+                        self.delivery_latency_samples_a.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            StreamId::B => {
+                self.delivery_latency_samples_b.push_back((now, latency_us));
+                while let Some((t, _)) = self.delivery_latency_samples_b.front() {
+                    if now.duration_since(*t) > Self::RATE_WINDOW {
+                        self.delivery_latency_samples_b.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    fn avg_delivery_latency_ms(samples: &VecDeque<(Instant, u64)>, now: Instant) -> f64 {
+        let valid: Vec<_> = samples.iter()
+            .filter(|(t, _)| now.duration_since(*t) <= Self::RATE_WINDOW)
+            .collect();
+        if valid.is_empty() {
+            return 0.0;
+        }
+        let sum: u64 = valid.iter().map(|(_, v)| v).sum();
+        (sum as f64 / valid.len() as f64) / 1000.0 // us -> ms
+    }
+
+    pub fn get_delivery_latency_a_ms(&self) -> f64 {
+        Self::avg_delivery_latency_ms(&self.delivery_latency_samples_a, Instant::now())
+    }
+
+    pub fn get_delivery_latency_b_ms(&self) -> f64 {
+        Self::avg_delivery_latency_ms(&self.delivery_latency_samples_b, Instant::now())
+    }
+
+    pub fn get_mttr_a_ms(&self) -> u64 {
+        if self.recovery_count_a > 0 {
+            self.total_recovery_time_a_ms / self.recovery_count_a
+        } else {
+            0
+        }
+    }
+
+    pub fn get_mttr_b_ms(&self) -> u64 {
+        if self.recovery_count_b > 0 {
+            self.total_recovery_time_b_ms / self.recovery_count_b
+        } else {
+            0
         }
     }
 
@@ -454,17 +549,17 @@ impl UptimeTracker {
         self.total_messages_b = total_b;
     }
 
-    pub fn get_avg_latency_a(&self) -> u64 {
-        if self.latency_count_a > 0 {
-            self.latency_sum_a_ms / self.latency_count_a
+    pub fn get_avg_connect_time_a(&self) -> u64 {
+        if self.connect_time_count_a > 0 {
+            self.connect_time_sum_a_ms / self.connect_time_count_a
         } else {
             0
         }
     }
 
-    pub fn get_avg_latency_b(&self) -> u64 {
-        if self.latency_count_b > 0 {
-            self.latency_sum_b_ms / self.latency_count_b
+    pub fn get_avg_connect_time_b(&self) -> u64 {
+        if self.connect_time_count_b > 0 {
+            self.connect_time_sum_b_ms / self.connect_time_count_b
         } else {
             0
         }
@@ -498,8 +593,8 @@ impl UptimeTracker {
         let (current_a_secs, current_b_secs) = self.get_current_uptime_percentage();
         let current_a = current_a_secs as u64;
         let current_b = current_b_secs as u64;
-        let avg_latency_a = self.get_avg_latency_a();
-        let avg_latency_b = self.get_avg_latency_b();
+        let avg_connect_time_a = self.get_avg_connect_time_a();
+        let avg_connect_time_b = self.get_avg_connect_time_b();
         let (downtime_a, downtime_b) = self.get_all_time_downtime_seconds();
 
         let rate_a = if current_a > 0 {
@@ -530,8 +625,12 @@ impl UptimeTracker {
             },
             disconnect_count_a: self.disconnect_count_a,
             disconnect_count_b: self.disconnect_count_b,
-            avg_latency_a_ms: avg_latency_a,
-            avg_latency_b_ms: avg_latency_b,
+            avg_connect_time_a_ms: avg_connect_time_a,
+            avg_connect_time_b_ms: avg_connect_time_b,
+            delivery_latency_a_ms: self.get_delivery_latency_a_ms(),
+            delivery_latency_b_ms: self.get_delivery_latency_b_ms(),
+            mttr_a_ms: self.get_mttr_a_ms(),
+            mttr_b_ms: self.get_mttr_b_ms(),
             total_messages_a: self.total_messages_a,
             total_messages_b: self.total_messages_b,
             avg_rate_a: rate_a,
@@ -554,8 +653,12 @@ pub struct UptimeDetailedStats {
     pub uptime_b_percent: f64,
     pub disconnect_count_a: u64,
     pub disconnect_count_b: u64,
-    pub avg_latency_a_ms: u64,
-    pub avg_latency_b_ms: u64,
+    pub avg_connect_time_a_ms: u64,
+    pub avg_connect_time_b_ms: u64,
+    pub delivery_latency_a_ms: f64,
+    pub delivery_latency_b_ms: f64,
+    pub mttr_a_ms: u64,
+    pub mttr_b_ms: u64,
     pub total_messages_a: u64,
     pub total_messages_b: u64,
     pub avg_rate_a: f64,

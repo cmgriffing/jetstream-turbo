@@ -1,4 +1,6 @@
+use chrono::Utc;
 use futures::{Stream, StreamExt};
+use serde::Deserialize;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
@@ -12,10 +14,23 @@ pub enum StreamId {
     B,
 }
 
+#[derive(Deserialize)]
+struct TimeOnly {
+    time_us: Option<u64>,
+}
+
+fn extract_delivery_latency_us(text: &str) -> Option<u64> {
+    let parsed: TimeOnly = serde_json::from_str(text).ok()?;
+    let time_us = parsed.time_us?;
+    let now_us = Utc::now().timestamp_micros() as u64;
+    now_us.checked_sub(time_us)
+}
+
 #[derive(Debug, Clone)]
 pub struct StreamMessage {
     pub stream_id: StreamId,
     pub count: u64,
+    pub delivery_latency_us: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -23,7 +38,7 @@ pub struct ConnectionStatus {
     pub stream_id: StreamId,
     pub connected: bool,
     pub connected_at: Option<Instant>,
-    pub latency_ms: Option<u64>,
+    pub connect_time_ms: Option<u64>,
 }
 
 pub struct StreamClient {
@@ -60,16 +75,19 @@ impl StreamClient {
                         let mut count: u64 = 0;
                         let mut last_send = Instant::now();
                         let update_interval = Duration::from_millis(100);
+                        let mut last_delivery_latency_us: Option<u64> = None;
 
                         while let Some(msg_result) = read.next().await {
                             match msg_result {
-                                Ok(Message::Text(_)) => {
+                                Ok(Message::Text(text)) => {
                                     count += 1;
+                                    last_delivery_latency_us = extract_delivery_latency_us(&text);
                                     if last_send.elapsed() >= update_interval {
                                         if tx
                                             .send(StreamMessage {
                                                 stream_id,
                                                 count: cumulative_count.saturating_add(count),
+                                                delivery_latency_us: last_delivery_latency_us,
                                             })
                                             .is_err()
                                         {
@@ -97,6 +115,7 @@ impl StreamClient {
                             .send(StreamMessage {
                                 stream_id,
                                 count: cumulative_count,
+                                delivery_latency_us: last_delivery_latency_us,
                             })
                             .is_err()
                         {
@@ -137,30 +156,33 @@ impl StreamClient {
 
                 match connect_async(&url).await {
                     Ok((ws_stream, _)) => {
-                        let latency_ms = connect_start.elapsed().as_millis() as u64;
-                        info!(stream = ?stream_id, "Connected successfully in {}ms", latency_ms);
+                        let connect_time_ms = connect_start.elapsed().as_millis() as u64;
+                        info!(stream = ?stream_id, "Connected successfully in {}ms", connect_time_ms);
 
                         let _ = tx_status.send(ConnectionStatus {
                             stream_id,
                             connected: true,
                             connected_at: Some(connect_start),
-                            latency_ms: Some(latency_ms),
+                            connect_time_ms: Some(connect_time_ms),
                         });
 
                         let (_, mut read) = ws_stream.split();
                         let mut count: u64 = 0;
                         let mut last_send = Instant::now();
                         let update_interval = Duration::from_millis(100);
+                        let mut last_delivery_latency_us: Option<u64> = None;
 
                         while let Some(msg_result) = read.next().await {
                             match msg_result {
-                                Ok(Message::Text(_)) => {
+                                Ok(Message::Text(text)) => {
                                     count += 1;
+                                    last_delivery_latency_us = extract_delivery_latency_us(&text);
                                     if last_send.elapsed() >= update_interval {
                                         if tx_msg
                                             .send(StreamMessage {
                                                 stream_id,
                                                 count: cumulative_count.saturating_add(count),
+                                                delivery_latency_us: last_delivery_latency_us,
                                             })
                                             .is_err()
                                         {
@@ -188,6 +210,7 @@ impl StreamClient {
                             .send(StreamMessage {
                                 stream_id,
                                 count: cumulative_count,
+                                delivery_latency_us: last_delivery_latency_us,
                             })
                             .is_err()
                         {
@@ -203,7 +226,7 @@ impl StreamClient {
                     stream_id,
                     connected: false,
                     connected_at: None,
-                    latency_ms: None,
+                    connect_time_ms: None,
                 });
 
                 warn!(stream = ?stream_id, "Reconnecting in {:?}...", reconnect_delay);

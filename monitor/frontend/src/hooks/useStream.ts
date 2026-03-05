@@ -20,6 +20,10 @@ export interface StreamStats {
   connected_b?: boolean
   stream_a_name?: string
   stream_b_name?: string
+  delivery_latency_a_ms?: number
+  delivery_latency_b_ms?: number
+  mttr_a_ms?: number
+  mttr_b_ms?: number
 }
 
 export function useWebSocket(
@@ -112,4 +116,8 @@ export interface HourlyUptime {
   stream_b_disconnects: number
   stream_a_messages: number
   stream_b_messages: number
+  stream_a_delivery_latency_ms: number
+  stream_b_delivery_latency_ms: number
+  stream_a_mttr_ms: number
+  stream_b_mttr_ms: number
 }
