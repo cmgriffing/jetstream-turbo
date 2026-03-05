@@ -100,7 +100,7 @@ export const StreamCard = memo(function StreamCard({
               >
                 <Info className="w-2.5 h-2.5" />
               <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 p-2 bg-[#1a1a1a] text-[#8a8a8a] text-[10px] font-mono rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10 border border-[#252525]">
-                Average messages/second while connected since server started
+                Messages/second over the last 10 seconds
               </div>
             </button>
           </span>

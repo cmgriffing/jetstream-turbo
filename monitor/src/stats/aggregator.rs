@@ -1,8 +1,9 @@
 use crate::stream::{ConnectionStatus, StreamId, StreamMessage};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +172,8 @@ pub struct UptimeTracker {
     pub latency_count_b: u64,
     pub total_messages_a: u64,
     pub total_messages_b: u64,
+    message_samples_a: VecDeque<(Instant, u64)>,
+    message_samples_b: VecDeque<(Instant, u64)>,
     session_start_a: Option<Instant>,
     session_start_b: Option<Instant>,
     connected_seconds_a: u64,
@@ -199,6 +202,8 @@ impl Default for UptimeTracker {
             latency_count_b: 0,
             total_messages_a: 0,
             total_messages_b: 0,
+            message_samples_a: VecDeque::new(),
+            message_samples_b: VecDeque::new(),
             session_start_a: None,
             session_start_b: None,
             connected_seconds_a: 0,
@@ -215,6 +220,8 @@ impl Default for UptimeTracker {
 }
 
 impl UptimeTracker {
+    const RATE_WINDOW: Duration = Duration::from_secs(10);
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -285,6 +292,56 @@ impl UptimeTracker {
             StreamId::A => self.total_messages_a += 1,
             StreamId::B => self.total_messages_b += 1,
         }
+    }
+
+    pub fn record_total_count(&mut self, stream_id: StreamId, total_count: u64) {
+        let now = Instant::now();
+
+        match stream_id {
+            StreamId::A => {
+                self.total_messages_a = total_count;
+                Self::record_sample(&mut self.message_samples_a, now, total_count);
+            }
+            StreamId::B => {
+                self.total_messages_b = total_count;
+                Self::record_sample(&mut self.message_samples_b, now, total_count);
+            }
+        }
+    }
+
+    fn record_sample(samples: &mut VecDeque<(Instant, u64)>, now: Instant, total_count: u64) {
+        samples.push_back((now, total_count));
+
+        while let Some((sample_time, _)) = samples.front() {
+            if now.duration_since(*sample_time) > Self::RATE_WINDOW {
+                samples.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn rolling_rate(samples: &VecDeque<(Instant, u64)>, now: Instant) -> f64 {
+        let (latest_time, latest_total) = match samples.back() {
+            Some(sample) => sample,
+            None => return 0.0,
+        };
+
+        if now.duration_since(*latest_time) > Self::RATE_WINDOW {
+            return 0.0;
+        }
+
+        let (oldest_time, oldest_total) = match samples.front() {
+            Some(sample) => sample,
+            None => return 0.0,
+        };
+
+        let elapsed = latest_time.duration_since(*oldest_time).as_secs_f64();
+        if elapsed <= 0.0 {
+            return 0.0;
+        }
+
+        latest_total.saturating_sub(*oldest_total) as f64 / elapsed
     }
 
     pub fn get_current_uptime_percentage(&self) -> (f64, f64) {
@@ -415,40 +472,8 @@ impl UptimeTracker {
 
     pub fn get_average_rates(&self) -> (f64, f64) {
         let now = Instant::now();
-
-        let connected_seconds_a = if self.connected_a {
-            if let Some(session_start) = self.session_start_a {
-                self.connected_seconds_a
-                    .saturating_add(now.duration_since(session_start).as_secs())
-            } else {
-                self.connected_seconds_a
-            }
-        } else {
-            self.connected_seconds_a
-        };
-
-        let connected_seconds_b = if self.connected_b {
-            if let Some(session_start) = self.session_start_b {
-                self.connected_seconds_b
-                    .saturating_add(now.duration_since(session_start).as_secs())
-            } else {
-                self.connected_seconds_b
-            }
-        } else {
-            self.connected_seconds_b
-        };
-
-        let rate_a = if connected_seconds_a > 0 {
-            self.total_messages_a as f64 / connected_seconds_a as f64
-        } else {
-            0.0
-        };
-        
-        let rate_b = if connected_seconds_b > 0 {
-            self.total_messages_b as f64 / connected_seconds_b as f64
-        } else {
-            0.0
-        };
+        let rate_a = Self::rolling_rate(&self.message_samples_a, now);
+        let rate_b = Self::rolling_rate(&self.message_samples_b, now);
 
         (rate_a, rate_b)
     }
