@@ -70,17 +70,23 @@ impl RedisStore {
             return Ok(vec![]);
         }
 
+        // Pre-serialize outside the lock to minimize lock hold time
+        let prepared: Vec<(String, String, String, String, String)> = records
+            .iter()
+            .map(|record| {
+                let message_json = serde_json::to_string(record)?;
+                let message_id = generate_message_id(record);
+                let at_uri = record.get_at_uri().unwrap_or_default();
+                let did = record.get_did().to_string();
+                let hydrated_at = record.processed_at.to_rfc3339();
+                Ok((message_id, at_uri, did, message_json, hydrated_at))
+            })
+            .collect::<Result<Vec<_>, serde_json::Error>>()?;
+
         let mut client = self.client.lock().await;
-        let mut message_ids = Vec::with_capacity(records.len());
+        let mut message_ids = Vec::with_capacity(prepared.len());
 
-        // Batch Redis operations - acquire lock once for all records
-        for record in records {
-            let message_json = serde_json::to_string(record)?;
-            let message_id = generate_message_id(record);
-            let at_uri = record.get_at_uri().unwrap_or_default();
-            let did = record.get_did().to_string();
-            let hydrated_at = record.processed_at.to_rfc3339();
-
+        for (message_id, at_uri, did, message_json, hydrated_at) in prepared {
             let values = vec![
                 ("at_uri", at_uri),
                 ("did", did),
