@@ -22,20 +22,26 @@ impl Hydrator {
     #[instrument(name = "hydrate_message", skip(self, message), fields(did, at_uri, cache_hit))]
     pub async fn hydrate_message(&self, message: JetstreamMessage) -> TurboResult<EnrichedRecord> {
         let start_time = Instant::now();
-        let mut enriched = EnrichedRecord::new(message.clone());
 
-        let author_did = message.extract_did();
-        let at_uri = message.extract_at_uri().map(|s| s.to_string());
+        // Extract fields before moving message to avoid clone
+        let author_did = message.extract_did().to_string();
+        let at_uri = message.extract_at_uri();
+        let mentioned_dids: Vec<String> = message
+            .extract_mentioned_dids()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+        let has_at_uri = at_uri.is_some();
+
+        let mut enriched = EnrichedRecord::new(message);
 
         tracing::Span::current().record("did", &author_did);
         if let Some(ref uri) = at_uri {
             tracing::Span::current().record("at_uri", uri);
         }
 
-        let mentioned_dids = message.extract_mentioned_dids();
-
-        if let Some(_at_uri) = message.extract_at_uri() {
-            let mut author_profile = self.cache.get_user_profile(author_did).await;
+        if has_at_uri {
+            let mut author_profile = self.cache.get_user_profile(&author_did).await;
 
             let hit = author_profile.is_some();
             tracing::Span::current().record("cache_hit", hit);
@@ -43,14 +49,14 @@ impl Hydrator {
             if !hit {
                 let profiles = self
                     .bluesky_client
-                    .bulk_fetch_profiles(&[author_did.to_string()])
+                    .bulk_fetch_profiles(&[author_did.clone()])
                     .await?;
 
                 if let Some(profile) = profiles.into_iter().next().flatten() {
                     let profile_arc = Arc::new(profile);
                     author_profile = Some(Arc::clone(&profile_arc));
                     self.cache
-                        .set_user_profile(author_did.to_string(), profile_arc)
+                        .set_user_profile(author_did.clone(), profile_arc)
                         .await;
                 }
             }
@@ -86,9 +92,14 @@ impl Hydrator {
         let mut unique_uris = std::collections::HashSet::new();
 
         for message in &messages {
-            unique_dids.insert(message.extract_did().to_string());
-            for did in message.extract_mentioned_dids() {
+            let did = message.extract_did();
+            if !unique_dids.contains(did) {
                 unique_dids.insert(did.to_string());
+            }
+            for did in message.extract_mentioned_dids() {
+                if !unique_dids.contains(did) {
+                    unique_dids.insert(did.to_string());
+                }
             }
             for uri in message.extract_post_uris() {
                 unique_uris.insert(uri);
@@ -110,17 +121,17 @@ impl Hydrator {
         tracing::Span::current().record("cache_check_time_ms", cache_check_time);
 
         let uncached_dids: Vec<String> = dids
-            .iter()
+            .into_iter()
             .zip(cached_profile_flags)
             .filter(|(_, is_cached)| !*is_cached)
-            .map(|(did, _)| did.clone())
+            .map(|(did, _)| did)
             .collect();
 
         let uncached_uris: Vec<String> = uris
-            .iter()
+            .into_iter()
             .zip(cached_post_flags)
             .filter(|(_, is_cached)| !*is_cached)
-            .map(|(uri, _)| uri.clone())
+            .map(|(uri, _)| uri)
             .collect();
 
         // Fetch profiles and posts sequentially to avoid rate limiting
