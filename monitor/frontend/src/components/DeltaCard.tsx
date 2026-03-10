@@ -32,9 +32,12 @@ export function DeltaCard({
       : "TIED";
 
   return (
-    <div className={`monitor-delta-card ${toneClass}`}>
+    <div className={`monitor-delta-card ${toneClass}`} role="status" aria-live="polite">
       <div className="monitor-delta-grid">
-        <p className="monitor-delta-label">Current Diff</p>
+        <div className="monitor-delta-head">
+          <p className="monitor-delta-label">Current Diff</p>
+          <p className="monitor-delta-comparison">{streamAName} vs {streamBName}</p>
+        </div>
 
         <p className={`monitor-delta-value ${valueClass}`}>
           <span>{caret}</span>

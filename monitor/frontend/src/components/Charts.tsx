@@ -152,12 +152,14 @@ function getStateOverlayMessage(state: ChartRenderState): string {
 function ChartCardShell({
   title,
   body,
+  renderState,
 }: {
   title: string;
   body: JSX.Element;
+  renderState?: ChartRenderState;
 }) {
   return (
-    <div className="monitor-panel monitor-chart-card">
+    <div className="monitor-panel monitor-chart-card" data-render-state={renderState}>
       <div className="monitor-chart-header">
         <h3 className="monitor-chart-title">{title}</h3>
       </div>
@@ -178,7 +180,12 @@ function ChartStateEmpty({
   return (
     <ChartCardShell
       title={title}
-      body={<div className={`monitor-state-empty ${heightClass}`}>{getStateMessage(state)}</div>}
+      renderState={state}
+      body={
+        <div className={`monitor-state-empty monitor-chart-frame ${heightClass}`}>
+          {getStateMessage(state)}
+        </div>
+      }
     />
   );
 }
@@ -187,7 +194,7 @@ function ChartStateOverlay({ state }: { state: ChartRenderState }) {
   const message = getStateOverlayMessage(state);
   if (!message) return null;
 
-  return <div className="monitor-state-overlay">{message}</div>;
+  return <div className={`monitor-state-overlay monitor-state-overlay--${state}`}>{message}</div>;
 }
 
 export function UptimeChart24h({
@@ -294,10 +301,11 @@ export function UptimeChart24h({
   return (
     <ChartCardShell
       title={title}
+      renderState={renderState}
       body={
         <>
           <ChartStateOverlay state={renderState} />
-          <div className="relative h-[288px] w-full">
+          <div className="monitor-chart-frame relative h-[288px] w-full">
             <Suspense fallback={<ChartLoader />}>
               <Bar data={chartContent.chartData} options={chartContent.options} />
             </Suspense>
@@ -424,10 +432,11 @@ export function RateChart({
   return (
     <ChartCardShell
       title={title}
+      renderState={renderState}
       body={
         <>
           <ChartStateOverlay state={renderState} />
-          <div className="relative h-[236px] w-full">
+          <div className="monitor-chart-frame relative h-[236px] w-full">
             <Suspense fallback={<ChartLoader />}>
               <Line data={chartContent.chartData} options={chartContent.options} />
             </Suspense>

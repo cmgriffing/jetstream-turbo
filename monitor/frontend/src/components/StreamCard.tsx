@@ -58,7 +58,7 @@ export const StreamCard = memo(function StreamCard({
   return (
     <article className={cn("monitor-stream-card", streamVariantClass)}>
       <div className="monitor-stream-top">
-        <div>
+        <div className="monitor-stream-identity">
           <p className="monitor-eyebrow">Stream</p>
           <p className="monitor-stream-name">{name}</p>
         </div>
@@ -75,7 +75,7 @@ export const StreamCard = memo(function StreamCard({
         </span>
       </div>
 
-      <div>
+      <div className="monitor-stream-main">
         <p className="monitor-stream-count">{count.toLocaleString()}</p>
         <p className="monitor-stream-subtext">
           <Zap className="mr-1 inline h-3 w-3" aria-hidden="true" />
@@ -87,7 +87,7 @@ export const StreamCard = memo(function StreamCard({
       </div>
 
       <div className="monitor-stream-metrics">
-        <div>
+        <div className="monitor-stream-metric">
           <p className="monitor-stream-metric-label">
             Rate
             <button
@@ -103,11 +103,11 @@ export const StreamCard = memo(function StreamCard({
           </p>
           <p className="monitor-stream-metric-value">
             {rate.toFixed(0)}
-            <span className="monitor-stream-metric-value--empty text-xs">/s</span>
+            <span className="monitor-stream-metric-unit">/s</span>
           </p>
         </div>
 
-        <div>
+        <div className="monitor-stream-metric">
           <p className="monitor-stream-metric-label">
             Latency
             <button
@@ -127,7 +127,7 @@ export const StreamCard = memo(function StreamCard({
                 {deliveryLatencyMs < 1000
                   ? deliveryLatencyMs.toFixed(0)
                   : `${(deliveryLatencyMs / 1000).toFixed(1)}s`}
-                <span className="monitor-stream-metric-value--empty text-xs">
+                <span className="monitor-stream-metric-unit">
                   {deliveryLatencyMs < 1000 ? "ms" : ""}
                 </span>
               </>
@@ -137,7 +137,7 @@ export const StreamCard = memo(function StreamCard({
           </p>
         </div>
 
-        <div>
+        <div className="monitor-stream-metric">
           <p className="monitor-stream-metric-label">Streak</p>
           <p className="monitor-stream-metric-value">
             {streak ? (
@@ -148,13 +148,13 @@ export const StreamCard = memo(function StreamCard({
           </p>
         </div>
 
-        <div>
+        <div className="monitor-stream-metric">
           <p className="monitor-stream-metric-label">Uptime</p>
           <p className="monitor-stream-metric-value">
             {uptimeAllTime !== undefined ? (
               <>
                 {uptimeAllTime.toFixed(1)}
-                <span className="monitor-stream-metric-value--empty text-xs">%</span>
+                <span className="monitor-stream-metric-unit">%</span>
               </>
             ) : (
               <span className="monitor-stream-metric-value--empty">--</span>
