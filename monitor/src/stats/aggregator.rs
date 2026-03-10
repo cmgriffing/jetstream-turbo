@@ -79,7 +79,18 @@ impl StatsAggregator {
 
                 let internal = stats.read().unwrap();
 
-                let (rate_a, rate_b, connected_a, connected_b, connect_time_a, connect_time_b, delivery_latency_a, delivery_latency_b, mttr_a, mttr_b) = {
+                let (
+                    rate_a,
+                    rate_b,
+                    connected_a,
+                    connected_b,
+                    connect_time_a,
+                    connect_time_b,
+                    delivery_latency_a,
+                    delivery_latency_b,
+                    mttr_a,
+                    mttr_b,
+                ) = {
                     let up = uptime.read().unwrap();
                     let (rate_a, rate_b) = up.get_average_rates();
                     (
@@ -205,6 +216,28 @@ pub struct UptimeTracker {
     recovery_count_b: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct UptimeMetricsSnapshot {
+    pub uptime_a_seconds: u64,
+    pub uptime_b_seconds: u64,
+    pub downtime_a_seconds: u64,
+    pub downtime_b_seconds: u64,
+    pub disconnect_count_a: u64,
+    pub disconnect_count_b: u64,
+    pub connect_time_sum_a_ms: u64,
+    pub connect_time_sum_b_ms: u64,
+    pub connect_time_count_a: u64,
+    pub connect_time_count_b: u64,
+    pub total_messages_a: u64,
+    pub total_messages_b: u64,
+    pub total_recovery_time_a_ms: u64,
+    pub total_recovery_time_b_ms: u64,
+    pub recovery_count_a: u64,
+    pub recovery_count_b: u64,
+    pub delivery_latency_a_ms: f64,
+    pub delivery_latency_b_ms: f64,
+}
+
 impl Default for UptimeTracker {
     fn default() -> Self {
         Self {
@@ -252,14 +285,15 @@ impl UptimeTracker {
 
     pub fn handle_connection_status(&mut self, status: ConnectionStatus) {
         let now = Instant::now();
-        
+
         match status.stream_id {
             StreamId::A => {
                 if status.connected {
                     if !self.connected_a {
                         if let Some(session_start) = self.session_start_disconnected_a.take() {
                             let elapsed = now.duration_since(session_start).as_secs();
-                            self.disconnected_seconds_a = self.disconnected_seconds_a.saturating_add(elapsed);
+                            self.disconnected_seconds_a =
+                                self.disconnected_seconds_a.saturating_add(elapsed);
                         }
                         if let Some(disc_at) = self.disconnected_at_a {
                             let recovery_ms = now.duration_since(disc_at).as_millis() as u64;
@@ -291,7 +325,8 @@ impl UptimeTracker {
                     if !self.connected_b {
                         if let Some(session_start) = self.session_start_disconnected_b.take() {
                             let elapsed = now.duration_since(session_start).as_secs();
-                            self.disconnected_seconds_b = self.disconnected_seconds_b.saturating_add(elapsed);
+                            self.disconnected_seconds_b =
+                                self.disconnected_seconds_b.saturating_add(elapsed);
                         }
                         if let Some(disc_at) = self.disconnected_at_b {
                             let recovery_ms = now.duration_since(disc_at).as_millis() as u64;
@@ -370,7 +405,8 @@ impl UptimeTracker {
     }
 
     fn avg_delivery_latency_ms(samples: &VecDeque<(Instant, u64)>, now: Instant) -> f64 {
-        let valid: Vec<_> = samples.iter()
+        let valid: Vec<_> = samples
+            .iter()
             .filter(|(t, _)| now.duration_since(*t) <= Self::RATE_WINDOW)
             .collect();
         if valid.is_empty() {
@@ -439,17 +475,44 @@ impl UptimeTracker {
         latest_total.saturating_sub(*oldest_total) as f64 / elapsed
     }
 
+    pub fn get_all_time_uptime_seconds(&self) -> (u64, u64) {
+        let now = Instant::now();
+
+        let uptime_a = if self.connected_a {
+            let current_session = self
+                .connected_at_a
+                .map(|start| now.duration_since(start).as_secs())
+                .unwrap_or(0);
+            self.connected_seconds_a.saturating_add(current_session)
+        } else {
+            self.connected_seconds_a
+        };
+
+        let uptime_b = if self.connected_b {
+            let current_session = self
+                .connected_at_b
+                .map(|start| now.duration_since(start).as_secs())
+                .unwrap_or(0);
+            self.connected_seconds_b.saturating_add(current_session)
+        } else {
+            self.connected_seconds_b
+        };
+
+        (uptime_a, uptime_b)
+    }
+
     pub fn get_current_uptime_percentage(&self) -> (f64, f64) {
         let now = Instant::now();
-        
+
         let uptime_a = if self.connected_a {
             100.0
         } else {
             let connected_time = self.connected_seconds_a;
-            let disconnected_time = self.disconnected_at_a
+            let disconnected_time = self
+                .disconnected_at_a
                 .map(|d| now.duration_since(d).as_secs())
                 .unwrap_or(0);
-            
+
             if connected_time == 0 && disconnected_time == 0 {
                 0.0
             } else {
@@ -457,15 +520,16 @@ impl UptimeTracker {
                 (connected_time as f64 / total as f64) * 100.0
             }
         };
-        
+
         let uptime_b = if self.connected_b {
             100.0
         } else {
             let connected_time = self.connected_seconds_b;
-            let disconnected_time = self.disconnected_at_b
+            let disconnected_time = self
+                .disconnected_at_b
                 .map(|d| now.duration_since(d).as_secs())
                 .unwrap_or(0);
-            
+
             if connected_time == 0 && disconnected_time == 0 {
                 0.0
             } else {
@@ -478,70 +542,94 @@ impl UptimeTracker {
     }
 
     pub fn get_all_time_uptime_percentage(&self) -> (f64, f64) {
-        let now = Instant::now();
-        let server_run_time = now.duration_since(self.server_start_time).as_secs();
-        
-        if server_run_time == 0 {
-            return (0.0, 0.0);
-        }
+        let (uptime_a, uptime_b) = self.get_all_time_uptime_seconds();
+        let (downtime_a, downtime_b) = self.get_all_time_downtime_seconds();
 
-        let uptime_a = if self.connected_a {
-            let current_session = now.duration_since(self.connected_at_a.unwrap_or(self.server_start_time)).as_secs();
-            let total = self.connected_seconds_a + current_session;
-            (total as f64 / server_run_time as f64) * 100.0
+        let total_a = uptime_a.saturating_add(downtime_a);
+        let total_b = uptime_b.saturating_add(downtime_b);
+
+        let uptime_pct_a = if total_a > 0 {
+            (uptime_a as f64 / total_a as f64) * 100.0
         } else {
-            (self.connected_seconds_a as f64 / server_run_time as f64) * 100.0
+            0.0
+        };
+        let uptime_pct_b = if total_b > 0 {
+            (uptime_b as f64 / total_b as f64) * 100.0
+        } else {
+            0.0
         };
 
-        let uptime_b = if self.connected_b {
-            let current_session = now.duration_since(self.connected_at_b.unwrap_or(self.server_start_time)).as_secs();
-            let total = self.connected_seconds_b + current_session;
-            (total as f64 / server_run_time as f64) * 100.0
-        } else {
-            (self.connected_seconds_b as f64 / server_run_time as f64) * 100.0
-        };
-
-        (uptime_a.min(100.0), uptime_b.min(100.0))
+        (uptime_pct_a.min(100.0), uptime_pct_b.min(100.0))
     }
 
     pub fn get_all_time_downtime_seconds(&self) -> (u64, u64) {
         let now = Instant::now();
-        
+
         let downtime_a = if self.connected_a {
             self.disconnected_seconds_a
         } else {
-            let current_disconnect = self.disconnected_at_a
+            let current_disconnect = self
+                .disconnected_at_a
                 .map(|d| now.duration_since(d).as_secs())
                 .unwrap_or(0);
-            self.disconnected_seconds_a.saturating_add(current_disconnect)
+            self.disconnected_seconds_a
+                .saturating_add(current_disconnect)
         };
-        
+
         let downtime_b = if self.connected_b {
             self.disconnected_seconds_b
         } else {
-            let current_disconnect = self.disconnected_at_b
+            let current_disconnect = self
+                .disconnected_at_b
                 .map(|d| now.duration_since(d).as_secs())
                 .unwrap_or(0);
-            self.disconnected_seconds_b.saturating_add(current_disconnect)
+            self.disconnected_seconds_b
+                .saturating_add(current_disconnect)
         };
-        
+
         (downtime_a, downtime_b)
     }
 
     pub fn get_all_time_uptime_from_downtime(&self) -> (f64, f64) {
         let now = Instant::now();
         let server_run_time = now.duration_since(self.server_start_time).as_secs();
-        
+
         if server_run_time == 0 {
             return (0.0, 0.0);
         }
-        
+
         let (downtime_a, downtime_b) = self.get_all_time_downtime_seconds();
-        
+
         let uptime_a = 100.0 - ((downtime_a as f64 / server_run_time as f64) * 100.0);
         let uptime_b = 100.0 - ((downtime_b as f64 / server_run_time as f64) * 100.0);
-        
+
         (uptime_a.max(0.0).min(100.0), uptime_b.max(0.0).min(100.0))
+    }
+
+    pub fn get_metrics_snapshot(&self) -> UptimeMetricsSnapshot {
+        let (uptime_a_seconds, uptime_b_seconds) = self.get_all_time_uptime_seconds();
+        let (downtime_a_seconds, downtime_b_seconds) = self.get_all_time_downtime_seconds();
+
+        UptimeMetricsSnapshot {
+            uptime_a_seconds,
+            uptime_b_seconds,
+            downtime_a_seconds,
+            downtime_b_seconds,
+            disconnect_count_a: self.disconnect_count_a,
+            disconnect_count_b: self.disconnect_count_b,
+            connect_time_sum_a_ms: self.connect_time_sum_a_ms,
+            connect_time_sum_b_ms: self.connect_time_sum_b_ms,
+            connect_time_count_a: self.connect_time_count_a,
+            connect_time_count_b: self.connect_time_count_b,
+            total_messages_a: self.total_messages_a,
+            total_messages_b: self.total_messages_b,
+            total_recovery_time_a_ms: self.total_recovery_time_a_ms,
+            total_recovery_time_b_ms: self.total_recovery_time_b_ms,
+            recovery_count_a: self.recovery_count_a,
+            recovery_count_b: self.recovery_count_b,
+            delivery_latency_a_ms: self.get_delivery_latency_a_ms(),
+            delivery_latency_b_ms: self.get_delivery_latency_b_ms(),
+        }
     }
 
     pub fn load_totals(&mut self, total_a: u64, total_b: u64) {
@@ -590,49 +678,131 @@ impl UptimeTracker {
     }
 
     pub fn get_detailed_stats(&self, period_seconds: u64) -> UptimeDetailedStats {
-        let (current_a_secs, current_b_secs) = self.get_current_uptime_percentage();
-        let current_a = current_a_secs as u64;
-        let current_b = current_b_secs as u64;
-        let avg_connect_time_a = self.get_avg_connect_time_a();
-        let avg_connect_time_b = self.get_avg_connect_time_b();
-        let (downtime_a, downtime_b) = self.get_all_time_downtime_seconds();
+        fn estimate_window_uptime(
+            lifetime_uptime_seconds: u64,
+            lifetime_downtime_seconds: u64,
+            requested_window_seconds: u64,
+        ) -> (u64, u64, u64, f64) {
+            if requested_window_seconds == 0 {
+                return (0, 0, 0, 0.0);
+            }
 
-        let rate_a = if current_a > 0 {
-            self.total_messages_a as f64 / current_a as f64
+            let observed_lifetime_seconds =
+                lifetime_uptime_seconds.saturating_add(lifetime_downtime_seconds);
+            if observed_lifetime_seconds == 0 {
+                return (0, 0, 0, 0.0);
+            }
+
+            let observed_window_seconds = observed_lifetime_seconds.min(requested_window_seconds);
+            let uptime_ratio = lifetime_uptime_seconds as f64 / observed_lifetime_seconds as f64;
+            let mut window_uptime_seconds =
+                (uptime_ratio * observed_window_seconds as f64).round() as u64;
+            window_uptime_seconds = window_uptime_seconds.min(observed_window_seconds);
+            let window_downtime_seconds =
+                observed_window_seconds.saturating_sub(window_uptime_seconds);
+            let uptime_percent = if observed_window_seconds > 0 {
+                (window_uptime_seconds as f64 / observed_window_seconds as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            (
+                observed_window_seconds,
+                window_uptime_seconds,
+                window_downtime_seconds,
+                uptime_percent,
+            )
+        }
+
+        let snapshot = self.get_metrics_snapshot();
+        let lifetime_observed_a_seconds = snapshot
+            .uptime_a_seconds
+            .saturating_add(snapshot.downtime_a_seconds);
+        let lifetime_observed_b_seconds = snapshot
+            .uptime_b_seconds
+            .saturating_add(snapshot.downtime_b_seconds);
+
+        let (
+            window_observed_a_seconds,
+            window_uptime_a_seconds,
+            window_downtime_a_seconds,
+            window_uptime_a_percent,
+        ) = estimate_window_uptime(
+            snapshot.uptime_a_seconds,
+            snapshot.downtime_a_seconds,
+            period_seconds,
+        );
+        let (
+            window_observed_b_seconds,
+            window_uptime_b_seconds,
+            window_downtime_b_seconds,
+            window_uptime_b_percent,
+        ) = estimate_window_uptime(
+            snapshot.uptime_b_seconds,
+            snapshot.downtime_b_seconds,
+            period_seconds,
+        );
+
+        let lifetime_uptime_a_percent = if lifetime_observed_a_seconds > 0 {
+            (snapshot.uptime_a_seconds as f64 / lifetime_observed_a_seconds as f64) * 100.0
         } else {
             0.0
         };
-        let rate_b = if current_b > 0 {
-            self.total_messages_b as f64 / current_b as f64
+        let lifetime_uptime_b_percent = if lifetime_observed_b_seconds > 0 {
+            (snapshot.uptime_b_seconds as f64 / lifetime_observed_b_seconds as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let rate_a = if snapshot.uptime_a_seconds > 0 {
+            snapshot.total_messages_a as f64 / snapshot.uptime_a_seconds as f64
+        } else {
+            0.0
+        };
+        let rate_b = if snapshot.uptime_b_seconds > 0 {
+            snapshot.total_messages_b as f64 / snapshot.uptime_b_seconds as f64
         } else {
             0.0
         };
 
         UptimeDetailedStats {
-            uptime_a_seconds: current_a,
-            uptime_b_seconds: current_b,
-            downtime_a_seconds: downtime_a,
-            downtime_b_seconds: downtime_b,
-            uptime_a_percent: if period_seconds > 0 {
-                (current_a as f64 / period_seconds as f64) * 100.0
-            } else {
-                0.0
-            },
-            uptime_b_percent: if period_seconds > 0 {
-                (current_b as f64 / period_seconds as f64) * 100.0
-            } else {
-                0.0
-            },
-            disconnect_count_a: self.disconnect_count_a,
-            disconnect_count_b: self.disconnect_count_b,
-            avg_connect_time_a_ms: avg_connect_time_a,
-            avg_connect_time_b_ms: avg_connect_time_b,
-            delivery_latency_a_ms: self.get_delivery_latency_a_ms(),
-            delivery_latency_b_ms: self.get_delivery_latency_b_ms(),
+            // Legacy fields retained for compatibility: these now represent the requested window.
+            uptime_a_seconds: window_uptime_a_seconds,
+            uptime_b_seconds: window_uptime_b_seconds,
+            downtime_a_seconds: window_downtime_a_seconds,
+            downtime_b_seconds: window_downtime_b_seconds,
+            uptime_a_percent: window_uptime_a_percent,
+            uptime_b_percent: window_uptime_b_percent,
+
+            window_requested_seconds: period_seconds,
+            window_observed_a_seconds,
+            window_observed_b_seconds,
+            window_uptime_a_seconds,
+            window_uptime_b_seconds,
+            window_downtime_a_seconds,
+            window_downtime_b_seconds,
+            window_uptime_a_percent,
+            window_uptime_b_percent,
+
+            lifetime_observed_a_seconds,
+            lifetime_observed_b_seconds,
+            lifetime_uptime_a_seconds: snapshot.uptime_a_seconds,
+            lifetime_uptime_b_seconds: snapshot.uptime_b_seconds,
+            lifetime_downtime_a_seconds: snapshot.downtime_a_seconds,
+            lifetime_downtime_b_seconds: snapshot.downtime_b_seconds,
+            lifetime_uptime_a_percent,
+            lifetime_uptime_b_percent,
+
+            disconnect_count_a: snapshot.disconnect_count_a,
+            disconnect_count_b: snapshot.disconnect_count_b,
+            avg_connect_time_a_ms: self.get_avg_connect_time_a(),
+            avg_connect_time_b_ms: self.get_avg_connect_time_b(),
+            delivery_latency_a_ms: snapshot.delivery_latency_a_ms,
+            delivery_latency_b_ms: snapshot.delivery_latency_b_ms,
             mttr_a_ms: self.get_mttr_a_ms(),
             mttr_b_ms: self.get_mttr_b_ms(),
-            total_messages_a: self.total_messages_a,
-            total_messages_b: self.total_messages_b,
+            total_messages_a: snapshot.total_messages_a,
+            total_messages_b: snapshot.total_messages_b,
             avg_rate_a: rate_a,
             avg_rate_b: rate_b,
             connected_a: self.connected_a,
@@ -651,6 +821,23 @@ pub struct UptimeDetailedStats {
     pub downtime_b_seconds: u64,
     pub uptime_a_percent: f64,
     pub uptime_b_percent: f64,
+    pub window_requested_seconds: u64,
+    pub window_observed_a_seconds: u64,
+    pub window_observed_b_seconds: u64,
+    pub window_uptime_a_seconds: u64,
+    pub window_uptime_b_seconds: u64,
+    pub window_downtime_a_seconds: u64,
+    pub window_downtime_b_seconds: u64,
+    pub window_uptime_a_percent: f64,
+    pub window_uptime_b_percent: f64,
+    pub lifetime_observed_a_seconds: u64,
+    pub lifetime_observed_b_seconds: u64,
+    pub lifetime_uptime_a_seconds: u64,
+    pub lifetime_uptime_b_seconds: u64,
+    pub lifetime_downtime_a_seconds: u64,
+    pub lifetime_downtime_b_seconds: u64,
+    pub lifetime_uptime_a_percent: f64,
+    pub lifetime_uptime_b_percent: f64,
     pub disconnect_count_a: u64,
     pub disconnect_count_b: u64,
     pub avg_connect_time_a_ms: u64,

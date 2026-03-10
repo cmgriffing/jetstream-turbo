@@ -1,32 +1,32 @@
-import { AlertTriangle, RefreshCw } from "lucide-react"
-import { useEffect, useState } from "react"
-import { ConnectionStatus } from "@/hooks/useStream"
+import { AlertTriangle, RefreshCw } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ConnectionStatus } from "@/hooks/useStream";
 
 interface ConnectionBannerProps {
-  status: ConnectionStatus
+  status: ConnectionStatus;
 }
 
 export function ConnectionBanner({ status }: ConnectionBannerProps) {
-  const [showBanner, setShowBanner] = useState(false)
+  const [showBanner, setShowBanner] = useState(false);
 
   useEffect(() => {
-    if (status === 'disconnected') {
+    if (status === "disconnected") {
       const timer = setTimeout(() => {
-        setShowBanner(true)
-      }, 3000)
-      return () => clearTimeout(timer)
-    } else {
-      setShowBanner(false)
+        setShowBanner(true);
+      }, 3000);
+      return () => clearTimeout(timer);
     }
-  }, [status])
 
-  if (!showBanner) return null
+    setShowBanner(false);
+  }, [status]);
+
+  if (!showBanner) return null;
 
   return (
-    <div className="fixed top-0 left-0 right-0 z-50 flex items-center justify-center gap-2 px-4 py-3 bg-destructive text-destructive-foreground" role="status" aria-live="polite">
-      <AlertTriangle className="w-5 h-5" />
-      <span className="font-medium">Unable to connect to server. Retrying...</span>
-      <RefreshCw className="w-4 h-4 animate-spin" />
+    <div className="monitor-connection-banner" role="status" aria-live="polite">
+      <AlertTriangle className="h-4 w-4" />
+      <span>Unable to connect to server. Retrying.</span>
+      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
     </div>
-  )
+  );
 }
