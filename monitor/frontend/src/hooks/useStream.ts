@@ -21,6 +21,9 @@ export interface StreamStats {
   connected_b?: boolean
   stream_a_name?: string
   stream_b_name?: string
+  live_latency_metric?: string
+  live_latency_a_ms?: number
+  live_latency_b_ms?: number
   delivery_latency_a_ms?: number
   delivery_latency_b_ms?: number
   mttr_a_ms?: number

@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/table";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+import { formatUptimePercent } from "@/lib/uptime";
 
 type TableRenderState = "loading" | "no_data" | "stale" | "disconnected" | "ready";
 
@@ -252,14 +253,16 @@ export function MetricsTable({
           </TableHeader>
           <TableBody>
             <TableRow className="monitor-metrics-row">
-              <TableCell className="monitor-table-label whitespace-normal">Uptime</TableCell>
+              <TableCell className="monitor-table-label whitespace-normal">
+                Uptime ({windowLabel} window)
+              </TableCell>
               <TableCell
                 className={cn(
                   "monitor-table-value monitor-table-value--numeric text-right whitespace-normal",
                   getUptimeToneClass(stats.uptimeA),
                 )}
               >
-                {stats.uptimeA.toFixed(2)}%
+                {formatUptimePercent(stats.uptimeA, { minimumFractionDigits: 2 })}%
               </TableCell>
               <TableCell
                 className={cn(
@@ -267,7 +270,7 @@ export function MetricsTable({
                   getUptimeToneClass(stats.uptimeB),
                 )}
               >
-                {stats.uptimeB.toFixed(2)}%
+                {formatUptimePercent(stats.uptimeB, { minimumFractionDigits: 2 })}%
               </TableCell>
             </TableRow>
 
@@ -282,7 +285,19 @@ export function MetricsTable({
             </TableRow>
 
             <TableRow className="monitor-metrics-row">
-              <TableCell className="monitor-table-label whitespace-normal">Coverage {windowLabel}</TableCell>
+              <TableCell className="monitor-table-label whitespace-normal">Observed Down</TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                {formatDurationLong(stats.downtimeASeconds)}
+              </TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                {formatDurationLong(stats.downtimeBSeconds)}
+              </TableCell>
+            </TableRow>
+
+            <TableRow className="monitor-metrics-row">
+              <TableCell className="monitor-table-label whitespace-normal">
+                Coverage of {windowLabel} window
+              </TableCell>
               <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
                 {stats.coverageA.toFixed(1)}%
               </TableCell>

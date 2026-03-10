@@ -1,6 +1,7 @@
 import { memo } from "react";
 import { Info, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { formatUptimePercent } from "@/lib/uptime";
 
 interface StreamCardProps {
   streamId: "a" | "b";
@@ -12,7 +13,8 @@ interface StreamCardProps {
   uptime?: number;
   uptimeAllTime?: number;
   connected: boolean;
-  deliveryLatencyMs?: number;
+  liveLatencyMetric?: string;
+  liveLatencyMs?: number;
 }
 
 function formatDuration(ms: number): string {
@@ -41,6 +43,20 @@ function formatCountingStartedAt(timestamp?: string): string {
   });
 }
 
+function getLiveLatencyLabel(metric?: string): string {
+  if (metric === "delivery_latency") {
+    return "Delivery Latency";
+  }
+  return "Connection Latency";
+}
+
+function getLiveLatencyDescription(metric?: string): string {
+  if (metric === "delivery_latency") {
+    return "Delivery latency average measured over the latest 10-second interval.";
+  }
+  return "Time to establish the most recent successful websocket connection.";
+}
+
 export const StreamCard = memo(function StreamCard({
   streamId,
   name,
@@ -50,10 +66,13 @@ export const StreamCard = memo(function StreamCard({
   streak,
   uptimeAllTime,
   connected,
-  deliveryLatencyMs,
+  liveLatencyMetric,
+  liveLatencyMs,
 }: StreamCardProps) {
   const streamVariantClass =
     streamId === "a" ? "monitor-stream-card--a" : "monitor-stream-card--b";
+  const liveLatencyLabel = getLiveLatencyLabel(liveLatencyMetric);
+  const liveLatencyDescription = getLiveLatencyDescription(liveLatencyMetric);
 
   return (
     <article className={cn("monitor-stream-card", streamVariantClass)}>
@@ -109,26 +128,24 @@ export const StreamCard = memo(function StreamCard({
 
         <div className="monitor-stream-metric">
           <p className="monitor-stream-metric-label">
-            Latency
+            {liveLatencyLabel}
             <button
               type="button"
               className="monitor-tooltip-trigger relative inline-flex cursor-pointer"
-              aria-label="More info about delivery latency"
+              aria-label={`More info about ${liveLatencyLabel.toLowerCase()}`}
             >
               <Info className="h-2.5 w-2.5" aria-hidden="true" />
-              <span className="monitor-tooltip">
-                Delivery latency average measured over the latest 10-second interval.
-              </span>
+              <span className="monitor-tooltip">{liveLatencyDescription}</span>
             </button>
           </p>
           <p className="monitor-stream-metric-value">
-            {deliveryLatencyMs !== undefined && deliveryLatencyMs > 0 ? (
+            {liveLatencyMs !== undefined && liveLatencyMs > 0 ? (
               <>
-                {deliveryLatencyMs < 1000
-                  ? deliveryLatencyMs.toFixed(0)
-                  : `${(deliveryLatencyMs / 1000).toFixed(1)}s`}
+                {liveLatencyMs < 1000
+                  ? liveLatencyMs.toFixed(0)
+                  : `${(liveLatencyMs / 1000).toFixed(1)}s`}
                 <span className="monitor-stream-metric-unit">
-                  {deliveryLatencyMs < 1000 ? "ms" : ""}
+                  {liveLatencyMs < 1000 ? "ms" : ""}
                 </span>
               </>
             ) : (
@@ -149,11 +166,11 @@ export const StreamCard = memo(function StreamCard({
         </div>
 
         <div className="monitor-stream-metric">
-          <p className="monitor-stream-metric-label">Uptime</p>
+          <p className="monitor-stream-metric-label">Uptime (all-time)</p>
           <p className="monitor-stream-metric-value">
             {uptimeAllTime !== undefined ? (
               <>
-                {uptimeAllTime.toFixed(1)}
+                {formatUptimePercent(uptimeAllTime, { minimumFractionDigits: 2 })}
                 <span className="monitor-stream-metric-unit">%</span>
               </>
             ) : (

@@ -6,6 +6,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveLatencyMetric {
+    ConnectionLatency,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamStats {
     pub stream_a: u64,
@@ -27,6 +33,9 @@ pub struct StreamStats {
     pub connected_b: bool,
     pub connect_time_a_ms: u64,
     pub connect_time_b_ms: u64,
+    pub live_latency_metric: LiveLatencyMetric,
+    pub live_latency_a_ms: f64,
+    pub live_latency_b_ms: f64,
     pub delivery_latency_a_ms: f64,
     pub delivery_latency_b_ms: f64,
     pub mttr_a_ms: u64,
@@ -86,6 +95,8 @@ impl StatsAggregator {
                     connected_b,
                     connect_time_a,
                     connect_time_b,
+                    live_latency_a,
+                    live_latency_b,
                     delivery_latency_a,
                     delivery_latency_b,
                     mttr_a,
@@ -100,6 +111,8 @@ impl StatsAggregator {
                         up.connected_b,
                         up.get_avg_connect_time_a(),
                         up.get_avg_connect_time_b(),
+                        up.get_connection_latency_a_ms(),
+                        up.get_connection_latency_b_ms(),
                         up.get_delivery_latency_a_ms(),
                         up.get_delivery_latency_b_ms(),
                         up.get_mttr_a_ms(),
@@ -147,6 +160,9 @@ impl StatsAggregator {
                     connected_b,
                     connect_time_a_ms: connect_time_a,
                     connect_time_b_ms: connect_time_b,
+                    live_latency_metric: LiveLatencyMetric::ConnectionLatency,
+                    live_latency_a_ms: live_latency_a,
+                    live_latency_b_ms: live_latency_b,
                     delivery_latency_a_ms: delivery_latency_a,
                     delivery_latency_b_ms: delivery_latency_b,
                     mttr_a_ms: mttr_a,
@@ -193,6 +209,8 @@ pub struct UptimeTracker {
     pub connect_time_sum_b_ms: u64,
     pub connect_time_count_a: u64,
     pub connect_time_count_b: u64,
+    pub last_connect_time_a_ms: Option<u64>,
+    pub last_connect_time_b_ms: Option<u64>,
     pub total_messages_a: u64,
     pub total_messages_b: u64,
     message_samples_a: VecDeque<(Instant, u64)>,
@@ -251,6 +269,8 @@ impl Default for UptimeTracker {
             connect_time_sum_b_ms: 0,
             connect_time_count_a: 0,
             connect_time_count_b: 0,
+            last_connect_time_a_ms: None,
+            last_connect_time_b_ms: None,
             total_messages_a: 0,
             total_messages_b: 0,
             message_samples_a: VecDeque::new(),
@@ -308,6 +328,7 @@ impl UptimeTracker {
                     if let Some(ct) = status.connect_time_ms {
                         self.connect_time_sum_a_ms += ct;
                         self.connect_time_count_a += 1;
+                        self.last_connect_time_a_ms = Some(ct);
                     }
                 } else {
                     if let Some(session_start) = self.session_start_a.take() {
@@ -341,6 +362,7 @@ impl UptimeTracker {
                     if let Some(ct) = status.connect_time_ms {
                         self.connect_time_sum_b_ms += ct;
                         self.connect_time_count_b += 1;
+                        self.last_connect_time_b_ms = Some(ct);
                     }
                 } else {
                     if let Some(session_start) = self.session_start_b.take() {
@@ -653,6 +675,14 @@ impl UptimeTracker {
         }
     }
 
+    pub fn get_connection_latency_a_ms(&self) -> f64 {
+        self.last_connect_time_a_ms.unwrap_or(0) as f64
+    }
+
+    pub fn get_connection_latency_b_ms(&self) -> f64 {
+        self.last_connect_time_b_ms.unwrap_or(0) as f64
+    }
+
     pub fn get_average_rates(&self) -> (f64, f64) {
         let now = Instant::now();
         let rate_a = Self::rolling_rate(&self.message_samples_a, now);
@@ -854,4 +884,53 @@ pub struct UptimeDetailedStats {
     pub connected_b: bool,
     pub current_streak_a: f64,
     pub current_streak_b: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UptimeTracker;
+    use crate::stream::{ConnectionStatus, StreamId};
+
+    fn status(
+        stream_id: StreamId,
+        connected: bool,
+        connect_time_ms: Option<u64>,
+    ) -> ConnectionStatus {
+        ConnectionStatus {
+            stream_id,
+            connected,
+            connected_at: None,
+            connect_time_ms,
+        }
+    }
+
+    #[test]
+    fn connection_latency_defaults_to_zero_without_samples() {
+        let tracker = UptimeTracker::new();
+        assert_eq!(tracker.get_connection_latency_a_ms(), 0.0);
+        assert_eq!(tracker.get_connection_latency_b_ms(), 0.0);
+    }
+
+    #[test]
+    fn connection_latency_uses_latest_successful_connect_time() {
+        let mut tracker = UptimeTracker::new();
+
+        tracker.handle_connection_status(status(StreamId::A, true, Some(40)));
+        tracker.handle_connection_status(status(StreamId::A, false, None));
+        tracker.handle_connection_status(status(StreamId::A, true, Some(120)));
+
+        assert_eq!(tracker.get_connection_latency_a_ms(), 120.0);
+        assert_eq!(tracker.get_avg_connect_time_a(), 80);
+    }
+
+    #[test]
+    fn connection_latency_keeps_last_value_when_connect_sample_missing() {
+        let mut tracker = UptimeTracker::new();
+
+        tracker.handle_connection_status(status(StreamId::B, true, Some(75)));
+        tracker.handle_connection_status(status(StreamId::B, false, None));
+        tracker.handle_connection_status(status(StreamId::B, true, None));
+
+        assert_eq!(tracker.get_connection_latency_b_ms(), 75.0);
+    }
 }
