@@ -205,13 +205,13 @@ export function MetricsTable({
 
   if (!stats) {
     return (
-      <Card className="monitor-panel monitor-table-card">
-        <CardHeader>
+      <Card className="monitor-panel monitor-table-card" data-render-state={renderState}>
+        <CardHeader className="monitor-table-card-header">
           <CardTitle className="monitor-chart-title">
             {title.toUpperCase().replace(/\s+/g, "_")}
           </CardTitle>
         </CardHeader>
-        <CardContent>
+        <CardContent className="monitor-table-card-content">
           <p className="monitor-table-state">{getStateMessage(renderState)}</p>
         </CardContent>
       </Card>
@@ -219,95 +219,126 @@ export function MetricsTable({
   }
 
   return (
-    <Card className="monitor-panel monitor-table-card">
-      <CardHeader>
+    <Card className="monitor-panel monitor-table-card" data-render-state={renderState}>
+      <CardHeader className="monitor-table-card-header">
         <CardTitle className="monitor-chart-title">
           {title.toUpperCase().replace(/\s+/g, "_")}
           <span className="ml-2 monitor-table-head">{icon}</span>
         </CardTitle>
       </CardHeader>
-      <CardContent>
-        {overlayMessage && <div className="monitor-state-overlay">{overlayMessage}</div>}
+      <CardContent className="monitor-table-card-content">
+        {overlayMessage && (
+          <div
+            className={cn(
+              "monitor-state-overlay",
+              `monitor-state-overlay--${renderState}`,
+            )}
+          >
+            {overlayMessage}
+          </div>
+        )}
 
-        <Table>
+        <Table className="monitor-metrics-table">
           <TableHeader>
-            <TableRow className="border-b-transparent hover:bg-transparent">
-              <TableHead className="monitor-table-head w-2/5">Metric</TableHead>
-              <TableHead className="monitor-table-head w-3/10 text-right">{streamAName}</TableHead>
-              <TableHead className="monitor-table-head w-3/10 text-right">{streamBName}</TableHead>
+            <TableRow className="monitor-metrics-head-row hover:bg-transparent">
+              <TableHead className="monitor-table-head w-2/5 whitespace-normal">Metric</TableHead>
+              <TableHead className="monitor-table-head w-3/10 text-right whitespace-normal break-words">
+                {streamAName}
+              </TableHead>
+              <TableHead className="monitor-table-head w-3/10 text-right whitespace-normal break-words">
+                {streamBName}
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            <TableRow className="border-b-transparent">
-              <TableCell className="monitor-table-label">Uptime</TableCell>
-              <TableCell className={cn("monitor-table-value text-right", getUptimeToneClass(stats.uptimeA))}>
+            <TableRow className="monitor-metrics-row">
+              <TableCell className="monitor-table-label whitespace-normal">Uptime</TableCell>
+              <TableCell
+                className={cn(
+                  "monitor-table-value monitor-table-value--numeric text-right whitespace-normal",
+                  getUptimeToneClass(stats.uptimeA),
+                )}
+              >
                 {stats.uptimeA.toFixed(2)}%
               </TableCell>
-              <TableCell className={cn("monitor-table-value text-right", getUptimeToneClass(stats.uptimeB))}>
+              <TableCell
+                className={cn(
+                  "monitor-table-value monitor-table-value--numeric text-right whitespace-normal",
+                  getUptimeToneClass(stats.uptimeB),
+                )}
+              >
                 {stats.uptimeB.toFixed(2)}%
               </TableCell>
             </TableRow>
 
-            <TableRow className="border-b-transparent">
-              <TableCell className="monitor-table-label">Observed Up</TableCell>
-              <TableCell className="monitor-table-value text-right">
+            <TableRow className="monitor-metrics-row">
+              <TableCell className="monitor-table-label whitespace-normal">Observed Up</TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
                 {formatDurationLong(stats.uptimeASeconds)}
               </TableCell>
-              <TableCell className="monitor-table-value text-right">
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
                 {formatDurationLong(stats.uptimeBSeconds)}
               </TableCell>
             </TableRow>
 
-            <TableRow className="border-b-transparent">
-              <TableCell className="monitor-table-label">Coverage {windowLabel}</TableCell>
-              <TableCell className="monitor-table-value text-right">{stats.coverageA.toFixed(1)}%</TableCell>
-              <TableCell className="monitor-table-value text-right">{stats.coverageB.toFixed(1)}%</TableCell>
+            <TableRow className="monitor-metrics-row">
+              <TableCell className="monitor-table-label whitespace-normal">Coverage {windowLabel}</TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                {stats.coverageA.toFixed(1)}%
+              </TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                {stats.coverageB.toFixed(1)}%
+              </TableCell>
             </TableRow>
 
-            <TableRow className="border-b-transparent">
-              <TableCell className="monitor-table-label">Rate</TableCell>
-              <TableCell className="monitor-table-value text-right">
+            <TableRow className="monitor-metrics-row">
+              <TableCell className="monitor-table-label whitespace-normal">Rate</TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
                 {stats.rateA.toFixed(2)}
-                <span className="monitor-table-head">/s</span>
+                <span className="monitor-table-unit">/s</span>
               </TableCell>
-              <TableCell className="monitor-table-value text-right">
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
                 {stats.rateB.toFixed(2)}
-                <span className="monitor-table-head">/s</span>
+                <span className="monitor-table-unit">/s</span>
               </TableCell>
             </TableRow>
 
-            <TableRow className="border-b-transparent">
-              <TableCell className="monitor-table-label">Disconnects</TableCell>
-              <TableCell className="monitor-table-value text-right">{stats.disconnectsA}</TableCell>
-              <TableCell className="monitor-table-value text-right">{stats.disconnectsB}</TableCell>
+            <TableRow className="monitor-metrics-row">
+              <TableCell className="monitor-table-label whitespace-normal">Disconnects</TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                {stats.disconnectsA}
+              </TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                {stats.disconnectsB}
+              </TableCell>
             </TableRow>
 
-            <TableRow className="border-b-transparent">
-              <TableCell className="monitor-table-label">Delivery Latency</TableCell>
-              <TableCell className="monitor-table-value text-right">
+            <TableRow className="monitor-metrics-row">
+              <TableCell className="monitor-table-label whitespace-normal">Delivery Latency</TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
                 {stats.deliveryLatencyA > 0 ? `${stats.deliveryLatencyA.toFixed(0)}ms` : "--"}
               </TableCell>
-              <TableCell className="monitor-table-value text-right">
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
                 {stats.deliveryLatencyB > 0 ? `${stats.deliveryLatencyB.toFixed(0)}ms` : "--"}
               </TableCell>
             </TableRow>
 
-            <TableRow className="border-b-transparent">
-              <TableCell className="monitor-table-label">MTTR</TableCell>
-              <TableCell className="monitor-table-value text-right">
+            <TableRow className="monitor-metrics-row">
+              <TableCell className="monitor-table-label whitespace-normal">MTTR</TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
                 {stats.mttrA > 0 ? formatDurationLong(stats.mttrA / 1000) : "--"}
               </TableCell>
-              <TableCell className="monitor-table-value text-right">
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
                 {stats.mttrB > 0 ? formatDurationLong(stats.mttrB / 1000) : "--"}
               </TableCell>
             </TableRow>
 
-            <TableRow className="border-b-transparent">
-              <TableCell className="monitor-table-label">Messages</TableCell>
-              <TableCell className="monitor-table-value text-right">
+            <TableRow className="monitor-metrics-row">
+              <TableCell className="monitor-table-label whitespace-normal">Messages</TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
                 {stats.messagesA.toLocaleString()}
               </TableCell>
-              <TableCell className="monitor-table-value text-right">
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
                 {stats.messagesB.toLocaleString()}
               </TableCell>
             </TableRow>

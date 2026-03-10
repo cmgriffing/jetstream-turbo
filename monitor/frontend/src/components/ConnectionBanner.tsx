@@ -24,9 +24,13 @@ export function ConnectionBanner({ status }: ConnectionBannerProps) {
 
   return (
     <div className="monitor-connection-banner" role="status" aria-live="polite">
-      <AlertTriangle className="h-4 w-4" />
-      <span>Unable to connect to server. Retrying.</span>
-      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+      <span className="monitor-connection-banner-alert" aria-hidden="true">
+        <AlertTriangle className="h-4 w-4" />
+      </span>
+      <span className="monitor-connection-banner-text">
+        Unable to connect to server. Retrying.
+      </span>
+      <RefreshCw className="monitor-connection-banner-spinner h-3.5 w-3.5 animate-spin" />
     </div>
   );
 }

@@ -50,11 +50,27 @@ export function StatusIndicator({ connected, connectedAt }: StatusIndicatorProps
     }
   }, [connected]);
 
+  useEffect(() => {
+    if (!announcement) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setAnnouncement("");
+    }, 1500);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [announcement]);
+
   return (
     <div className="monitor-status-indicator">
-      <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-        {announcement}
-      </span>
+      {announcement && (
+        <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+          {announcement}
+        </span>
+      )}
       <div
         className={cn(
           "monitor-status-pill",
