@@ -163,7 +163,7 @@ function App() {
                 <h2 className="monitor-section-title">Primary live status and stream dominance</h2>
                 <p className="monitor-section-copy">
                   Connection health and headline message position are surfaced first for rapid operator
-                  scanning.
+                  scanning. Stream uptime here reflects all-time live aggregates.
                 </p>
               </div>
               <div className="monitor-heading-meta">
@@ -193,7 +193,8 @@ function App() {
                   streak={stats.current_streak_a}
                   uptimeAllTime={stats.uptime_a_all_time}
                   connected={stats.connected_a || false}
-                  deliveryLatencyMs={stats.delivery_latency_a_ms}
+                  liveLatencyMetric={stats.live_latency_metric}
+                  liveLatencyMs={stats.live_latency_a_ms}
                 />
                 <StreamCard
                   streamId="b"
@@ -204,7 +205,8 @@ function App() {
                   streak={stats.current_streak_b}
                   uptimeAllTime={stats.uptime_b_all_time}
                   connected={stats.connected_b || false}
-                  deliveryLatencyMs={stats.delivery_latency_b_ms}
+                  liveLatencyMetric={stats.live_latency_metric}
+                  liveLatencyMs={stats.live_latency_b_ms}
                 />
               </div>
             </div>
@@ -279,8 +281,8 @@ function App() {
                 <p className="monitor-eyebrow">Historical Analytics</p>
                 <h2 className="monitor-section-title">Operational summary for the selected window</h2>
                 <p className="monitor-section-copy">
-                  Reliability, coverage, disconnect, and recovery signals are presented in a single comparative
-                  surface.
+                  Selected-window reliability, coverage, disconnect, and recovery signals are presented in a
+                  single comparative surface.
                 </p>
               </div>
             </div>
