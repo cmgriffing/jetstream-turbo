@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Wifi, WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -18,6 +18,8 @@ function formatDuration(ms: number): string {
 
 export function StatusIndicator({ connected, connectedAt }: StatusIndicatorProps) {
   const [duration, setDuration] = useState("");
+  const [announcement, setAnnouncement] = useState("");
+  const previousConnectedRef = useRef<boolean | null>(null);
 
   useEffect(() => {
     if (!connected || !connectedAt) {
@@ -34,8 +36,25 @@ export function StatusIndicator({ connected, connectedAt }: StatusIndicatorProps
     return () => clearInterval(interval);
   }, [connected, connectedAt]);
 
+  useEffect(() => {
+    if (previousConnectedRef.current === null) {
+      previousConnectedRef.current = connected;
+      return;
+    }
+
+    if (previousConnectedRef.current !== connected) {
+      setAnnouncement(
+        connected ? "Monitor connection restored." : "Monitor connection lost.",
+      );
+      previousConnectedRef.current = connected;
+    }
+  }, [connected]);
+
   return (
-    <div className="monitor-status-indicator" aria-live="polite">
+    <div className="monitor-status-indicator">
+      <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {announcement}
+      </span>
       <div
         className={cn(
           "monitor-status-pill",
