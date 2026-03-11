@@ -31,17 +31,107 @@ export interface StreamStats {
 }
 
 interface UptimeHistoryResponse {
-  data?: HourlyUptime[]
-  span_seconds?: number
-  requested_window_seconds?: number
-  interval_seconds?: number
+  data?: unknown
+  rows?: unknown
+  span_seconds?: unknown
+  requested_window_seconds?: unknown
+  interval_seconds?: unknown
+  spanSeconds?: unknown
+  requestedWindowSeconds?: unknown
+  intervalSeconds?: unknown
 }
 
 function readNumber(value: unknown, fallback: number): number {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value
   }
+  if (typeof value === 'string') {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) {
+      return parsed
+    }
+  }
   return fallback
+}
+
+function readString(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null
+  }
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+function readObject(value: unknown): Record<string, unknown> | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return null
+  }
+  return value as Record<string, unknown>
+}
+
+function pickNumber(record: Record<string, unknown>, keys: string[]): number {
+  for (const key of keys) {
+    const value = readNumber(record[key], Number.NaN)
+    if (Number.isFinite(value)) {
+      return value
+    }
+  }
+  return 0
+}
+
+function normalizeUptimeRow(value: unknown): HourlyUptime | null {
+  const row = readObject(value)
+  if (!row) {
+    return null
+  }
+
+  const hour = readString(row.hour) ?? readString(row.timestamp)
+  if (!hour) {
+    return null
+  }
+
+  return {
+    hour,
+    stream_a_seconds: pickNumber(row, ['stream_a_seconds', 'uptime_a_seconds']),
+    stream_b_seconds: pickNumber(row, ['stream_b_seconds', 'uptime_b_seconds']),
+    stream_a_downtime_seconds: pickNumber(row, ['stream_a_downtime_seconds', 'downtime_a_seconds']),
+    stream_b_downtime_seconds: pickNumber(row, ['stream_b_downtime_seconds', 'downtime_b_seconds']),
+    stream_a_disconnects: pickNumber(row, ['stream_a_disconnects', 'disconnects_a']),
+    stream_b_disconnects: pickNumber(row, ['stream_b_disconnects', 'disconnects_b']),
+    stream_a_messages: pickNumber(row, ['stream_a_messages', 'messages_a']),
+    stream_b_messages: pickNumber(row, ['stream_b_messages', 'messages_b']),
+    stream_a_delivery_latency_ms: pickNumber(row, ['stream_a_delivery_latency_ms', 'delivery_latency_a_ms']),
+    stream_b_delivery_latency_ms: pickNumber(row, ['stream_b_delivery_latency_ms', 'delivery_latency_b_ms']),
+    stream_a_mttr_ms: pickNumber(row, ['stream_a_mttr_ms', 'mttr_a_ms']),
+    stream_b_mttr_ms: pickNumber(row, ['stream_b_mttr_ms', 'mttr_b_ms']),
+  }
+}
+
+function extractUptimeRows(response: unknown): HourlyUptime[] {
+  if (Array.isArray(response)) {
+    return response
+      .map(normalizeUptimeRow)
+      .filter((row): row is HourlyUptime => row !== null)
+  }
+
+  const record = readObject(response)
+  if (!record) {
+    return []
+  }
+
+  if (Array.isArray(record.data)) {
+    return record.data
+      .map(normalizeUptimeRow)
+      .filter((row): row is HourlyUptime => row !== null)
+  }
+
+  if (Array.isArray(record.rows)) {
+    return record.rows
+      .map(normalizeUptimeRow)
+      .filter((row): row is HourlyUptime => row !== null)
+  }
+
+  return []
 }
 
 export function useWebSocket(
@@ -124,10 +214,38 @@ export function useUptimeHistory(hours: number, refreshInterval: number = 60000)
         return
       }
 
-      setData(Array.isArray(json.data) ? json.data : [])
-      setSpanSeconds(readNumber(json.span_seconds, hours * 3600))
-      setRequestedWindowSeconds(readNumber(json.requested_window_seconds, hours * 3600))
-      setIntervalSeconds(Math.max(1, readNumber(json.interval_seconds, 3600)))
+      const normalizedRows = extractUptimeRows(json)
+      const metadata = readObject(json)
+      const inferredSpanSeconds = normalizedRows.length > 0 ? normalizedRows.length * 3600 : hours * 3600
+
+      setData(normalizedRows)
+      setSpanSeconds(
+        Math.max(
+          0,
+          readNumber(
+            metadata?.span_seconds ?? metadata?.spanSeconds,
+            inferredSpanSeconds,
+          ),
+        ),
+      )
+      setRequestedWindowSeconds(
+        Math.max(
+          0,
+          readNumber(
+            metadata?.requested_window_seconds ?? metadata?.requestedWindowSeconds,
+            hours * 3600,
+          ),
+        ),
+      )
+      setIntervalSeconds(
+        Math.max(
+          1,
+          readNumber(
+            metadata?.interval_seconds ?? metadata?.intervalSeconds,
+            3600,
+          ),
+        ),
+      )
       setError(null)
       setLastUpdatedAt(Date.now())
     } catch (e) {
