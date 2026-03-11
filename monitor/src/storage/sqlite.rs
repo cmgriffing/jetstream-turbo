@@ -123,6 +123,48 @@ impl Storage {
         .ok();
 
         sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN stream_a_disconnects INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN stream_b_disconnects INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN stream_a_connect_time_ms INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN stream_b_connect_time_ms INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN stream_a_messages INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN stream_b_messages INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
             "ALTER TABLE hourly_uptime ADD COLUMN stream_a_delivery_latency_ms REAL NOT NULL DEFAULT 0.0"
         )
         .execute(&pool)
@@ -156,6 +198,11 @@ impl Storage {
         .execute(&pool)
         .await
         .ok();
+
+        sqlx::query("ALTER TABLE hourly_uptime ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
+            .execute(&pool)
+            .await
+            .ok();
 
         sqlx::query(
             r#"
@@ -456,5 +503,112 @@ impl Storage {
         }
 
         normalized
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Storage, INTERVAL_UPTIME_CONTRACT_VERSION};
+    use chrono::{Duration, Utc};
+    use sqlx::SqlitePool;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_sqlite_url(test_name: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after UNIX_EPOCH")
+            .as_nanos();
+        let db_path =
+            std::env::temp_dir().join(format!("jetstream-monitor-{test_name}-{nanos}.db"));
+        format!("sqlite://{}?mode=rwc", db_path.display())
+    }
+
+    #[tokio::test]
+    async fn migrates_legacy_uptime_schema_and_returns_window_rows() -> anyhow::Result<()> {
+        let database_url = temp_sqlite_url("legacy-hourly-uptime");
+        let bootstrap_pool = SqlitePool::connect(&database_url).await?;
+
+        // Simulate an older schema missing newer history columns.
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS hourly_uptime (
+                hour TEXT PRIMARY KEY,
+                stream_a_seconds INTEGER NOT NULL DEFAULT 0,
+                stream_b_seconds INTEGER NOT NULL DEFAULT 0
+            )
+            "#,
+        )
+        .execute(&bootstrap_pool)
+        .await?;
+
+        drop(bootstrap_pool);
+
+        let storage = Storage::new(&database_url).await?;
+        let old_hour = Utc::now() - Duration::hours(30);
+        let recent_hour = Utc::now() - Duration::hours(1);
+
+        storage
+            .save_hourly_uptime(
+                old_hour,
+                1800,
+                1200,
+                1800,
+                2400,
+                2,
+                3,
+                50,
+                60,
+                500,
+                450,
+                7.5,
+                8.2,
+                20,
+                25,
+                INTERVAL_UPTIME_CONTRACT_VERSION,
+            )
+            .await?;
+
+        storage
+            .save_hourly_uptime(
+                recent_hour,
+                3200,
+                3000,
+                400,
+                600,
+                1,
+                1,
+                45,
+                55,
+                1200,
+                1100,
+                4.4,
+                5.5,
+                15,
+                16,
+                INTERVAL_UPTIME_CONTRACT_VERSION,
+            )
+            .await?;
+
+        let rows = storage
+            .get_uptime_since(Utc::now() - Duration::hours(24))
+            .await?;
+        assert_eq!(rows.len(), 1);
+
+        let row = &rows[0];
+        assert!(row.hour.contains(' '));
+        assert_eq!(row.stream_a_seconds, 3200);
+        assert_eq!(row.stream_b_seconds, 3000);
+        assert_eq!(row.stream_a_downtime_seconds, 400);
+        assert_eq!(row.stream_b_downtime_seconds, 600);
+        assert_eq!(row.stream_a_disconnects, 1);
+        assert_eq!(row.stream_b_disconnects, 1);
+        assert_eq!(row.stream_a_messages, 1200);
+        assert_eq!(row.stream_b_messages, 1100);
+        assert_eq!(
+            row.metrics_contract_version,
+            INTERVAL_UPTIME_CONTRACT_VERSION
+        );
+
+        Ok(())
     }
 }
