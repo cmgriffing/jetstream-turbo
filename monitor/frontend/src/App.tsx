@@ -146,19 +146,19 @@ function App() {
     <div className="monitor-app">
       <ConnectionBanner status={connectionStatus} />
 
-      <div className="monitor-shell">
+      <div className="monitor-shell monitor-shell-rail">
         <Header
           title="Jetstream Signal Monitor"
           subtitle="Operational comparison across live throughput, reliability, and historical behavior"
         />
 
-        <main className="monitor-main" aria-label="Monitor data sections">
+        <main className="monitor-main monitor-main-grid" aria-label="Monitor data sections">
           <section
-            className="monitor-section monitor-section--framed monitor-section--priority"
+            className="monitor-section monitor-section--framed monitor-section--priority monitor-section--health"
             aria-label="Current health and status"
           >
             <div className="monitor-section-heading">
-              <div>
+              <div className="monitor-section-copyblock">
                 <p className="monitor-eyebrow">Current Health</p>
                 <h2 className="monitor-section-title">Primary live status and stream dominance</h2>
                 <p className="monitor-section-copy">
@@ -212,9 +212,12 @@ function App() {
             </div>
           </section>
 
-          <section className="monitor-section monitor-section--framed" aria-label="Comparative throughput">
+          <section
+            className="monitor-section monitor-section--framed monitor-section--throughput"
+            aria-label="Comparative throughput"
+          >
             <div className="monitor-section-heading">
-              <div>
+              <div className="monitor-section-copyblock">
                 <p className="monitor-eyebrow">Comparative Throughput</p>
                 <h2 className="monitor-section-title">Message-rate divergence across selected windows</h2>
                 <p className="monitor-section-copy">
@@ -255,9 +258,12 @@ function App() {
             />
           </section>
 
-          <section className="monitor-section monitor-section--framed" aria-label="Reliability trends">
+          <section
+            className="monitor-section monitor-section--framed monitor-section--reliability"
+            aria-label="Reliability trends"
+          >
             <div className="monitor-section-heading">
-              <div>
+              <div className="monitor-section-copyblock">
                 <p className="monitor-eyebrow">Reliability Trends</p>
                 <h2 className="monitor-section-title">Observed uptime stability by interval</h2>
                 <p className="monitor-section-copy">
@@ -275,9 +281,12 @@ function App() {
             />
           </section>
 
-          <section className="monitor-section monitor-section--framed" aria-label="Historical analytics table">
+          <section
+            className="monitor-section monitor-section--framed monitor-section--history"
+            aria-label="Historical analytics table"
+          >
             <div className="monitor-section-heading">
-              <div>
+              <div className="monitor-section-copyblock">
                 <p className="monitor-eyebrow">Historical Analytics</p>
                 <h2 className="monitor-section-title">Operational summary for the selected window</h2>
                 <p className="monitor-section-copy">
