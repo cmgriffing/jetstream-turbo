@@ -28,9 +28,9 @@
   --monitor-glow-soft: rgba(153, 172, 205, 0.08);
   --monitor-shadow-sm: 4px 4px 0 rgba(5, 8, 13, 0.55);
   --monitor-shadow-md: 7px 7px 0 rgba(5, 8, 13, 0.65);
-  --monitor-radius-sm: 0.2rem;
-  --monitor-radius-md: 0.3rem;
-  --monitor-radius-lg: 0.4rem;
+  --monitor-radius-sm: 0;
+  --monitor-radius-md: 0;
+  --monitor-radius-lg: 0;
 
   --background: oklch(0.24 0.01 260);
   --foreground: oklch(0.96 0.01 255);
@@ -55,7 +55,7 @@
   --chart-3: oklch(0.81 0.11 85);
   --chart-4: oklch(0.7 0.15 20);
   --chart-5: oklch(0.67 0.1 301);
-  --radius: 0.3rem;
+  --radius: 0;
   --sidebar: oklch(0.2 0.03 255);
   --sidebar-foreground: oklch(0.97 0.01 255);
   --sidebar-primary: oklch(0.79 0.13 167);
@@ -134,13 +134,13 @@
   --color-card: var(--card);
   --color-foreground: var(--foreground);
   --color-background: var(--background);
-  --radius-sm: calc(var(--radius) - 2px);
-  --radius-md: var(--radius);
-  --radius-lg: calc(var(--radius) + 2px);
-  --radius-xl: calc(var(--radius) + 4px);
-  --radius-2xl: calc(var(--radius) + 6px);
-  --radius-3xl: calc(var(--radius) + 8px);
-  --radius-4xl: calc(var(--radius) + 12px);
+  --radius-sm: 0;
+  --radius-md: 0;
+  --radius-lg: 0;
+  --radius-xl: 0;
+  --radius-2xl: 0;
+  --radius-3xl: 0;
+  --radius-4xl: 0;
 }
 
 @layer base {
@@ -202,7 +202,7 @@
 
 ::-webkit-scrollbar-thumb {
   background: var(--monitor-border);
-  border-radius: 2px;
+  border-radius: 0;
 }
 
 ::-webkit-scrollbar-thumb:hover {
@@ -242,7 +242,7 @@
   position: relative;
   overflow: hidden;
   border: 2px solid var(--monitor-border);
-  border-radius: var(--monitor-radius-lg);
+  border-radius: 0;
   background: var(--monitor-surface);
   box-shadow: var(--monitor-shadow-sm);
 }
@@ -339,7 +339,7 @@
   min-width: min(18rem, 100%);
   padding: 0.6rem 0.75rem;
   border: 2px solid var(--monitor-border);
-  border-radius: var(--monitor-radius-sm);
+  border-radius: 0;
   background: var(--monitor-surface-2);
   box-shadow: 3px 3px 0 rgba(5, 8, 13, 0.42);
 }
@@ -383,7 +383,7 @@
 .monitor-section--framed {
   position: relative;
   border: 2px solid var(--monitor-border);
-  border-radius: var(--monitor-radius-lg);
+  border-radius: 0;
   padding: clamp(0.72rem, 1.35vw, 1rem);
   background: var(--monitor-surface);
   box-shadow: var(--monitor-shadow-sm);
@@ -397,7 +397,7 @@
   width: 0.52rem;
   height: 0.52rem;
   background: var(--monitor-border-strong);
-  border-radius: 1px;
+  border-radius: 0;
   pointer-events: none;
 }
 
@@ -455,7 +455,7 @@
   align-items: center;
   gap: 0.32rem;
   border: 2px solid var(--monitor-border);
-  border-radius: var(--monitor-radius-sm);
+  border-radius: 0;
   padding: 0.24rem 0.56rem;
   font-family: "JetBrains Mono", monospace;
   font-size: 0.59rem;
@@ -472,7 +472,7 @@
   content: "";
   width: 0.3rem;
   height: 0.3rem;
-  border-radius: 1px;
+  border-radius: 0;
   background: currentColor;
   opacity: 0.9;
 }
@@ -521,7 +521,7 @@
   position: relative;
   z-index: 1;
   border: 1px solid var(--monitor-border);
-  border-radius: var(--monitor-radius-md);
+  border-radius: 0;
   background: rgba(17, 31, 55, 0.88);
   box-shadow: inset 0 0 0 1px rgba(87, 183, 255, 0.08);
   padding: 0.7rem 0.85rem;
@@ -549,7 +549,7 @@
 
 .monitor-window-button {
   border: 1px solid var(--monitor-border);
-  border-radius: var(--monitor-radius-sm);
+  border-radius: 0;
   padding: 0.33rem 0.6rem;
   font-family: "JetBrains Mono", monospace;
   font-size: 0.63rem;
@@ -583,7 +583,7 @@
 
 .monitor-delta-card {
   border: 1px solid var(--monitor-border);
-  border-radius: var(--monitor-radius-md);
+  border-radius: 0;
   padding: 0.8rem 0.95rem;
   background: rgba(18, 33, 58, 0.9);
   box-shadow: inset 0 0 0 1px rgba(110, 144, 194, 0.11);
@@ -670,7 +670,7 @@
   position: relative;
   overflow: hidden;
   border: 1px solid var(--monitor-border);
-  border-radius: var(--monitor-radius-md);
+  border-radius: 0;
   padding: 0.95rem;
   background: rgba(18, 33, 58, 0.9);
   box-shadow: inset 0 0 0 1px rgba(110, 144, 194, 0.1);
@@ -721,7 +721,7 @@
 .monitor-stream-status-dot {
   width: 0.38rem;
   height: 0.38rem;
-  border-radius: 50%;
+  border-radius: 0;
   background: currentColor;
 }
 
@@ -799,7 +799,7 @@
   width: 11.5rem;
   transform: translateX(-50%);
   border: 1px solid var(--monitor-border);
-  border-radius: var(--monitor-radius-sm);
+  border-radius: 0;
   background: rgba(12, 22, 40, 0.97);
   color: var(--monitor-text-dim);
   padding: 0.36rem 0.44rem;
@@ -855,7 +855,7 @@
 .monitor-state-overlay {
   margin-bottom: 0.55rem;
   border: 1px solid rgba(248, 191, 90, 0.45);
-  border-radius: var(--monitor-radius-sm);
+  border-radius: 0;
   background: rgba(74, 50, 20, 0.34);
   color: var(--monitor-accent-warn);
   font-family: "JetBrains Mono", monospace;
@@ -923,7 +923,7 @@
   display: inline-flex;
   align-items: center;
   gap: 0.32rem;
-  border-radius: 999px;
+  border-radius: 0;
   border: 1px solid var(--monitor-border);
   background: rgba(14, 26, 46, 0.95);
   padding: 0.22rem 0.58rem;
@@ -1122,7 +1122,7 @@
 
 .monitor-stream-main {
   border: 1px solid rgba(126, 157, 205, 0.2);
-  border-radius: var(--monitor-radius-sm);
+  border-radius: 0;
   background: rgba(11, 22, 40, 0.45);
   padding: 0.62rem 0.7rem;
 }
@@ -1135,7 +1135,7 @@
 
 .monitor-stream-metric {
   border: 1px solid rgba(120, 149, 196, 0.2);
-  border-radius: calc(var(--monitor-radius-sm) - 0.1rem);
+  border-radius: 0;
   background: rgba(13, 24, 43, 0.55);
   padding: 0.38rem 0.46rem;
   min-width: 0;
@@ -1158,7 +1158,7 @@
 
 .monitor-chart-frame {
   border: 1px solid rgba(119, 153, 205, 0.2);
-  border-radius: var(--monitor-radius-sm);
+  border-radius: 0;
   background: linear-gradient(180deg, rgba(13, 24, 43, 0.7) 0%, rgba(9, 18, 33, 0.58) 100%);
   padding: 0.4rem;
 }
@@ -1178,7 +1178,7 @@
   content: "";
   width: 0.35rem;
   height: 0.35rem;
-  border-radius: 999px;
+  border-radius: 0;
   background: currentColor;
   opacity: 0.9;
 }
@@ -1250,7 +1250,7 @@
 .monitor-table-state {
   padding: 0.75rem 0.7rem;
   border: 1px dashed rgba(120, 149, 196, 0.34);
-  border-radius: var(--monitor-radius-sm);
+  border-radius: 0;
   background: rgba(15, 30, 54, 0.55);
 }
 
@@ -1330,14 +1330,14 @@
 /* Wave 1: component-scope neobrutalist overrides */
 .monitor-window-controls {
   border: 2px solid var(--monitor-border-strong);
-  border-radius: 0.2rem;
+  border-radius: 0;
   background: var(--monitor-bg-1);
   box-shadow: 4px 4px 0 rgba(5, 8, 18, 0.66);
 }
 
 .monitor-window-button {
   border: 2px solid var(--monitor-border);
-  border-radius: 0.16rem;
+  border-radius: 0;
   background: var(--monitor-bg-0);
   transition: border-color 160ms ease, color 160ms ease, background-color 160ms ease;
 }
@@ -1362,7 +1362,7 @@
 .monitor-chart-card,
 .monitor-table-card {
   border: 2px solid var(--monitor-border-strong);
-  border-radius: 0.2rem;
+  border-radius: 0;
   background: var(--monitor-bg-1);
   box-shadow: 4px 4px 0 rgba(5, 8, 18, 0.66);
   backdrop-filter: none;
@@ -1412,18 +1412,18 @@
 
 .monitor-stream-status {
   border: 1px solid currentColor;
-  border-radius: 0.12rem;
+  border-radius: 0;
   padding: 0.12rem 0.35rem;
   background: rgba(5, 8, 18, 0.36);
 }
 
 .monitor-stream-status-dot {
-  border-radius: 1px;
+  border-radius: 0;
 }
 
 .monitor-stream-main {
   border: 2px solid rgba(126, 157, 205, 0.38);
-  border-radius: 0.14rem;
+  border-radius: 0;
   background: var(--monitor-bg-0);
 }
 
@@ -1433,7 +1433,7 @@
 
 .monitor-stream-metric {
   border: 2px solid rgba(120, 149, 196, 0.38);
-  border-radius: 0.14rem;
+  border-radius: 0;
   background: var(--monitor-bg-0);
 }
 
@@ -1443,7 +1443,7 @@
 
 .monitor-chart-frame {
   border: 2px solid rgba(119, 153, 205, 0.42);
-  border-radius: 0.12rem;
+  border-radius: 0;
   background: var(--monitor-bg-0);
 }
 
@@ -1457,7 +1457,7 @@
 
 .monitor-table-state {
   border: 2px solid rgba(120, 149, 196, 0.42);
-  border-radius: 0.14rem;
+  border-radius: 0;
   background: var(--monitor-bg-0);
 }
 
@@ -1511,5 +1511,105 @@
 
   .monitor-connection-banner-spinner {
     margin-left: 0;
+  }
+}
+
+/* Wave 2: flatten radii and simplify framing */
+::-webkit-scrollbar-thumb,
+.monitor-panel,
+.monitor-header-meta,
+.monitor-section--framed,
+.monitor-section--framed::before,
+.monitor-pill,
+.monitor-pill::before,
+.monitor-window-controls,
+.monitor-window-button,
+.monitor-delta-card,
+.monitor-stream-card,
+.monitor-stream-status,
+.monitor-stream-status-dot,
+.monitor-tooltip,
+.monitor-state-overlay,
+.monitor-state-overlay::before,
+.monitor-status-pill,
+.monitor-stream-main,
+.monitor-stream-metric,
+.monitor-chart-frame,
+.monitor-table-state {
+  border-radius: 0;
+}
+
+.monitor-section--framed {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+
+.monitor-section--framed::before {
+  content: none;
+}
+
+.monitor-section--priority {
+  box-shadow: none;
+}
+
+.monitor-header-meta {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0.1rem 0 0;
+  min-width: 0;
+}
+
+.monitor-window-controls {
+  border-color: var(--monitor-border);
+  background: transparent;
+  box-shadow: none;
+}
+
+.monitor-delta-card,
+.monitor-stream-card,
+.monitor-chart-card,
+.monitor-table-card {
+  background: transparent;
+  box-shadow: none;
+}
+
+.monitor-delta-card--lead-a,
+.monitor-delta-card--lead-b,
+.monitor-delta-card--tie {
+  box-shadow: none;
+}
+
+.monitor-stream-main,
+.monitor-stream-metric,
+.monitor-chart-frame,
+.monitor-table-state {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.monitor-stream-main,
+.monitor-stream-metric,
+.monitor-chart-frame {
+  padding: 0;
+}
+
+.monitor-table-state {
+  padding: 0.35rem 0 0;
+}
+
+.monitor-connection-banner {
+  box-shadow: none;
+}
+
+@media (max-width: 768px) {
+  .monitor-section--framed,
+  .monitor-stream-main,
+  .monitor-stream-metric,
+  .monitor-chart-frame {
+    padding: 0;
   }
 }
