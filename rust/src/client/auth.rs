@@ -32,29 +32,28 @@ pub struct BlueskyAuthClient {
 }
 
 impl BlueskyAuthClient {
-    pub fn new(handle: String, app_password: String) -> Self {
+    pub fn new(handle: String, app_password: String) -> TurboResult<Self> {
         Self::with_api_url(handle, app_password, "https://bsky.social/xrpc".to_string())
     }
 
-    pub fn with_api_url(handle: String, app_password: String, api_base_url: String) -> Self {
-        Self {
-            http_client: Client::builder()
-                .timeout(Duration::from_secs(10))
-                .user_agent("jetstream-turbo/0.1.0")
-                .build()
-                .unwrap_or_else(|e| {
-                    error!(
-                        "Failed to create auth HTTP client: {}. Falling back to default client.",
-                        e
-                    );
-                    Client::new()
-                }),
+    pub fn with_api_url(
+        handle: String,
+        app_password: String,
+        api_base_url: String,
+    ) -> TurboResult<Self> {
+        let http_client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .user_agent("jetstream-turbo/0.1.0")
+            .build()?;
+
+        Ok(Self {
+            http_client,
             handle,
             app_password,
             api_base_url,
             max_retries: 3,
             retry_delay: Duration::from_millis(500),
-        }
+        })
     }
 
     /// Authenticate with Bluesky and get a session token
@@ -244,7 +243,9 @@ mod tests {
             .await;
 
         let client = BlueskyAuthClient {
-            http_client: Client::new(),
+            http_client: Client::builder()
+                .build()
+                .expect("Failed to build test HTTP client"),
             handle: "test.bsky.social".to_string(),
             app_password: "test-password".to_string(),
             api_base_url: mock_server.uri(),
@@ -267,7 +268,9 @@ mod tests {
             .await;
 
         let client = BlueskyAuthClient {
-            http_client: Client::new(),
+            http_client: Client::builder()
+                .build()
+                .expect("Failed to build test HTTP client"),
             handle: "test.bsky.social".to_string(),
             app_password: "wrong-password".to_string(),
             api_base_url: mock_server.uri(),

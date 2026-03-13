@@ -52,7 +52,7 @@ impl TurboCharger {
         let auth_client = Arc::new(BlueskyAuthClient::new(
             settings.bluesky_handle.clone(),
             settings.bluesky_app_password.clone(),
-        ));
+        )?);
 
         let auth_response = auth_client.authenticate().await?;
         info!(
@@ -66,7 +66,7 @@ impl TurboCharger {
             settings.post_batch_size,
             settings.profile_batch_wait_ms,
             settings.post_batch_wait_ms,
-        ));
+        )?);
         bluesky_client
             .refresh_sessions(
                 vec![auth_response.access_jwt],
