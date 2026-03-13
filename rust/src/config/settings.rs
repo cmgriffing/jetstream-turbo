@@ -174,8 +174,18 @@ impl Settings {
             builder = builder.set_override("cleanup_chunk_delay_ms", chunk_delay)?;
         }
 
+        if let Ok(posthog_api_key) = std::env::var("POSTHOG_API_KEY") {
+            builder = builder.set_override("posthog_api_key", posthog_api_key)?;
+        }
+
+        if let Ok(posthog_host) = std::env::var("POSTHOG_HOST") {
+            builder = builder.set_override("posthog_host", posthog_host)?;
+        }
+
         let settings = builder.build()?;
-        let settings: Settings = settings.try_deserialize()?;
+        let mut settings: Settings = settings.try_deserialize()?;
+        settings.posthog_api_key = normalize_optional_setting(settings.posthog_api_key);
+        settings.posthog_host = normalize_optional_setting(settings.posthog_host);
 
         // Validate required settings
         settings.validate()?;
@@ -241,6 +251,17 @@ fn default_wanted_collections() -> String {
     "app.bsky.feed.post".to_string()
 }
 
+fn normalize_optional_setting(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +290,16 @@ mod tests {
         settings.bluesky_app_password = "".to_string();
 
         assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn test_normalize_optional_setting() {
+        assert_eq!(normalize_optional_setting(None), None);
+        assert_eq!(normalize_optional_setting(Some("".to_string())), None);
+        assert_eq!(normalize_optional_setting(Some("   ".to_string())), None);
+        assert_eq!(
+            normalize_optional_setting(Some("  https://us.i.posthog.com  ".to_string())),
+            Some("https://us.i.posthog.com".to_string())
+        );
     }
 }
