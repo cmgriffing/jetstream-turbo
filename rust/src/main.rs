@@ -4,6 +4,7 @@ use jetstream_turbo_rs::config::Settings;
 use jetstream_turbo_rs::server::create_server;
 use jetstream_turbo_rs::telemetry::ErrorReporter;
 use jetstream_turbo_rs::turbocharger::TurboCharger;
+use std::any::Any;
 use std::collections::HashMap;
 use std::env;
 use std::time::Duration;
@@ -75,6 +76,7 @@ async fn main() -> Result<()> {
         settings.posthog_host.clone(),
     )
     .await;
+    install_panic_hook(error_reporter.clone());
 
     tracing::info!("Starting jetstream-turbo v{}", env!("CARGO_PKG_VERSION"));
     tracing::info!(
@@ -146,17 +148,112 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Wait for either task to complete
-    tokio::select! {
-        _ = turbocharger_handle => {
-            tracing::info!("Turbocharger task completed");
+    // Wait for either task to complete, then make a bounded attempt to flush telemetry.
+    let shutdown_reason = tokio::select! {
+        result = turbocharger_handle => {
+            handle_task_exit("turbocharger", result, &error_reporter)
         }
-        _ = server_handle => {
-            tracing::info!("Server task completed");
+        result = server_handle => {
+            handle_task_exit("server", result, &error_reporter)
         }
+    };
+
+    if error_reporter
+        .flush_with_timeout(Duration::from_secs(2))
+        .await
+    {
+        tracing::info!(
+            "Telemetry flush completed before shutdown (triggered by {} task exit)",
+            shutdown_reason
+        );
+    } else {
+        tracing::warn!(
+            "Telemetry flush did not complete before shutdown (triggered by {} task exit)",
+            shutdown_reason
+        );
     }
 
     Ok(())
+}
+
+fn install_panic_hook(error_reporter: ErrorReporter) {
+    let default_hook = std::panic::take_hook();
+
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let panic_message = panic_payload_to_string(panic_info.payload());
+        let panic_location = panic_info
+            .location()
+            .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()));
+
+        let mut context = HashMap::new();
+        context.insert("component", "runtime");
+        context.insert("operation", "panic_hook");
+        if let Some(location) = panic_location.as_deref() {
+            context.insert("panic_location", location);
+        }
+
+        error_reporter.capture_unhandled_failure("Panic", &panic_message, context);
+
+        // Best-effort flush request; this is non-blocking and bounded in the async path.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let reporter = error_reporter.clone();
+            handle.spawn(async move {
+                let _ = reporter.flush_with_timeout(Duration::from_secs(2)).await;
+            });
+        }
+
+        default_hook(panic_info);
+    }));
+}
+
+fn handle_task_exit(
+    task_name: &'static str,
+    result: Result<(), tokio::task::JoinError>,
+    error_reporter: &ErrorReporter,
+) -> &'static str {
+    match result {
+        Ok(()) => {
+            tracing::warn!("{} task exited", task_name);
+        }
+        Err(join_err) => {
+            let is_panic = join_err.is_panic();
+            let message = if is_panic {
+                let panic_payload = join_err.into_panic();
+                panic_payload_to_string(panic_payload.as_ref())
+            } else {
+                join_err.to_string()
+            };
+
+            let mut context = HashMap::new();
+            context.insert("component", "main");
+            context.insert("operation", "task_join");
+            context.insert("task", task_name);
+            context.insert("is_panic", if is_panic { "true" } else { "false" });
+
+            error_reporter.capture_unhandled_failure(
+                if is_panic {
+                    "TaskPanic"
+                } else {
+                    "TaskJoinFailure"
+                },
+                &message,
+                context,
+            );
+            tracing::error!("{} task failed: {}", task_name, message);
+        }
+    }
+
+    task_name
+}
+
+fn panic_payload_to_string(payload: &(dyn Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else {
+        "unknown panic payload".to_string()
+    }
 }
 
 fn init_tracing(log_level: &str) -> Result<()> {
@@ -169,4 +266,43 @@ fn init_tracing(log_level: &str) -> Result<()> {
         .init();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{handle_task_exit, panic_payload_to_string, ErrorReporter};
+    use std::any::Any;
+
+    #[test]
+    fn panic_payload_to_string_supports_string() {
+        let payload: Box<dyn Any + Send> = Box::new("panic message".to_string());
+        assert_eq!(panic_payload_to_string(payload.as_ref()), "panic message");
+    }
+
+    #[test]
+    fn panic_payload_to_string_supports_str() {
+        let payload: Box<dyn Any + Send> = Box::new("panic message");
+        assert_eq!(panic_payload_to_string(payload.as_ref()), "panic message");
+    }
+
+    #[test]
+    fn panic_payload_to_string_handles_unknown_payload() {
+        let payload: Box<dyn Any + Send> = Box::new(42_usize);
+        assert_eq!(
+            panic_payload_to_string(payload.as_ref()),
+            "unknown panic payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_task_exit_handles_task_panic_path() {
+        let reporter = ErrorReporter::new(None, None).await;
+        let join_result = tokio::spawn(async move {
+            panic!("simulated task panic");
+        })
+        .await;
+
+        let task_name = handle_task_exit("turbocharger", join_result, &reporter);
+        assert_eq!(task_name, "turbocharger");
+    }
 }
