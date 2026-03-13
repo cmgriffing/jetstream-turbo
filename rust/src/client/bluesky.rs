@@ -121,7 +121,13 @@ impl BlueskyClient {
             .tcp_keepalive(Duration::from_secs(60))
             .tcp_nodelay(true)
             .build()
-            .expect("Failed to create HTTP client");
+            .unwrap_or_else(|e| {
+                error!(
+                    "Failed to create tuned HTTP client: {}. Falling back to default client.",
+                    e
+                );
+                Client::new()
+            });
 
         let session_strings = Arc::new(RwLock::new(session_strings));
         let refresh_jwt = Arc::new(RwLock::new(None));

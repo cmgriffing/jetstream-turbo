@@ -6,7 +6,7 @@ use sqlx::{sqlite::SqliteConnectOptions, sqlite::SqliteJournalMode, Row, SqliteP
 use std::path::Path;
 use std::time::Instant;
 use tokio::time::{sleep, Duration};
-use tracing::{info, instrument, trace};
+use tracing::{error, info, instrument, trace};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CleanupResult {
@@ -50,7 +50,10 @@ impl SQLiteStore {
         // Initialize schema
         Self::initialize_schema(&pool).await?;
 
-        Ok(Self { pool, db_path: db_path_str })
+        Ok(Self {
+            pool,
+            db_path: db_path_str,
+        })
     }
 
     async fn initialize_schema(pool: &SqlitePool) -> TurboResult<()> {
@@ -116,12 +119,16 @@ impl SQLiteStore {
         Ok(())
     }
 
-    #[instrument(name = "sqlite_store_record", skip(self, record), fields(at_uri, duration_ms))]
+    #[instrument(
+        name = "sqlite_store_record",
+        skip(self, record),
+        fields(at_uri, duration_ms)
+    )]
     pub async fn store_record(&self, record: &EnrichedRecord) -> TurboResult<i64> {
         let start = Instant::now();
         let at_uri = record.get_at_uri().unwrap_or_default();
         tracing::Span::current().record("at_uri", &at_uri);
-        
+
         let now = Utc::now();
 
         let message_json = simd_json_to_string(&record.message).unwrap();
@@ -158,10 +165,14 @@ impl SQLiteStore {
         Ok(id)
     }
 
-    #[instrument(name = "sqlite_store_batch", skip(self, records), fields(count, duration_ms))]
+    #[instrument(
+        name = "sqlite_store_batch",
+        skip(self, records),
+        fields(count, duration_ms)
+    )]
     pub async fn store_batch(&self, records: &[EnrichedRecord]) -> TurboResult<Vec<i64>> {
         let start = Instant::now();
-        
+
         if records.is_empty() {
             return Ok(vec![]);
         }
@@ -182,12 +193,12 @@ impl SQLiteStore {
 
         for chunk in records.chunks(MAX_ROWS_PER_INSERT) {
             let mut tx = self.pool.begin().await?;
-            
+
             let placeholders: String = std::iter::repeat(SINGLE_ROW_PLACEHOLDER)
                 .take(chunk.len())
                 .collect::<Vec<_>>()
                 .join(", ");
-            
+
             let insert_sql = format!(
                 r#"INSERT INTO records (
                     at_uri, did, time_us, message, message_metadata,
@@ -330,7 +341,7 @@ impl SQLiteStore {
 
     pub async fn get_db_size(&self) -> TurboResult<i64> {
         let row: (i64,) = sqlx::query_as(
-            "SELECT (page_count * page_size) as size FROM pragma_page_count(), pragma_page_size()"
+            "SELECT (page_count * page_size) as size FROM pragma_page_count(), pragma_page_size()",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -353,7 +364,9 @@ impl SQLiteStore {
 
         for iteration in 0..max_iterations {
             let cutoff = Utc::now() - chrono::Duration::days(current_retention as i64);
-            let deleted = self.cleanup_old_records(cutoff, cleanup_chunk_size, cleanup_chunk_delay_ms).await?;
+            let deleted = self
+                .cleanup_old_records(cutoff, cleanup_chunk_size, cleanup_chunk_delay_ms)
+                .await?;
             total_deleted += deleted;
 
             let current_size = self.get_db_size().await?;
@@ -399,8 +412,10 @@ impl SQLiteStore {
                     "Starting background VACUUM (freed {}MB, {}%)",
                     freed_mb, freed_percent
                 );
-                sqlx::query("VACUUM").execute(&pool).await.unwrap();
-                info!("Background VACUUM completed");
+                match sqlx::query("VACUUM").execute(&pool).await {
+                    Ok(_) => info!("Background VACUUM completed"),
+                    Err(e) => error!("Background VACUUM failed: {}", e),
+                }
             });
 
             sleep(Duration::from_millis(500)).await;
@@ -448,35 +463,35 @@ mod tests {
     #[tokio::test]
     async fn test_get_db_size() {
         let store = create_test_db().await;
-        
+
         let size = store.get_db_size().await.unwrap();
         assert!(size > 0, "Database should have some initial size");
-        
+
         store.close().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_cleanup_old_records_empty_db() {
         let store = create_test_db().await;
-        
+
         let cutoff = Utc::now() - Duration::days(7);
         let deleted = store.cleanup_old_records(cutoff, 1000, 50).await.unwrap();
-        
+
         assert_eq!(deleted, 0, "Should delete nothing from empty DB");
-        
+
         store.close().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_cleanup_old_records_with_data() {
         let store = create_test_db().await;
-        
+
         let now = Utc::now();
         let now_str = now.to_rfc3339();
-        
+
         let old_time = now - Duration::days(10);
         let old_time_str = old_time.to_rfc3339();
-        
+
         sqlx::query(
             r#"INSERT INTO records (at_uri, did, time_us, message, message_metadata, created_at, hydrated_at, hydration_time_ms, api_calls_count, cache_hit_rate, cache_hits, cache_misses)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
@@ -519,26 +534,26 @@ mod tests {
 
         let cutoff = now - Duration::days(7);
         let deleted = store.cleanup_old_records(cutoff, 1000, 50).await.unwrap();
-        
+
         assert_eq!(deleted, 1, "Should delete 1 old record");
-        
+
         let count = store.count_records().await.unwrap();
         assert_eq!(count, 1, "Should have 1 record remaining");
-        
+
         store.close().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_cleanup_with_vacuum_size_based() {
         let store = create_test_db().await;
-        
+
         let now = Utc::now();
         let now_str = now.to_rfc3339();
-        
+
         for i in 0..5 {
             let old_time = now - Duration::days(10);
             let old_time_str = old_time.to_rfc3339();
-            
+
             sqlx::query(
                 r#"INSERT INTO records (at_uri, did, time_us, message, message_metadata, created_at, hydrated_at, hydration_time_ms, api_calls_count, cache_hit_rate, cache_hits, cache_misses)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
@@ -564,20 +579,26 @@ mod tests {
         assert!(size_before > 0, "DB should have size");
 
         let max_size = size_before / 2;
-        let result = store.cleanup_with_vacuum(7, max_size, 1024, 1.0, 1000, 50).await.unwrap();
-        
-        assert!(result.records_deleted > 0, "Should have deleted some records");
-        
+        let result = store
+            .cleanup_with_vacuum(7, max_size, 1024, 1.0, 1000, 50)
+            .await
+            .unwrap();
+
+        assert!(
+            result.records_deleted > 0,
+            "Should have deleted some records"
+        );
+
         store.close().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_cleanup_with_vacuum_under_limit() {
         let store = create_test_db().await;
-        
+
         let now = Utc::now();
         let now_str = now.to_rfc3339();
-        
+
         for i in 0..3 {
             sqlx::query(
                 r#"INSERT INTO records (at_uri, did, time_us, message, message_metadata, created_at, hydrated_at, hydration_time_ms, api_calls_count, cache_hit_rate, cache_hits, cache_misses)
@@ -601,10 +622,16 @@ mod tests {
         }
 
         let large_size = 100_000_000_000i64;
-        let result = store.cleanup_with_vacuum(7, large_size, 1024, 1.0, 1000, 50).await.unwrap();
-        
-        assert_eq!(result.records_deleted, 0, "Should not delete anything when under limit");
-        
+        let result = store
+            .cleanup_with_vacuum(7, large_size, 1024, 1.0, 1000, 50)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.records_deleted, 0,
+            "Should not delete anything when under limit"
+        );
+
         store.close().await.unwrap();
     }
 }

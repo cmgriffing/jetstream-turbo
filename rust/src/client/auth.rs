@@ -42,7 +42,13 @@ impl BlueskyAuthClient {
                 .timeout(Duration::from_secs(10))
                 .user_agent("jetstream-turbo/0.1.0")
                 .build()
-                .expect("Failed to create HTTP client"),
+                .unwrap_or_else(|e| {
+                    error!(
+                        "Failed to create auth HTTP client: {}. Falling back to default client.",
+                        e
+                    );
+                    Client::new()
+                }),
             handle,
             app_password,
             api_base_url,
@@ -67,62 +73,56 @@ impl BlueskyAuthClient {
             let response = self.http_client.post(&url).json(&request_body).send().await;
 
             match response {
-                Ok(resp) => {
-                    match resp.status() {
-                        reqwest::StatusCode::OK => {
-                            let body_text = resp.text().await?;
-                            trace!("Auth response body: {}", body_text);
+                Ok(resp) => match resp.status() {
+                    reqwest::StatusCode::OK => {
+                        let body_text = resp.text().await?;
+                        trace!("Auth response body: {}", body_text);
 
-                            let auth_response: AuthResponse = match serde_json::from_str(&body_text)
-                            {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    error!(
-                                        "Failed to parse auth response: {}. Body: {}",
-                                        e, body_text
-                                    );
-                                    return Err(TurboError::InvalidApiResponse(format!(
-                                        "Failed to parse auth response: {e}. Response: {body_text}"
-                                    )));
-                                }
-                            };
-
-                            if auth_response.access_jwt.is_empty() {
-                                error!(
-                                    "Auth response missing access_jwt. Full response: {:?}",
-                                    auth_response
-                                );
-                                return Err(TurboError::InvalidApiResponse(
-                                    "Auth response missing access_jwt field".to_string(),
-                                ));
+                        let auth_response: AuthResponse = match serde_json::from_str(&body_text) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                error!("Failed to parse auth response: {}. Body: {}", e, body_text);
+                                return Err(TurboError::InvalidApiResponse(format!(
+                                    "Failed to parse auth response: {e}. Response: {body_text}"
+                                )));
                             }
+                        };
 
-                            info!(
-                                "Successfully authenticated with Bluesky as {}",
-                                auth_response.handle
+                        if auth_response.access_jwt.is_empty() {
+                            error!(
+                                "Auth response missing access_jwt. Full response: {:?}",
+                                auth_response
                             );
-
-                            return Ok(auth_response);
-                        }
-                        reqwest::StatusCode::UNAUTHORIZED => {
-                            error!("Authentication failed - invalid handle or app password");
-                            return Err(TurboError::PermissionDenied(
-                                "Invalid Bluesky handle or app password".to_string(),
+                            return Err(TurboError::InvalidApiResponse(
+                                "Auth response missing access_jwt field".to_string(),
                             ));
                         }
-                        reqwest::StatusCode::TOO_MANY_REQUESTS => {
-                            warn!("Rate limited during authentication, waiting before retry");
-                            tokio::time::sleep(self.retry_delay * 2).await;
-                        }
-                        status => {
-                            let error_text = resp.text().await.unwrap_or_default();
-                            error!("Bluesky auth error {}: {}", status, error_text);
-                            return Err(TurboError::InvalidApiResponse(format!(
-                                "Status {status}: {error_text}"
-                            )));
-                        }
+
+                        info!(
+                            "Successfully authenticated with Bluesky as {}",
+                            auth_response.handle
+                        );
+
+                        return Ok(auth_response);
                     }
-                }
+                    reqwest::StatusCode::UNAUTHORIZED => {
+                        error!("Authentication failed - invalid handle or app password");
+                        return Err(TurboError::PermissionDenied(
+                            "Invalid Bluesky handle or app password".to_string(),
+                        ));
+                    }
+                    reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                        warn!("Rate limited during authentication, waiting before retry");
+                        tokio::time::sleep(self.retry_delay * 2).await;
+                    }
+                    status => {
+                        let error_text = resp.text().await.unwrap_or_default();
+                        error!("Bluesky auth error {}: {}", status, error_text);
+                        return Err(TurboError::InvalidApiResponse(format!(
+                            "Status {status}: {error_text}"
+                        )));
+                    }
+                },
                 Err(e) => {
                     error!("HTTP request failed: {}", e);
                     if attempt >= self.max_retries {
@@ -162,19 +162,25 @@ impl BlueskyAuthClient {
 
         info!("Refreshing Bluesky session");
 
-        let response = self.http_client.post(&url).json(&request_body).send().await?;
+        let response = self
+            .http_client
+            .post(&url)
+            .json(&request_body)
+            .send()
+            .await?;
 
         match response.status() {
             reqwest::StatusCode::OK => {
                 let body_text = response.text().await?;
                 trace!("Refresh response body: {}", body_text);
 
-                let auth_response: AuthResponse = serde_json::from_str(&body_text).map_err(|e| {
-                    error!("Failed to parse refresh response: {}", e);
-                    TurboError::InvalidApiResponse(format!(
-                        "Failed to parse refresh response: {e}. Response: {body_text}"
-                    ))
-                })?;
+                let auth_response: AuthResponse =
+                    serde_json::from_str(&body_text).map_err(|e| {
+                        error!("Failed to parse refresh response: {}", e);
+                        TurboError::InvalidApiResponse(format!(
+                            "Failed to parse refresh response: {e}. Response: {body_text}"
+                        ))
+                    })?;
 
                 if auth_response.access_jwt.is_empty() {
                     error!(
