@@ -35,7 +35,8 @@ mod tests {
             "test.bsky.social".to_string(),
             "test-app-password".to_string(),
             mock_server.uri(),
-        );
+        )
+        .unwrap();
 
         let auth_response = client.authenticate().await.unwrap();
         assert!(auth_response.access_jwt.contains("test_jwt_token"));

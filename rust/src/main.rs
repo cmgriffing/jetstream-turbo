@@ -6,6 +6,7 @@ use jetstream_turbo_rs::telemetry::ErrorReporter;
 use jetstream_turbo_rs::turbocharger::TurboCharger;
 use std::collections::HashMap;
 use std::env;
+use std::time::Duration;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser, Debug)]
@@ -49,7 +50,7 @@ async fn main() -> Result<()> {
     // Install rustls crypto provider
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
-        .expect("Failed to install rustls crypto provider");
+        .map_err(|e| anyhow::anyhow!("Failed to install rustls crypto provider: {e:?}"))?;
 
     let args = Args::parse();
 
@@ -72,7 +73,8 @@ async fn main() -> Result<()> {
     let error_reporter = ErrorReporter::new(
         settings.posthog_api_key.clone(),
         settings.posthog_host.clone(),
-    ).await;
+    )
+    .await;
 
     tracing::info!("Starting jetstream-turbo v{}", env!("CARGO_PKG_VERSION"));
     tracing::info!(
@@ -82,7 +84,13 @@ async fn main() -> Result<()> {
     );
 
     // Create turbocharger
-    let turbocharger = TurboCharger::new(settings.clone(), args.modulo, args.shard, error_reporter.clone()).await?;
+    let turbocharger = TurboCharger::new(
+        settings.clone(),
+        args.modulo,
+        args.shard,
+        error_reporter.clone(),
+    )
+    .await?;
     let turbocharger = std::sync::Arc::new(turbocharger);
 
     // Start background session refresh task
@@ -100,12 +108,27 @@ async fn main() -> Result<()> {
     let turbocharger_clone = turbocharger.clone();
     let error_reporter_clone = error_reporter.clone();
     let turbocharger_handle = tokio::spawn(async move {
-        if let Err(e) = turbocharger_clone.run().await {
-            tracing::error!("Turbocharger failed: {}", e);
-            let mut ctx = HashMap::new();
-            ctx.insert("component", "main");
-            ctx.insert("operation", "turbocharger_run");
-            error_reporter_clone.capture_error(&e, ctx);
+        let restart_delay = Duration::from_secs(5);
+
+        loop {
+            match turbocharger_clone.run().await {
+                Ok(()) => {
+                    tracing::warn!("Turbocharger run loop ended unexpectedly; restarting");
+                }
+                Err(e) => {
+                    tracing::error!("Turbocharger failed: {}", e);
+                    let mut ctx = HashMap::new();
+                    ctx.insert("component", "main");
+                    ctx.insert("operation", "turbocharger_run");
+                    error_reporter_clone.capture_error(&e, ctx);
+                }
+            }
+
+            tracing::warn!(
+                "Restarting turbocharger run loop in {} seconds",
+                restart_delay.as_secs()
+            );
+            tokio::time::sleep(restart_delay).await;
         }
     });
 

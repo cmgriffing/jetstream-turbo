@@ -107,7 +107,7 @@ impl BlueskyClient {
         post_batch_size: usize,
         profile_batch_wait_ms: u64,
         post_batch_wait_ms: u64,
-    ) -> Self {
+    ) -> TurboResult<Self> {
         let quota = Quota::with_period(Duration::from_millis(REQUESTS_PER_SECOND_MS))
             .expect("Valid quota")
             .allow_burst(NonZeroU32::new(1).unwrap());
@@ -120,8 +120,7 @@ impl BlueskyClient {
             .pool_idle_timeout(Duration::from_secs(30))
             .tcp_keepalive(Duration::from_secs(60))
             .tcp_nodelay(true)
-            .build()
-            .expect("Failed to create HTTP client");
+            .build()?;
 
         let session_strings = Arc::new(RwLock::new(session_strings));
         let refresh_jwt = Arc::new(RwLock::new(None));
@@ -163,7 +162,7 @@ impl BlueskyClient {
             expires_at.clone(),
         )));
 
-        Self {
+        Ok(Self {
             session_strings,
             refresh_jwt,
             expires_at,
@@ -171,7 +170,7 @@ impl BlueskyClient {
             retry_delay_ms: 200,
             profile_batch_collector,
             post_batch_collector,
-        }
+        })
     }
 
     #[instrument(name = "bulk_fetch_profiles", skip(self, dids), fields(count))]
@@ -975,13 +974,14 @@ mod tests {
     #[tokio::test]
     async fn test_bluesky_client_creation() {
         let sessions = vec!["session1:::bsky.social".to_string()];
-        let client = BlueskyClient::new(sessions, None, 25, 25, 150, 300);
+        let client = BlueskyClient::new(sessions, None, 25, 25, 150, 300).unwrap();
         assert_eq!(client.get_session_count().await, 1);
     }
 
     #[tokio::test]
     async fn test_refresh_sessions() {
-        let client = BlueskyClient::new(vec!["old_session".to_string()], None, 25, 25, 150, 300);
+        let client =
+            BlueskyClient::new(vec!["old_session".to_string()], None, 25, 25, 150, 300).unwrap();
         assert_eq!(client.get_session_count().await, 1);
 
         client

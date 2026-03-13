@@ -52,7 +52,7 @@ impl TurboCharger {
         let auth_client = Arc::new(BlueskyAuthClient::new(
             settings.bluesky_handle.clone(),
             settings.bluesky_app_password.clone(),
-        ));
+        )?);
 
         let auth_response = auth_client.authenticate().await?;
         info!(
@@ -66,7 +66,7 @@ impl TurboCharger {
             settings.post_batch_size,
             settings.profile_batch_wait_ms,
             settings.post_batch_wait_ms,
-        ));
+        )?);
         bluesky_client
             .refresh_sessions(
                 vec![auth_response.access_jwt],
@@ -191,7 +191,13 @@ impl TurboCharger {
         let semaphore = self.semaphore.clone();
 
         tokio::spawn(async move {
-            let permit = semaphore.acquire().await.unwrap();
+            let permit = match semaphore.acquire().await {
+                Ok(permit) => permit,
+                Err(e) => {
+                    error!("Batch semaphore closed unexpectedly: {}", e);
+                    return;
+                }
+            };
             match Self::process_batch_internal(
                 hydrator,
                 sqlite_store,
@@ -213,7 +219,9 @@ impl TurboCharger {
     }
 
     async fn process_batch(&self, batch: Vec<JetstreamMessage>) -> TurboResult<usize> {
-        let permit = self.semaphore.acquire().await.unwrap();
+        let permit = self.semaphore.acquire().await.map_err(|e| {
+            TurboError::Internal(format!("Batch semaphore closed unexpectedly: {e}"))
+        })?;
         let count = Self::process_batch_internal(
             self.hydrator.clone(),
             Arc::clone(&self.sqlite_store),
@@ -351,7 +359,9 @@ impl TurboCharger {
         self.broadcast_sender.subscribe()
     }
 
-    pub async fn check_and_cleanup_db(&self) -> TurboResult<Option<crate::storage::sqlite::CleanupResult>> {
+    pub async fn check_and_cleanup_db(
+        &self,
+    ) -> TurboResult<Option<crate::storage::sqlite::CleanupResult>> {
         let max_size_bytes = (self.settings.max_db_size_mb as i64) * 1024 * 1024;
         let current_size = self.sqlite_store.get_db_size().await?;
 
@@ -361,14 +371,17 @@ impl TurboCharger {
                 current_size / (1024 * 1024),
                 self.settings.max_db_size_mb
             );
-            let result = self.sqlite_store.cleanup_with_vacuum(
-                self.settings.db_retention_days,
-                max_size_bytes,
-                self.settings.vacuum_min_bytes_freed,
-                self.settings.vacuum_min_percent_freed,
-                self.settings.cleanup_chunk_size,
-                self.settings.cleanup_chunk_delay_ms,
-            ).await?;
+            let result = self
+                .sqlite_store
+                .cleanup_with_vacuum(
+                    self.settings.db_retention_days,
+                    max_size_bytes,
+                    self.settings.vacuum_min_bytes_freed,
+                    self.settings.vacuum_min_percent_freed,
+                    self.settings.cleanup_chunk_size,
+                    self.settings.cleanup_chunk_delay_ms,
+                )
+                .await?;
             info!(
                 "Cleanup complete: {} records deleted, new size: {}MB, vacuum_pending: {}",
                 result.records_deleted,
@@ -402,7 +415,8 @@ impl TurboCharger {
                             result.new_size_bytes / (1024 * 1024),
                             current_interval_minutes
                         );
-                        current_interval_minutes = (current_interval_minutes * 2).min(max_interval_minutes);
+                        current_interval_minutes =
+                            (current_interval_minutes * 2).min(max_interval_minutes);
                         consecutive_skip_count = 0;
                     }
                     Ok(None) => {
@@ -418,7 +432,8 @@ impl TurboCharger {
                     }
                     Err(e) => {
                         error!("Database cleanup failed: {}", e);
-                        current_interval_minutes = (current_interval_minutes * 2).min(max_interval_minutes);
+                        current_interval_minutes =
+                            (current_interval_minutes * 2).min(max_interval_minutes);
                         consecutive_skip_count = 0;
                     }
                 }
