@@ -49,17 +49,12 @@ pub fn create_router(turbocharger: Arc<TurboCharger>) -> Router {
 
 async fn health_check(
     State(turbocharger): State<Arc<TurboCharger>>,
-) -> Result<Json<HealthResponse>, StatusCode> {
+) -> Result<(StatusCode, Json<HealthResponse>), StatusCode> {
     match turbocharger.health_check().await {
-        Ok(status) => Ok(Json(HealthResponse {
-            status: if status.healthy {
-                "healthy"
-            } else {
-                "unhealthy"
-            }
-            .to_string(),
-            data: status,
-        })),
+        Ok(status) => {
+            let (status_code, response) = health_http_response(status);
+            Ok((status_code, Json(response)))
+        }
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
@@ -126,10 +121,22 @@ async fn handle_websocket(
 }
 
 pub async fn create_server(port: u16, turbocharger: Arc<TurboCharger>) -> TurboResult<()> {
+    let readiness_turbocharger = Arc::clone(&turbocharger);
     let app = Router::new()
         .nest("/api/v1", create_router(turbocharger))
         .route("/", get(|| async { "jetstream-turbo API server" }))
-        .route("/ready", get(|| async { "OK" }));
+        .route(
+            "/ready",
+            get(move || {
+                let turbocharger = Arc::clone(&readiness_turbocharger);
+                async move {
+                    match turbocharger.health_check().await {
+                        Ok(status) => readiness_http_status(&status),
+                        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                    }
+                }
+            }),
+        );
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await
@@ -142,4 +149,70 @@ pub async fn create_server(port: u16, turbocharger: Arc<TurboCharger>) -> TurboR
         .map_err(|e| TurboError::Io(std::io::Error::other(e)))?;
 
     Ok(())
+}
+
+fn readiness_http_status(status: &HealthStatus) -> StatusCode {
+    if status.healthy {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
+}
+
+fn health_http_response(status: HealthStatus) -> (StatusCode, HealthResponse) {
+    let status_code = readiness_http_status(&status);
+    let response_status = if status.healthy { "healthy" } else { "unhealthy" };
+
+    (
+        status_code,
+        HealthResponse {
+            status: response_status.to_string(),
+            data: status,
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{health_http_response, readiness_http_status};
+    use crate::turbocharger::HealthStatus;
+    use axum::http::StatusCode;
+
+    fn sample_health(healthy: bool) -> HealthStatus {
+        HealthStatus {
+            healthy,
+            redis_connected: healthy,
+            sqlite_available: healthy,
+            session_count: if healthy { 1 } else { 0 },
+        }
+    }
+
+    #[test]
+    fn readiness_http_status_is_ok_when_healthy() {
+        assert_eq!(readiness_http_status(&sample_health(true)), StatusCode::OK);
+    }
+
+    #[test]
+    fn readiness_http_status_is_503_when_unhealthy() {
+        assert_eq!(
+            readiness_http_status(&sample_health(false)),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn health_http_response_is_healthy_and_ok_for_healthy_status() {
+        let (status_code, response) = health_http_response(sample_health(true));
+        assert_eq!(status_code, StatusCode::OK);
+        assert_eq!(response.status, "healthy");
+        assert!(response.data.healthy);
+    }
+
+    #[test]
+    fn health_http_response_is_unhealthy_and_503_for_unhealthy_status() {
+        let (status_code, response) = health_http_response(sample_health(false));
+        assert_eq!(status_code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.status, "unhealthy");
+        assert!(!response.data.healthy);
+    }
 }
