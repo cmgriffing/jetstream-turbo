@@ -84,7 +84,49 @@ curl http://localhost:8080/api/v1/stats
     "healthy": true,
     "redis_connected": true,
     "sqlite_available": true,
-    "session_count": 1
+    "session_count": 1,
+    "diagnostics": {
+      "process_memory": {
+        "pid": 12345,
+        "rss_bytes": 73400320,
+        "virtual_memory_bytes": 581959680,
+        "source": "ps",
+        "collection_error": null
+      },
+      "cache_state": {
+        "user_entries": 1432,
+        "post_entries": 972,
+        "user_capacity": 20000,
+        "post_capacity": 20000,
+        "user_hits": 21102,
+        "user_misses": 954,
+        "post_hits": 14023,
+        "post_misses": 701,
+        "total_requests": 36780,
+        "cache_evictions": 0
+      },
+      "sqlite_state": {
+        "available": true,
+        "db_size_bytes": 12582912,
+        "wal_size_bytes": 393216,
+        "page_count": 3072,
+        "page_size_bytes": 4096,
+        "freelist_count": 0,
+        "cache_size_pages": -64000,
+        "mmap_size_bytes": 268435456,
+        "journal_mode": "wal",
+        "journal_size_limit_bytes": 5368709120,
+        "collection_error": null
+      },
+      "not_redis_state": {
+        "connected": true,
+        "engine": "not_redis",
+        "stream_name": "hydrated_jetstream",
+        "stream_length": 90,
+        "configured_max_length": 100,
+        "collection_error": null
+      }
+    }
   }
 }
 ```

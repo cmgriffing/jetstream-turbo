@@ -8,6 +8,8 @@ use tracing::{instrument, trace};
 pub struct TurboCache {
     user_cache: MokaCache<String, Arc<BlueskyProfile>>,
     post_cache: MokaCache<String, Arc<BlueskyPost>>,
+    user_capacity: usize,
+    post_capacity: usize,
     metrics: Arc<CacheMetrics>,
 }
 
@@ -53,8 +55,18 @@ impl TurboCache {
         Self {
             user_cache,
             post_cache,
+            user_capacity: user_cache_size,
+            post_capacity: post_cache_size,
             metrics: Arc::new(CacheMetrics::default()),
         }
+    }
+
+    pub fn get_entry_counts(&self) -> (u64, u64) {
+        (self.user_cache.entry_count(), self.post_cache.entry_count())
+    }
+
+    pub fn get_capacity_limits(&self) -> (usize, usize) {
+        (self.user_capacity, self.post_capacity)
     }
 
     #[instrument(name = "cache_get_user_profile", skip(self), fields(did, hit))]

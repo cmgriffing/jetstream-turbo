@@ -175,8 +175,57 @@ fn health_http_response(status: HealthStatus) -> (StatusCode, HealthResponse) {
 #[cfg(test)]
 mod tests {
     use super::{health_http_response, readiness_http_status};
-    use crate::turbocharger::HealthStatus;
+    use crate::turbocharger::{
+        CacheStateDiagnostics, HealthDiagnostics, HealthStatus, NotRedisStateDiagnostics,
+        ProcessMemoryDiagnostics, SQLiteStateDiagnostics,
+    };
     use axum::http::StatusCode;
+    use serde_json::Value;
+
+    fn sample_diagnostics() -> HealthDiagnostics {
+        HealthDiagnostics {
+            process_memory: ProcessMemoryDiagnostics {
+                pid: 42,
+                rss_bytes: Some(1024),
+                virtual_memory_bytes: Some(4096),
+                source: "test",
+                collection_error: None,
+            },
+            cache_state: CacheStateDiagnostics {
+                user_entries: 1,
+                post_entries: 2,
+                user_capacity: 10,
+                post_capacity: 20,
+                user_hits: 3,
+                user_misses: 4,
+                post_hits: 5,
+                post_misses: 6,
+                total_requests: 18,
+                cache_evictions: 0,
+            },
+            sqlite_state: SQLiteStateDiagnostics {
+                available: true,
+                db_size_bytes: Some(8192),
+                wal_size_bytes: Some(0),
+                page_count: Some(2),
+                page_size_bytes: Some(4096),
+                freelist_count: Some(0),
+                cache_size_pages: Some(-64000),
+                mmap_size_bytes: Some(268435456),
+                journal_mode: Some("wal".to_string()),
+                journal_size_limit_bytes: Some(5368709120),
+                collection_error: None,
+            },
+            not_redis_state: NotRedisStateDiagnostics {
+                connected: true,
+                engine: "not_redis".to_string(),
+                stream_name: "hydrated_jetstream".to_string(),
+                stream_length: Some(7),
+                configured_max_length: Some(100),
+                collection_error: None,
+            },
+        }
+    }
 
     fn sample_health(healthy: bool) -> HealthStatus {
         HealthStatus {
@@ -184,6 +233,7 @@ mod tests {
             redis_connected: healthy,
             sqlite_available: healthy,
             session_count: if healthy { 1 } else { 0 },
+            diagnostics: sample_diagnostics(),
         }
     }
 
@@ -206,6 +256,11 @@ mod tests {
         assert_eq!(status_code, StatusCode::OK);
         assert_eq!(response.status, "healthy");
         assert!(response.data.healthy);
+        assert_eq!(response.data.diagnostics.cache_state.user_capacity, 10);
+        assert_eq!(
+            response.data.diagnostics.not_redis_state.stream_name,
+            "hydrated_jetstream"
+        );
     }
 
     #[test]
@@ -214,5 +269,17 @@ mod tests {
         assert_eq!(status_code, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(response.status, "unhealthy");
         assert!(!response.data.healthy);
+    }
+
+    #[test]
+    fn health_response_serializes_diagnostics_snapshot() {
+        let (_status_code, response) = health_http_response(sample_health(true));
+        let json: Value = serde_json::to_value(response).expect("health response should serialize");
+
+        assert_eq!(json["status"], "healthy");
+        assert!(json["data"]["diagnostics"]["process_memory"]["pid"].is_number());
+        assert!(json["data"]["diagnostics"]["cache_state"]["user_capacity"].is_number());
+        assert!(json["data"]["diagnostics"]["sqlite_state"]["journal_mode"].is_string());
+        assert!(json["data"]["diagnostics"]["not_redis_state"]["stream_name"].is_string());
     }
 }
