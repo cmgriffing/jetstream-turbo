@@ -54,7 +54,7 @@ The server runs on port 8080 by default.
 | `/ready` | GET | Readiness probe |
 | `/api/v1/health` | GET | Health check with system status |
 | `/api/v1/stats` | GET | Processing statistics |
-| `/api/v1/metrics` | GET | Prometheus metrics (stub) |
+| `/api/v1/metrics` | GET | Prometheus runtime metrics (process/cache/SQLite/not_redis) |
 
 > **Note:** Most endpoints require the `/api/v1/` prefix. The root `/health` returns 404.
 

@@ -1,5 +1,5 @@
 use crate::models::errors::{TurboError, TurboResult};
-use crate::turbocharger::{HealthStatus, TurboCharger, TurboStats};
+use crate::turbocharger::{HealthDiagnostics, HealthStatus, TurboCharger, TurboStats};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -72,14 +72,9 @@ async fn get_stats(
     }
 }
 
-async fn get_metrics() -> &'static str {
-    // This would return Prometheus metrics in a real implementation
-    "# HELP jetstream_turbo_messages_total Total number of messages processed\n\
-    # TYPE jetstream_turbo_messages_total counter\n\
-    jetstream_turbo_messages_total 0\n\
-    # HELP jetstream_turbo_cache_hit_rate Cache hit rate\n\
-    # TYPE jetstream_turbo_cache_hit_rate gauge\n\
-    jetstream_turbo_cache_hit_rate 0.0\n"
+async fn get_metrics(State(turbocharger): State<Arc<TurboCharger>>) -> String {
+    let diagnostics = turbocharger.get_runtime_diagnostics().await;
+    prometheus_metrics_from_diagnostics(&diagnostics)
 }
 
 async fn ws_handler(
@@ -172,9 +167,123 @@ fn health_http_response(status: HealthStatus) -> (StatusCode, HealthResponse) {
     )
 }
 
+fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> String {
+    let mut output = String::new();
+
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_process_memory_rss_bytes",
+        "Current process resident memory in bytes.",
+        optional_u64_metric_value(diagnostics.process_memory.rss_bytes),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_process_memory_virtual_bytes",
+        "Current process virtual memory in bytes.",
+        optional_u64_metric_value(diagnostics.process_memory.virtual_memory_bytes),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_cache_user_entries",
+        "Current number of user profile entries in cache.",
+        diagnostics.cache_state.user_entries.to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_cache_post_entries",
+        "Current number of post entries in cache.",
+        diagnostics.cache_state.post_entries.to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_cache_user_capacity",
+        "Configured maximum number of user profile cache entries.",
+        diagnostics.cache_state.user_capacity.to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_cache_post_capacity",
+        "Configured maximum number of post cache entries.",
+        diagnostics.cache_state.post_capacity.to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_sqlite_available",
+        "Whether SQLite is currently available (1 = yes, 0 = no).",
+        bool_metric_value(diagnostics.sqlite_state.available),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_sqlite_db_size_bytes",
+        "Current SQLite database file size in bytes.",
+        optional_i64_metric_value(diagnostics.sqlite_state.db_size_bytes),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_sqlite_wal_size_bytes",
+        "Current SQLite WAL file size in bytes.",
+        optional_i64_metric_value(diagnostics.sqlite_state.wal_size_bytes),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_not_redis_connected",
+        "Whether not_redis is currently reachable (1 = yes, 0 = no).",
+        bool_metric_value(diagnostics.not_redis_state.connected),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_not_redis_stream_length",
+        "Current not_redis stream length.",
+        optional_usize_metric_value(diagnostics.not_redis_state.stream_length),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_not_redis_configured_max_length",
+        "Configured not_redis stream trim max length.",
+        optional_usize_metric_value(diagnostics.not_redis_state.configured_max_length),
+    );
+
+    output
+}
+
+fn append_gauge_metric(output: &mut String, name: &str, help: &str, value: String) {
+    output.push_str("# HELP ");
+    output.push_str(name);
+    output.push(' ');
+    output.push_str(help);
+    output.push('\n');
+    output.push_str("# TYPE ");
+    output.push_str(name);
+    output.push_str(" gauge\n");
+    output.push_str(name);
+    output.push(' ');
+    output.push_str(&value);
+    output.push('\n');
+}
+
+fn bool_metric_value(value: bool) -> String {
+    if value {
+        "1".to_string()
+    } else {
+        "0".to_string()
+    }
+}
+
+fn optional_u64_metric_value(value: Option<u64>) -> String {
+    value.map(|v| v.to_string()).unwrap_or_else(|| "NaN".to_string())
+}
+
+fn optional_i64_metric_value(value: Option<i64>) -> String {
+    value.map(|v| v.to_string()).unwrap_or_else(|| "NaN".to_string())
+}
+
+fn optional_usize_metric_value(value: Option<usize>) -> String {
+    value.map(|v| v.to_string()).unwrap_or_else(|| "NaN".to_string())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{health_http_response, readiness_http_status};
+    use super::{health_http_response, prometheus_metrics_from_diagnostics, readiness_http_status};
     use crate::turbocharger::{
         CacheStateDiagnostics, HealthDiagnostics, HealthStatus, NotRedisStateDiagnostics,
         ProcessMemoryDiagnostics, SQLiteStateDiagnostics,
@@ -281,5 +390,34 @@ mod tests {
         assert!(json["data"]["diagnostics"]["cache_state"]["user_capacity"].is_number());
         assert!(json["data"]["diagnostics"]["sqlite_state"]["journal_mode"].is_string());
         assert!(json["data"]["diagnostics"]["not_redis_state"]["stream_name"].is_string());
+    }
+
+    #[test]
+    fn metrics_response_includes_runtime_diagnostics_values() {
+        let output = prometheus_metrics_from_diagnostics(&sample_diagnostics());
+
+        assert!(output.contains("jetstream_turbo_process_memory_rss_bytes 1024"));
+        assert!(output.contains("jetstream_turbo_process_memory_virtual_bytes 4096"));
+        assert!(output.contains("jetstream_turbo_cache_user_entries 1"));
+        assert!(output.contains("jetstream_turbo_cache_post_entries 2"));
+        assert!(output.contains("jetstream_turbo_sqlite_available 1"));
+        assert!(output.contains("jetstream_turbo_sqlite_db_size_bytes 8192"));
+        assert!(output.contains("jetstream_turbo_not_redis_connected 1"));
+        assert!(output.contains("jetstream_turbo_not_redis_stream_length 7"));
+    }
+
+    #[test]
+    fn metrics_response_uses_nan_for_missing_optional_values() {
+        let mut diagnostics = sample_diagnostics();
+        diagnostics.process_memory.rss_bytes = None;
+        diagnostics.sqlite_state.db_size_bytes = None;
+        diagnostics.not_redis_state.stream_length = None;
+        diagnostics.not_redis_state.configured_max_length = None;
+
+        let output = prometheus_metrics_from_diagnostics(&diagnostics);
+        assert!(output.contains("jetstream_turbo_process_memory_rss_bytes NaN"));
+        assert!(output.contains("jetstream_turbo_sqlite_db_size_bytes NaN"));
+        assert!(output.contains("jetstream_turbo_not_redis_stream_length NaN"));
+        assert!(output.contains("jetstream_turbo_not_redis_configured_max_length NaN"));
     }
 }

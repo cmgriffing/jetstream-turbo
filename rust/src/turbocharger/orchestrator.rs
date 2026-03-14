@@ -414,6 +414,27 @@ impl TurboCharger {
         })
     }
 
+    pub async fn get_runtime_diagnostics(&self) -> HealthDiagnostics {
+        let redis_connected = match self.redis_store.health_check().await {
+            Ok(connected) => connected,
+            Err(e) => {
+                error!("not_redis diagnostics health probe failed: {}", e);
+                false
+            }
+        };
+
+        let sqlite_available = match self.sqlite_store.count_records().await {
+            Ok(_) => true,
+            Err(e) => {
+                error!("SQLite diagnostics availability probe failed: {}", e);
+                false
+            }
+        };
+
+        self.collect_health_diagnostics(redis_connected, sqlite_available)
+            .await
+    }
+
     async fn collect_health_diagnostics(
         &self,
         redis_connected: bool,
