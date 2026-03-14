@@ -102,6 +102,73 @@ function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, value));
 }
 
+interface AdaptiveDomainOptions {
+  defaultMin: number;
+  defaultMax: number;
+  minPadding: number;
+  minSpan: number;
+  paddingRatio: number;
+  flatPaddingRatio: number;
+  clampMin?: number;
+  clampMax?: number;
+}
+
+function clampValue(value: number, min?: number, max?: number): number {
+  let next = value;
+  if (typeof min === "number") {
+    next = Math.max(min, next);
+  }
+  if (typeof max === "number") {
+    next = Math.min(max, next);
+  }
+  return next;
+}
+
+function getAdaptiveDomain(values: number[], options: AdaptiveDomainOptions): { min: number; max: number } {
+  const finiteValues = values.filter((value) => Number.isFinite(value));
+  const fallback = { min: options.defaultMin, max: options.defaultMax };
+
+  if (finiteValues.length === 0) {
+    return fallback;
+  }
+
+  let nextMin = Math.min(...finiteValues);
+  let nextMax = Math.max(...finiteValues);
+
+  if (nextMin === nextMax) {
+    if (nextMin === 0) {
+      return fallback;
+    }
+
+    const halfSpan = Math.max(
+      Math.abs(nextMin) * options.flatPaddingRatio,
+      options.minPadding,
+      options.minSpan / 2,
+    );
+    nextMin -= halfSpan;
+    nextMax += halfSpan;
+  } else {
+    const padding = Math.max((nextMax - nextMin) * options.paddingRatio, options.minPadding);
+    nextMin -= padding;
+    nextMax += padding;
+  }
+
+  nextMin = clampValue(nextMin, options.clampMin, options.clampMax);
+  nextMax = clampValue(nextMax, options.clampMin, options.clampMax);
+
+  if (nextMax - nextMin < options.minSpan) {
+    const midpoint = (nextMin + nextMax) / 2;
+    nextMin = clampValue(midpoint - options.minSpan / 2, options.clampMin, options.clampMax);
+    nextMax = clampValue(midpoint + options.minSpan / 2, options.clampMin, options.clampMax);
+  }
+
+  if (!Number.isFinite(nextMin) || !Number.isFinite(nextMax) || nextMin >= nextMax) {
+    return fallback;
+  }
+
+  return { min: nextMin, max: nextMax };
+}
+
 function parseHour(value: string): Date | null {
   const normalized = value.includes("T") ? value : `${value.replace(" ", "T")}Z`;
   const parsed = new Date(normalized);
@@ -224,6 +291,16 @@ export function UptimeChart24h({
       const observed = uptime + downtime;
       return observed > 0 ? clampPercent((uptime / observed) * 100) : 0;
     });
+    const uptimeDomain = getAdaptiveDomain([...uptimeA, ...uptimeB], {
+      defaultMin: 0,
+      defaultMax: 100,
+      minPadding: 0.25,
+      minSpan: 2,
+      paddingRatio: 0.12,
+      flatPaddingRatio: 0.03,
+      clampMin: 0,
+      clampMax: 100,
+    });
 
     return {
       chartData: {
@@ -288,8 +365,8 @@ export function UptimeChart24h({
               font: terminalFont,
             },
             grid: { color: palette.grid, drawTicks: false },
-            min: 0,
-            max: 100,
+            min: uptimeDomain.min,
+            max: uptimeDomain.max,
           },
         },
       },
@@ -354,6 +431,15 @@ export function RateChart({
         toNonNegative(row.stream_b_downtime_seconds);
       const denominator = observed > 0 ? observed : safeIntervalSeconds;
       return messages / denominator;
+    });
+    const rateDomain = getAdaptiveDomain([...rateA, ...rateB], {
+      defaultMin: 0,
+      defaultMax: 1,
+      minPadding: 0.05,
+      minSpan: 0.2,
+      paddingRatio: 0.12,
+      flatPaddingRatio: 0.2,
+      clampMin: 0,
     });
 
     return {
@@ -423,6 +509,8 @@ export function RateChart({
               font: terminalFont,
             },
             grid: { color: palette.grid, drawTicks: false },
+            min: rateDomain.min,
+            max: rateDomain.max,
           },
         },
       },
