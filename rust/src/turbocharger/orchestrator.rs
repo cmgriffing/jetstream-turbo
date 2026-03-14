@@ -11,6 +11,7 @@ use crate::telemetry::ErrorReporter;
 use futures::StreamExt;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Semaphore};
@@ -402,13 +403,113 @@ impl TurboCharger {
             }
         };
         let session_count = self.bluesky_client.get_session_count().await;
+        let diagnostics = self.collect_health_diagnostics(redis_healthy, sqlite_available).await;
 
         Ok(HealthStatus {
             healthy: derive_health(redis_healthy, sqlite_available, session_count),
             redis_connected: redis_healthy,
             sqlite_available,
             session_count,
+            diagnostics,
         })
+    }
+
+    pub async fn get_runtime_diagnostics(&self) -> HealthDiagnostics {
+        let redis_connected = match self.redis_store.health_check().await {
+            Ok(connected) => connected,
+            Err(e) => {
+                error!("not_redis diagnostics health probe failed: {}", e);
+                false
+            }
+        };
+
+        let sqlite_available = match self.sqlite_store.count_records().await {
+            Ok(_) => true,
+            Err(e) => {
+                error!("SQLite diagnostics availability probe failed: {}", e);
+                false
+            }
+        };
+
+        self.collect_health_diagnostics(redis_connected, sqlite_available)
+            .await
+    }
+
+    async fn collect_health_diagnostics(
+        &self,
+        redis_connected: bool,
+        sqlite_available: bool,
+    ) -> HealthDiagnostics {
+        let cache = self.hydrator.get_cache();
+        let cache_metrics = cache.get_metrics().await;
+        let (user_entries, post_entries) = cache.get_entry_counts();
+        let (user_capacity, post_capacity) = cache.get_capacity_limits();
+
+        let sqlite_state = match self.sqlite_store.get_state_snapshot().await {
+            Ok(snapshot) => SQLiteStateDiagnostics {
+                available: sqlite_available,
+                db_size_bytes: Some(snapshot.db_size_bytes),
+                wal_size_bytes: snapshot.wal_size_bytes,
+                page_count: Some(snapshot.page_count),
+                page_size_bytes: Some(snapshot.page_size_bytes),
+                freelist_count: Some(snapshot.freelist_count),
+                cache_size_pages: Some(snapshot.cache_size_pages),
+                mmap_size_bytes: Some(snapshot.mmap_size_bytes),
+                journal_mode: Some(snapshot.journal_mode),
+                journal_size_limit_bytes: Some(snapshot.journal_size_limit_bytes),
+                collection_error: None,
+            },
+            Err(e) => SQLiteStateDiagnostics {
+                available: sqlite_available,
+                db_size_bytes: None,
+                wal_size_bytes: None,
+                page_count: None,
+                page_size_bytes: None,
+                freelist_count: None,
+                cache_size_pages: None,
+                mmap_size_bytes: None,
+                journal_mode: None,
+                journal_size_limit_bytes: None,
+                collection_error: Some(e.to_string()),
+            },
+        };
+
+        let not_redis_state = match self.redis_store.get_stream_info().await {
+            Ok(info) => NotRedisStateDiagnostics {
+                connected: redis_connected,
+                engine: info.redis_version,
+                stream_name: info.stream_name,
+                stream_length: Some(info.stream_length),
+                configured_max_length: info.max_length,
+                collection_error: None,
+            },
+            Err(e) => NotRedisStateDiagnostics {
+                connected: redis_connected,
+                engine: "not_redis".to_string(),
+                stream_name: self.redis_store.get_stream_name().to_string(),
+                stream_length: None,
+                configured_max_length: self.redis_store.get_max_length(),
+                collection_error: Some(e.to_string()),
+            },
+        };
+
+        HealthDiagnostics {
+            process_memory: collect_process_memory_diagnostics(),
+            cache_state: CacheStateDiagnostics {
+                user_entries,
+                post_entries,
+                user_capacity,
+                post_capacity,
+                user_hits: cache_metrics.user_hits,
+                user_misses: cache_metrics.user_misses,
+                post_hits: cache_metrics.post_hits,
+                post_misses: cache_metrics.post_misses,
+                total_requests: cache_metrics.total_requests,
+                cache_evictions: cache_metrics.cache_evictions,
+            },
+            sqlite_state,
+            not_redis_state,
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<EnrichedRecord> {
@@ -521,10 +622,156 @@ pub struct HealthStatus {
     pub redis_connected: bool,
     pub sqlite_available: bool,
     pub session_count: usize,
+    pub diagnostics: HealthDiagnostics,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HealthDiagnostics {
+    pub process_memory: ProcessMemoryDiagnostics,
+    pub cache_state: CacheStateDiagnostics,
+    pub sqlite_state: SQLiteStateDiagnostics,
+    pub not_redis_state: NotRedisStateDiagnostics,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProcessMemoryDiagnostics {
+    pub pid: u32,
+    pub rss_bytes: Option<u64>,
+    pub virtual_memory_bytes: Option<u64>,
+    pub source: &'static str,
+    pub collection_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CacheStateDiagnostics {
+    pub user_entries: u64,
+    pub post_entries: u64,
+    pub user_capacity: usize,
+    pub post_capacity: usize,
+    pub user_hits: u64,
+    pub user_misses: u64,
+    pub post_hits: u64,
+    pub post_misses: u64,
+    pub total_requests: u64,
+    pub cache_evictions: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SQLiteStateDiagnostics {
+    pub available: bool,
+    pub db_size_bytes: Option<i64>,
+    pub wal_size_bytes: Option<i64>,
+    pub page_count: Option<i64>,
+    pub page_size_bytes: Option<i64>,
+    pub freelist_count: Option<i64>,
+    pub cache_size_pages: Option<i64>,
+    pub mmap_size_bytes: Option<i64>,
+    pub journal_mode: Option<String>,
+    pub journal_size_limit_bytes: Option<i64>,
+    pub collection_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NotRedisStateDiagnostics {
+    pub connected: bool,
+    pub engine: String,
+    pub stream_name: String,
+    pub stream_length: Option<usize>,
+    pub configured_max_length: Option<usize>,
+    pub collection_error: Option<String>,
 }
 
 fn derive_health(redis_connected: bool, sqlite_available: bool, session_count: usize) -> bool {
     redis_connected && sqlite_available && session_count > 0
+}
+
+fn collect_process_memory_diagnostics() -> ProcessMemoryDiagnostics {
+    let pid = std::process::id();
+
+    if let Ok(status_contents) = std::fs::read_to_string("/proc/self/status") {
+        if let Some((rss_bytes, virtual_memory_bytes)) =
+            parse_proc_status_memory_bytes(&status_contents)
+        {
+            return ProcessMemoryDiagnostics {
+                pid,
+                rss_bytes: Some(rss_bytes),
+                virtual_memory_bytes: Some(virtual_memory_bytes),
+                source: "procfs",
+                collection_error: None,
+            };
+        }
+    }
+
+    match process_memory_from_ps(pid) {
+        Ok((rss_bytes, virtual_memory_bytes)) => ProcessMemoryDiagnostics {
+            pid,
+            rss_bytes: Some(rss_bytes),
+            virtual_memory_bytes: Some(virtual_memory_bytes),
+            source: "ps",
+            collection_error: None,
+        },
+        Err(error_message) => ProcessMemoryDiagnostics {
+            pid,
+            rss_bytes: None,
+            virtual_memory_bytes: None,
+            source: "unavailable",
+            collection_error: Some(error_message),
+        },
+    }
+}
+
+fn parse_proc_status_memory_bytes(contents: &str) -> Option<(u64, u64)> {
+    let mut rss_bytes = None;
+    let mut virtual_memory_bytes = None;
+
+    for line in contents.lines() {
+        if rss_bytes.is_none() && line.starts_with("VmRSS:") {
+            rss_bytes = parse_proc_status_kib_line(line);
+        } else if virtual_memory_bytes.is_none() && line.starts_with("VmSize:") {
+            virtual_memory_bytes = parse_proc_status_kib_line(line);
+        }
+
+        if rss_bytes.is_some() && virtual_memory_bytes.is_some() {
+            break;
+        }
+    }
+
+    match (rss_bytes, virtual_memory_bytes) {
+        (Some(rss), Some(vmem)) => Some((rss, vmem)),
+        _ => None,
+    }
+}
+
+fn parse_proc_status_kib_line(line: &str) -> Option<u64> {
+    line.split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(|value| value.checked_mul(1024))
+}
+
+fn process_memory_from_ps(pid: u32) -> Result<(u64, u64), String> {
+    let output = Command::new("ps")
+        .args(["-o", "rss=", "-o", "vsz=", "-p", &pid.to_string()])
+        .output()
+        .map_err(|e| format!("failed to execute ps: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!("ps exited with status {}", output.status));
+    }
+
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|e| format!("ps output was not valid UTF-8: {e}"))?;
+    parse_ps_memory_output(&stdout).ok_or_else(|| "unable to parse ps memory output".to_string())
+}
+
+fn parse_ps_memory_output(stdout: &str) -> Option<(u64, u64)> {
+    let mut values = stdout
+        .split_whitespace()
+        .filter_map(|value| value.parse::<u64>().ok());
+
+    let rss_bytes = values.next()?.checked_mul(1024)?;
+    let virtual_memory_bytes = values.next()?.checked_mul(1024)?;
+    Some((rss_bytes, virtual_memory_bytes))
 }
 
 #[cfg(test)]
@@ -549,6 +796,23 @@ mod tests {
     #[test]
     fn derive_health_is_true_when_all_signals_are_healthy() {
         assert!(derive_health(true, true, 1));
+    }
+
+    #[test]
+    fn parse_proc_status_memory_bytes_extracts_rss_and_vmsize() {
+        let contents = "\
+Name:\ttest\n\
+VmSize:\t  2048 kB\n\
+VmRSS:\t  1024 kB\n";
+
+        let parsed = parse_proc_status_memory_bytes(contents);
+        assert_eq!(parsed, Some((1_048_576, 2_097_152)));
+    }
+
+    #[test]
+    fn parse_ps_memory_output_extracts_values() {
+        let parsed = parse_ps_memory_output("12345   67890\n");
+        assert_eq!(parsed, Some((12_641_280, 69_519_360)));
     }
 
     #[test]

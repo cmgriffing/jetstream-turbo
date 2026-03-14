@@ -15,6 +15,19 @@ pub struct CleanupResult {
     pub vacuum_pending: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SQLiteStateSnapshot {
+    pub db_size_bytes: i64,
+    pub wal_size_bytes: Option<i64>,
+    pub page_count: i64,
+    pub page_size_bytes: i64,
+    pub freelist_count: i64,
+    pub cache_size_pages: i64,
+    pub mmap_size_bytes: i64,
+    pub journal_mode: String,
+    pub journal_size_limit_bytes: i64,
+}
+
 pub struct SQLiteStore {
     pool: SqlitePool,
     db_path: String,
@@ -348,6 +361,58 @@ impl SQLiteStore {
         Ok(row.0)
     }
 
+    pub async fn get_state_snapshot(&self) -> TurboResult<SQLiteStateSnapshot> {
+        let db_size_bytes = self.get_db_size().await?;
+        let wal_size_bytes = self.get_wal_size_bytes().await?;
+
+        let (page_count,): (i64,) = sqlx::query_as("PRAGMA page_count")
+            .fetch_one(&self.pool)
+            .await?;
+        let (page_size_bytes,): (i64,) = sqlx::query_as("PRAGMA page_size")
+            .fetch_one(&self.pool)
+            .await?;
+        let (freelist_count,): (i64,) = sqlx::query_as("PRAGMA freelist_count")
+            .fetch_one(&self.pool)
+            .await?;
+        let (cache_size_pages,): (i64,) = sqlx::query_as("PRAGMA cache_size")
+            .fetch_one(&self.pool)
+            .await?;
+        let (mmap_size_bytes,): (i64,) = sqlx::query_as("PRAGMA mmap_size")
+            .fetch_one(&self.pool)
+            .await?;
+        let (journal_mode,): (String,) = sqlx::query_as("PRAGMA journal_mode")
+            .fetch_one(&self.pool)
+            .await?;
+        let (journal_size_limit_bytes,): (i64,) = sqlx::query_as("PRAGMA journal_size_limit")
+            .fetch_one(&self.pool)
+            .await?;
+
+        Ok(SQLiteStateSnapshot {
+            db_size_bytes,
+            wal_size_bytes,
+            page_count,
+            page_size_bytes,
+            freelist_count,
+            cache_size_pages,
+            mmap_size_bytes,
+            journal_mode,
+            journal_size_limit_bytes,
+        })
+    }
+
+    async fn get_wal_size_bytes(&self) -> TurboResult<Option<i64>> {
+        if self.db_path == ":memory:" {
+            return Ok(None);
+        }
+
+        let wal_path = format!("{}-wal", self.db_path);
+        match tokio::fs::metadata(wal_path).await {
+            Ok(metadata) => Ok(Some(metadata.len() as i64)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(0)),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub async fn cleanup_with_vacuum(
         &self,
         retention_days: u32,
@@ -466,6 +531,20 @@ mod tests {
 
         let size = store.get_db_size().await.unwrap();
         assert!(size > 0, "Database should have some initial size");
+
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_state_snapshot() {
+        let store = create_test_db().await;
+
+        let snapshot = store.get_state_snapshot().await.unwrap();
+        assert!(snapshot.db_size_bytes > 0);
+        assert!(snapshot.page_count > 0);
+        assert!(snapshot.page_size_bytes > 0);
+        assert!(!snapshot.journal_mode.is_empty());
+        assert!(snapshot.wal_size_bytes.is_some());
 
         store.close().await.unwrap();
     }
