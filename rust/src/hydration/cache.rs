@@ -60,7 +60,7 @@ impl TurboCache {
     #[instrument(name = "cache_get_user_profile", skip(self), fields(did, hit))]
     pub async fn get_user_profile(&self, did: &str) -> Option<Arc<BlueskyProfile>> {
         tracing::Span::current().record("did", did);
-        
+
         if let Some(profile) = self.user_cache.get(did) {
             self.metrics.user_hits.fetch_add(1, Ordering::Relaxed);
             self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
@@ -100,7 +100,7 @@ impl TurboCache {
     #[instrument(name = "cache_get_post", skip(self), fields(uri, hit))]
     pub async fn get_post(&self, uri: &str) -> Option<Arc<BlueskyPost>> {
         tracing::Span::current().record("uri", uri);
-        
+
         if let Some(post) = self.post_cache.get(uri) {
             self.metrics.post_hits.fetch_add(1, Ordering::Relaxed);
             self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);

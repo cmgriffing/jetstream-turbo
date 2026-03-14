@@ -22,6 +22,12 @@ Successfully created a comprehensive Rust implementation of jetstream-turbo, a h
    - `BLUESKY_HANDLE` - Your Bluesky handle (e.g., `yourname.bsky.social`)
    - `BLUESKY_APP_PASSWORD` - Create one at https://bsky.app/settings/app-passwords
    - `STREAM_NAME` - Name for your data stream (e.g., `hydrated_jetstream`)
+   - `POSTHOG_API_KEY` *(optional)* - Enables PostHog exception reporting when set
+   - `POSTHOG_HOST` *(optional)* - PostHog ingest host (defaults to `https://us.i.posthog.com`)
+
+   You can also set PostHog via the standard prefixed settings path:
+   - `TURBO__POSTHOG_API_KEY`
+   - `TURBO__POSTHOG_HOST`
 
 3. **Run the application:**
    ```bash
@@ -290,11 +296,18 @@ COPY target/jetstream-turbo /usr/local/bin/
 
 ### Environment Variables
 ```bash
+BLUESKY_HANDLE=yourname.bsky.social
+BLUESKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
 STREAM_NAME=hydrated_jetstream
-TURBO_CREDENTIAL_SECRET=your_secret
 REDIS_URL=redis://localhost:6379
-TURBO_BATCH_SIZE=10
-TURBO_MAX_CONCURRENT=100
+
+# Optional PostHog exception reporting
+POSTHOG_API_KEY=phc_your_posthog_project_key
+POSTHOG_HOST=https://us.i.posthog.com
+
+# Optional advanced overrides (generic settings path)
+TURBO__BATCH_SIZE=10
+TURBO__MAX_CONCURRENT_REQUESTS=100
 ```
 
 ### Health Checks
