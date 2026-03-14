@@ -19,7 +19,11 @@ impl Hydrator {
         }
     }
 
-    #[instrument(name = "hydrate_message", skip(self, message), fields(did, at_uri, cache_hit))]
+    #[instrument(
+        name = "hydrate_message",
+        skip(self, message),
+        fields(did, at_uri, cache_hit)
+    )]
     pub async fn hydrate_message(&self, message: JetstreamMessage) -> TurboResult<EnrichedRecord> {
         let start_time = Instant::now();
         let mut enriched = EnrichedRecord::new(message.clone());
@@ -72,7 +76,19 @@ impl Hydrator {
         Ok(enriched)
     }
 
-    #[instrument(name = "hydrate_batch", skip(self, messages), fields(message_count, unique_dids, unique_uris, cache_check_time_ms, api_fetch_time_ms, hydrate_time_ms, total_time_ms))]
+    #[instrument(
+        name = "hydrate_batch",
+        skip(self, messages),
+        fields(
+            message_count,
+            unique_dids,
+            unique_uris,
+            cache_check_time_ms,
+            api_fetch_time_ms,
+            hydrate_time_ms,
+            total_time_ms
+        )
+    )]
     pub async fn hydrate_batch(
         &self,
         messages: Vec<JetstreamMessage>,
@@ -131,14 +147,16 @@ impl Hydrator {
             self.bluesky_client
                 .bulk_fetch_profiles(&uncached_dids)
                 .await
-        }.await;
+        }
+        .await;
 
         let posts_result = async {
             if uncached_uris.is_empty() {
                 return Ok(vec![]);
             }
             self.bluesky_client.bulk_fetch_posts(&uncached_uris).await
-        }.await;
+        }
+        .await;
 
         let api_fetch_time = cache_check_start.elapsed().as_millis() as u64 - cache_check_time;
         tracing::Span::current().record("api_fetch_time_ms", api_fetch_time);
