@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Semaphore};
+use tokio::task::JoinSet;
 use tokio::time::{interval, sleep};
 use tracing::{error, info, trace};
 
@@ -127,6 +128,7 @@ impl TurboCharger {
         let mut buffer: Vec<JetstreamMessage> = Vec::with_capacity(BATCH_SIZE);
         let mut flush_interval = interval(Duration::from_millis(MAX_WAIT_TIME_MS));
         let mut batch_buffer: Vec<JetstreamMessage> = Vec::with_capacity(BATCH_SIZE);
+        let mut batch_tasks: JoinSet<TurboResult<usize>> = JoinSet::new();
 
         tokio::pin!(message_stream);
 
@@ -143,7 +145,11 @@ impl TurboCharger {
                                 // Reuse batch_buffer to avoid allocation
                                 batch_buffer.clear();
                                 batch_buffer.extend(buffer.drain(..));
-                                self.spawn_batch_processing(std::mem::take(&mut batch_buffer));
+                                self.spawn_batch_processing(
+                                    std::mem::take(&mut batch_buffer),
+                                    &mut batch_tasks,
+                                )
+                                .await?;
                             }
                         }
                         Some(Err(e)) => {
@@ -157,9 +163,17 @@ impl TurboCharger {
                         // Reuse batch_buffer to avoid allocation
                         batch_buffer.clear();
                         batch_buffer.extend(buffer.drain(..));
-                        self.spawn_batch_processing(std::mem::take(&mut batch_buffer));
+                        self.spawn_batch_processing(
+                            std::mem::take(&mut batch_buffer),
+                            &mut batch_tasks,
+                        )
+                        .await?;
                     }
                 }
+            }
+
+            while let Some(task_result) = batch_tasks.try_join_next() {
+                self.handle_batch_task_result(task_result)?;
             }
 
             if last_stats.elapsed() >= Duration::from_secs(30) {
@@ -179,26 +193,28 @@ impl TurboCharger {
             self.process_batch(buffer).await?;
         }
 
+        self.drain_batch_tasks(&mut batch_tasks).await?;
+
         error!("Jetstream stream ended unexpectedly");
         Err(TurboError::Internal("Jetstream stream ended".to_string()))
     }
 
-    fn spawn_batch_processing(&self, batch: Vec<JetstreamMessage>) {
+    async fn spawn_batch_processing(
+        &self,
+        batch: Vec<JetstreamMessage>,
+        batch_tasks: &mut JoinSet<TurboResult<usize>>,
+    ) -> TurboResult<()> {
         let hydrator = self.hydrator.clone();
         let sqlite_store = Arc::clone(&self.sqlite_store);
         let redis_store = Arc::clone(&self.redis_store);
         let broadcast_sender = self.broadcast_sender.clone();
-        let semaphore = self.semaphore.clone();
+        let permit = self.semaphore.clone().acquire_owned().await.map_err(|e| {
+            TurboError::Internal(format!("Batch semaphore closed unexpectedly: {e}"))
+        })?;
 
-        tokio::spawn(async move {
-            let permit = match semaphore.acquire().await {
-                Ok(permit) => permit,
-                Err(e) => {
-                    error!("Batch semaphore closed unexpectedly: {}", e);
-                    return;
-                }
-            };
-            match Self::process_batch_internal(
+        batch_tasks.spawn(async move {
+            let _permit = permit;
+            Self::process_batch_internal(
                 hydrator,
                 sqlite_store,
                 redis_store,
@@ -206,16 +222,49 @@ impl TurboCharger {
                 batch,
             )
             .await
-            {
-                Ok(count) => {
-                    trace!("Processed batch of {} messages", count);
-                }
-                Err(e) => {
-                    error!("Batch processing failed: {}", e);
-                }
-            }
-            drop(permit);
         });
+
+        Ok(())
+    }
+
+    fn resolve_batch_task_result(
+        task_result: Result<TurboResult<usize>, tokio::task::JoinError>,
+    ) -> TurboResult<usize> {
+        match task_result {
+            Ok(result) => result,
+            Err(e) => Err(TurboError::TaskJoin(e)),
+        }
+    }
+
+    fn handle_batch_task_result(
+        &self,
+        task_result: Result<TurboResult<usize>, tokio::task::JoinError>,
+    ) -> TurboResult<()> {
+        match Self::resolve_batch_task_result(task_result) {
+            Ok(count) => {
+                trace!("Processed batch of {} messages", count);
+                Ok(())
+            }
+            Err(e) => {
+                error!("Batch processing failed: {}", e);
+                let mut ctx = HashMap::new();
+                ctx.insert("component", "turbocharger");
+                ctx.insert("operation", "batch_processing");
+                self.error_reporter.capture_error(&e, ctx);
+                Err(e)
+            }
+        }
+    }
+
+    async fn drain_batch_tasks(
+        &self,
+        batch_tasks: &mut JoinSet<TurboResult<usize>>,
+    ) -> TurboResult<()> {
+        while let Some(task_result) = batch_tasks.join_next().await {
+            self.handle_batch_task_result(task_result)?;
+        }
+
+        Ok(())
     }
 
     async fn process_batch(&self, batch: Vec<JetstreamMessage>) -> TurboResult<usize> {
@@ -345,13 +394,20 @@ impl TurboCharger {
 
     pub async fn health_check(&self) -> TurboResult<HealthStatus> {
         let redis_healthy = self.redis_store.health_check().await?;
-        let sqlite_count = self.sqlite_store.count_records().await.ok();
+        let sqlite_available = match self.sqlite_store.count_records().await {
+            Ok(_) => true,
+            Err(e) => {
+                error!("SQLite health check failed: {}", e);
+                false
+            }
+        };
+        let session_count = self.bluesky_client.get_session_count().await;
 
         Ok(HealthStatus {
-            healthy: redis_healthy,
+            healthy: derive_health(redis_healthy, sqlite_available, session_count),
             redis_connected: redis_healthy,
-            sqlite_available: sqlite_count.is_some(),
-            session_count: self.bluesky_client.get_session_count().await,
+            sqlite_available,
+            session_count,
         })
     }
 
@@ -465,4 +521,55 @@ pub struct HealthStatus {
     pub redis_connected: bool,
     pub sqlite_available: bool,
     pub session_count: usize,
+}
+
+fn derive_health(redis_connected: bool, sqlite_available: bool, session_count: usize) -> bool {
+    redis_connected && sqlite_available && session_count > 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derive_health_requires_redis_connection() {
+        assert!(!derive_health(false, true, 1));
+    }
+
+    #[test]
+    fn derive_health_requires_sqlite_availability() {
+        assert!(!derive_health(true, false, 1));
+    }
+
+    #[test]
+    fn derive_health_requires_active_sessions() {
+        assert!(!derive_health(true, true, 0));
+    }
+
+    #[test]
+    fn derive_health_is_true_when_all_signals_are_healthy() {
+        assert!(derive_health(true, true, 1));
+    }
+
+    #[test]
+    fn resolve_batch_task_result_propagates_worker_error() {
+        let result = TurboCharger::resolve_batch_task_result(Ok(Err(TurboError::Internal(
+            "batch failed".to_string(),
+        ))));
+        assert!(matches!(result, Err(TurboError::Internal(msg)) if msg == "batch failed"));
+    }
+
+    #[tokio::test]
+    async fn resolve_batch_task_result_propagates_join_error() {
+        let join_error = tokio::spawn(async move {
+            panic!("simulated worker panic");
+            #[allow(unreachable_code)]
+            Ok::<usize, TurboError>(0)
+        })
+        .await
+        .expect_err("task should panic");
+
+        let result = TurboCharger::resolve_batch_task_result(Err(join_error));
+        assert!(matches!(result, Err(TurboError::TaskJoin(_))));
+    }
 }
