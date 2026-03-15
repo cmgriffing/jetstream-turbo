@@ -69,22 +69,15 @@ impl TurboCache {
         (self.user_capacity, self.post_capacity)
     }
 
-    #[instrument(name = "cache_get_user_profile", skip(self), fields(did, hit))]
     pub async fn get_user_profile(&self, did: &str) -> Option<Arc<BlueskyProfile>> {
-        tracing::Span::current().record("did", did);
-
         if let Some(profile) = self.user_cache.get(did) {
             self.metrics.user_hits.fetch_add(1, Ordering::Relaxed);
             self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
-            tracing::Span::current().record("hit", true);
-            trace!("Cache hit for user profile: {}", did);
-            return Some(Arc::clone(&profile));
+            return Some(profile);
         }
 
         self.metrics.user_misses.fetch_add(1, Ordering::Relaxed);
         self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
-        tracing::Span::current().record("hit", false);
-        trace!("Cache miss for user profile: {}", did);
         None
     }
 
@@ -94,7 +87,7 @@ impl TurboCache {
                 if let Some(profile) = self.user_cache.get(did) {
                     self.metrics.user_hits.fetch_add(1, Ordering::Relaxed);
                     self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
-                    Some(Arc::clone(&profile))
+                    Some(profile)
                 } else {
                     self.metrics.user_misses.fetch_add(1, Ordering::Relaxed);
                     self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
@@ -109,22 +102,15 @@ impl TurboCache {
         trace!("Cached user profile: {}", did);
     }
 
-    #[instrument(name = "cache_get_post", skip(self), fields(uri, hit))]
     pub async fn get_post(&self, uri: &str) -> Option<Arc<BlueskyPost>> {
-        tracing::Span::current().record("uri", uri);
-
         if let Some(post) = self.post_cache.get(uri) {
             self.metrics.post_hits.fetch_add(1, Ordering::Relaxed);
             self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
-            tracing::Span::current().record("hit", true);
-            trace!("Cache hit for post: {}", uri);
-            return Some(Arc::clone(&post));
+            return Some(post);
         }
 
         self.metrics.post_misses.fetch_add(1, Ordering::Relaxed);
         self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
-        tracing::Span::current().record("hit", false);
-        trace!("Cache miss for post: {}", uri);
         None
     }
 
@@ -134,7 +120,7 @@ impl TurboCache {
                 if let Some(post) = self.post_cache.get(uri) {
                     self.metrics.post_hits.fetch_add(1, Ordering::Relaxed);
                     self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
-                    Some(Arc::clone(&post))
+                    Some(post)
                 } else {
                     self.metrics.post_misses.fetch_add(1, Ordering::Relaxed);
                     self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);

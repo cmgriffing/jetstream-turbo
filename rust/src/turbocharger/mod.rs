@@ -3,6 +3,7 @@ pub mod coordinator;
 pub mod orchestrator;
 
 pub use orchestrator::{
-    CacheStateDiagnostics, HealthDiagnostics, HealthStatus, NotRedisStateDiagnostics,
-    ProcessMemoryDiagnostics, SQLiteStateDiagnostics, TurboCharger, TurboStats,
+    CacheStateDiagnostics, HealthDiagnostics, HealthStatus, MemoryPeakDiagnostics,
+    NotRedisStateDiagnostics, ProcessMemoryDiagnostics, SQLiteStateDiagnostics, TurboCharger,
+    TurboStats,
 };

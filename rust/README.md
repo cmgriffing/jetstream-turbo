@@ -54,7 +54,7 @@ The server runs on port 8080 by default.
 | `/ready` | GET | Readiness probe |
 | `/api/v1/health` | GET | Health check with system status |
 | `/api/v1/stats` | GET | Processing statistics |
-| `/api/v1/metrics` | GET | Prometheus runtime metrics (process/cache/SQLite/not_redis) |
+| `/api/v1/metrics` | GET | Prometheus runtime metrics (including rolling 24h process-memory peaks) |
 
 > **Note:** Most endpoints require the `/api/v1/` prefix. The root `/health` returns 404.
 
@@ -91,13 +91,23 @@ curl http://localhost:8080/api/v1/stats
         "rss_bytes": 73400320,
         "virtual_memory_bytes": 581959680,
         "source": "ps",
-        "collection_error": null
+        "collection_error": null,
+        "peaks_24h": {
+          "window_seconds": 86400,
+          "samples_collected": 240,
+          "latest_sample_unix_seconds": 1700000010,
+          "latest_sample_age_seconds": 30,
+          "rss_peak_bytes": 90177536,
+          "rss_peak_unix_seconds": 1700000000,
+          "virtual_memory_peak_bytes": 603979776,
+          "virtual_memory_peak_unix_seconds": 1700000000
+        }
       },
       "cache_state": {
         "user_entries": 1432,
         "post_entries": 972,
-        "user_capacity": 20000,
-        "post_capacity": 20000,
+        "user_capacity": 12000,
+        "post_capacity": 12000,
         "user_hits": 21102,
         "user_misses": 954,
         "post_hits": 14023,
@@ -112,10 +122,10 @@ curl http://localhost:8080/api/v1/stats
         "page_count": 3072,
         "page_size_bytes": 4096,
         "freelist_count": 0,
-        "cache_size_pages": -64000,
-        "mmap_size_bytes": 268435456,
+        "cache_size_pages": -49152,
+        "mmap_size_bytes": 134217728,
         "journal_mode": "wal",
-        "journal_size_limit_bytes": 5368709120,
+        "journal_size_limit_bytes": 805306368,
         "collection_error": null
       },
       "not_redis_state": {
@@ -130,6 +140,14 @@ curl http://localhost:8080/api/v1/stats
   }
 }
 ```
+
+### Memory Spike Check (Last 24h)
+
+Use `/api/v1/metrics` for lightweight spike checks without a full monitoring stack:
+
+- `jetstream_turbo_process_memory_rss_peak_24h_bytes` reports the highest RSS sample retained in the 24h window.
+- `jetstream_turbo_process_memory_rss_peak_24h_unix_seconds` reports when that peak was observed.
+- `jetstream_turbo_process_memory_latest_sample_age_seconds` and `jetstream_turbo_process_memory_samples_24h` indicate freshness/coverage of the retained sample history.
 
 **Stats Response:**
 ```json
@@ -349,7 +367,14 @@ POSTHOG_HOST=https://us.i.posthog.com
 
 # Optional advanced overrides (generic settings path)
 TURBO__BATCH_SIZE=10
-TURBO__MAX_CONCURRENT_REQUESTS=100
+MAX_CONCURRENT_REQUESTS=6
+CACHE_SIZE_USERS=12000
+CACHE_SIZE_POSTS=12000
+MAX_DB_SIZE_MB=12288
+SQLITE_CACHE_SIZE_KIB=49152
+SQLITE_MMAP_SIZE_MB=128
+SQLITE_JOURNAL_SIZE_LIMIT_MB=768
+TRIM_MAXLEN=100
 ```
 
 ### Health Checks

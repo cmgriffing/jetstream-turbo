@@ -36,6 +36,9 @@ pub struct Settings {
     pub cleanup_backoff_reset_count: u32,
     pub cleanup_chunk_size: u32,
     pub cleanup_chunk_delay_ms: u64,
+    pub sqlite_cache_size_kib: u32,
+    pub sqlite_mmap_size_mb: u64,
+    pub sqlite_journal_size_limit_mb: u64,
 
     // HTTP Server Configuration
     pub http_port: u16,
@@ -77,8 +80,9 @@ impl Default for Settings {
             trim_maxlen: Some(100),
             db_dir: "data_store".to_string(),
             rotation_minutes: 1,
-            // 1024MB * X gigs
-            max_db_size_mb: 1024 * 10,
+            // 4 GB RAM / 40 GB disk baseline:
+            // balanced for steady-state usage while still bounding growth.
+            max_db_size_mb: 12 * 1024,
             db_retention_days: 3,
             cleanup_check_interval_minutes: 5,
             vacuum_min_bytes_freed: 100 * 1024 * 1024,
@@ -87,15 +91,18 @@ impl Default for Settings {
             cleanup_backoff_reset_count: 3,
             cleanup_chunk_size: 1000,
             cleanup_chunk_delay_ms: 50,
+            sqlite_cache_size_kib: 48 * 1024,
+            sqlite_mmap_size_mb: 128,
+            sqlite_journal_size_limit_mb: 768,
             http_port: 8080,
             batch_size: 10,
             profile_batch_size: 25,
             post_batch_size: 25,
             profile_batch_wait_ms: 150,
             post_batch_wait_ms: 300,
-            max_concurrent_requests: 10,
-            cache_size_users: 20000,
-            cache_size_posts: 20000,
+            max_concurrent_requests: 6,
+            cache_size_users: 12_000,
+            cache_size_posts: 12_000,
             max_retries: 3,
             retry_base_delay: Duration::from_millis(100),
             statsd_host: None,
@@ -174,6 +181,36 @@ impl Settings {
             builder = builder.set_override("cleanup_chunk_delay_ms", chunk_delay)?;
         }
 
+        if let Ok(sqlite_cache_size_kib) = std::env::var("SQLITE_CACHE_SIZE_KIB") {
+            builder = builder.set_override("sqlite_cache_size_kib", sqlite_cache_size_kib)?;
+        }
+
+        if let Ok(sqlite_mmap_size_mb) = std::env::var("SQLITE_MMAP_SIZE_MB") {
+            builder = builder.set_override("sqlite_mmap_size_mb", sqlite_mmap_size_mb)?;
+        }
+
+        if let Ok(sqlite_journal_size_limit_mb) = std::env::var("SQLITE_JOURNAL_SIZE_LIMIT_MB") {
+            builder = builder
+                .set_override("sqlite_journal_size_limit_mb", sqlite_journal_size_limit_mb)?;
+        }
+
+        // Resource knobs with explicit env names for operability in .env files.
+        if let Ok(max_concurrent_requests) = std::env::var("MAX_CONCURRENT_REQUESTS") {
+            builder = builder.set_override("max_concurrent_requests", max_concurrent_requests)?;
+        }
+
+        if let Ok(cache_size_users) = std::env::var("CACHE_SIZE_USERS") {
+            builder = builder.set_override("cache_size_users", cache_size_users)?;
+        }
+
+        if let Ok(cache_size_posts) = std::env::var("CACHE_SIZE_POSTS") {
+            builder = builder.set_override("cache_size_posts", cache_size_posts)?;
+        }
+
+        if let Ok(trim_maxlen) = std::env::var("TRIM_MAXLEN") {
+            builder = builder.set_override("trim_maxlen", trim_maxlen)?;
+        }
+
         if let Ok(posthog_api_key) = std::env::var("POSTHOG_API_KEY") {
             builder = builder.set_override("posthog_api_key", posthog_api_key)?;
         }
@@ -232,6 +269,26 @@ impl Settings {
             anyhow::bail!("max_concurrent_requests must be greater than 0");
         }
 
+        if self.cache_size_users == 0 || self.cache_size_posts == 0 {
+            anyhow::bail!("cache_size_users and cache_size_posts must be greater than 0");
+        }
+
+        if self.max_db_size_mb == 0 {
+            anyhow::bail!("max_db_size_mb must be greater than 0");
+        }
+
+        if self.sqlite_cache_size_kib == 0 {
+            anyhow::bail!("sqlite_cache_size_kib must be greater than 0");
+        }
+
+        if self.sqlite_mmap_size_mb == 0 {
+            anyhow::bail!("sqlite_mmap_size_mb must be greater than 0");
+        }
+
+        if self.sqlite_journal_size_limit_mb == 0 {
+            anyhow::bail!("sqlite_journal_size_limit_mb must be greater than 0");
+        }
+
         Ok(())
     }
 }
@@ -272,6 +329,13 @@ mod tests {
         assert!(!settings.jetstream_hosts.is_empty());
         assert_eq!(settings.wanted_collections, "app.bsky.feed.post");
         assert_eq!(settings.batch_size, 10);
+        assert_eq!(settings.max_db_size_mb, 12 * 1024);
+        assert_eq!(settings.max_concurrent_requests, 6);
+        assert_eq!(settings.cache_size_users, 12_000);
+        assert_eq!(settings.cache_size_posts, 12_000);
+        assert_eq!(settings.sqlite_cache_size_kib, 48 * 1024);
+        assert_eq!(settings.sqlite_mmap_size_mb, 128);
+        assert_eq!(settings.sqlite_journal_size_limit_mb, 768);
     }
 
     #[test]

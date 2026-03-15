@@ -4,4 +4,4 @@ pub mod sqlite;
 
 pub use redis::RedisStore;
 pub use rotation::DatabaseRotator;
-pub use sqlite::SQLiteStore;
+pub use sqlite::{SQLitePragmaConfig, SQLiteStore};
