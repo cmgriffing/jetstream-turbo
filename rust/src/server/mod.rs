@@ -156,7 +156,11 @@ fn readiness_http_status(status: &HealthStatus) -> StatusCode {
 
 fn health_http_response(status: HealthStatus) -> (StatusCode, HealthResponse) {
     let status_code = readiness_http_status(&status);
-    let response_status = if status.healthy { "healthy" } else { "unhealthy" };
+    let response_status = if status.healthy {
+        "healthy"
+    } else {
+        "unhealthy"
+    };
 
     (
         status_code,
@@ -181,6 +185,71 @@ fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> Strin
         "jetstream_turbo_process_memory_virtual_bytes",
         "Current process virtual memory in bytes.",
         optional_u64_metric_value(diagnostics.process_memory.virtual_memory_bytes),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_process_memory_peak_window_seconds",
+        "Rolling memory-peak window size in seconds.",
+        diagnostics
+            .process_memory
+            .peaks_24h
+            .window_seconds
+            .to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_process_memory_samples_24h",
+        "Number of in-process memory samples retained in the 24h peak window.",
+        diagnostics
+            .process_memory
+            .peaks_24h
+            .samples_collected
+            .to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_process_memory_latest_sample_age_seconds",
+        "Age in seconds of the most recent in-process memory sample.",
+        optional_u64_metric_value(
+            diagnostics
+                .process_memory
+                .peaks_24h
+                .latest_sample_age_seconds,
+        ),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_process_memory_rss_peak_24h_bytes",
+        "Highest resident memory sample seen in the rolling 24h window.",
+        optional_u64_metric_value(diagnostics.process_memory.peaks_24h.rss_peak_bytes),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_process_memory_rss_peak_24h_unix_seconds",
+        "Unix timestamp for when the rolling 24h RSS peak was observed.",
+        optional_u64_metric_value(diagnostics.process_memory.peaks_24h.rss_peak_unix_seconds),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_process_memory_virtual_peak_24h_bytes",
+        "Highest virtual memory sample seen in the rolling 24h window.",
+        optional_u64_metric_value(
+            diagnostics
+                .process_memory
+                .peaks_24h
+                .virtual_memory_peak_bytes,
+        ),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_process_memory_virtual_peak_24h_unix_seconds",
+        "Unix timestamp for when the rolling 24h virtual-memory peak was observed.",
+        optional_u64_metric_value(
+            diagnostics
+                .process_memory
+                .peaks_24h
+                .virtual_memory_peak_unix_seconds,
+        ),
     );
     append_gauge_metric(
         &mut output,
@@ -270,23 +339,29 @@ fn bool_metric_value(value: bool) -> String {
 }
 
 fn optional_u64_metric_value(value: Option<u64>) -> String {
-    value.map(|v| v.to_string()).unwrap_or_else(|| "NaN".to_string())
+    value
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "NaN".to_string())
 }
 
 fn optional_i64_metric_value(value: Option<i64>) -> String {
-    value.map(|v| v.to_string()).unwrap_or_else(|| "NaN".to_string())
+    value
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "NaN".to_string())
 }
 
 fn optional_usize_metric_value(value: Option<usize>) -> String {
-    value.map(|v| v.to_string()).unwrap_or_else(|| "NaN".to_string())
+    value
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "NaN".to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{health_http_response, prometheus_metrics_from_diagnostics, readiness_http_status};
     use crate::turbocharger::{
-        CacheStateDiagnostics, HealthDiagnostics, HealthStatus, NotRedisStateDiagnostics,
-        ProcessMemoryDiagnostics, SQLiteStateDiagnostics,
+        CacheStateDiagnostics, HealthDiagnostics, HealthStatus, MemoryPeakDiagnostics,
+        NotRedisStateDiagnostics, ProcessMemoryDiagnostics, SQLiteStateDiagnostics,
     };
     use axum::http::StatusCode;
     use serde_json::Value;
@@ -299,6 +374,16 @@ mod tests {
                 virtual_memory_bytes: Some(4096),
                 source: "test",
                 collection_error: None,
+                peaks_24h: MemoryPeakDiagnostics {
+                    window_seconds: 86_400,
+                    samples_collected: 240,
+                    latest_sample_unix_seconds: Some(1_700_000_010),
+                    latest_sample_age_seconds: Some(30),
+                    rss_peak_bytes: Some(8192),
+                    rss_peak_unix_seconds: Some(1_700_000_000),
+                    virtual_memory_peak_bytes: Some(16_384),
+                    virtual_memory_peak_unix_seconds: Some(1_700_000_000),
+                },
             },
             cache_state: CacheStateDiagnostics {
                 user_entries: 1,
@@ -387,6 +472,10 @@ mod tests {
 
         assert_eq!(json["status"], "healthy");
         assert!(json["data"]["diagnostics"]["process_memory"]["pid"].is_number());
+        assert!(
+            json["data"]["diagnostics"]["process_memory"]["peaks_24h"]["rss_peak_bytes"]
+                .is_number()
+        );
         assert!(json["data"]["diagnostics"]["cache_state"]["user_capacity"].is_number());
         assert!(json["data"]["diagnostics"]["sqlite_state"]["journal_mode"].is_string());
         assert!(json["data"]["diagnostics"]["not_redis_state"]["stream_name"].is_string());
@@ -398,6 +487,10 @@ mod tests {
 
         assert!(output.contains("jetstream_turbo_process_memory_rss_bytes 1024"));
         assert!(output.contains("jetstream_turbo_process_memory_virtual_bytes 4096"));
+        assert!(output.contains("jetstream_turbo_process_memory_peak_window_seconds 86400"));
+        assert!(output.contains("jetstream_turbo_process_memory_samples_24h 240"));
+        assert!(output.contains("jetstream_turbo_process_memory_rss_peak_24h_bytes 8192"));
+        assert!(output.contains("jetstream_turbo_process_memory_virtual_peak_24h_bytes 16384"));
         assert!(output.contains("jetstream_turbo_cache_user_entries 1"));
         assert!(output.contains("jetstream_turbo_cache_post_entries 2"));
         assert!(output.contains("jetstream_turbo_sqlite_available 1"));
@@ -410,12 +503,29 @@ mod tests {
     fn metrics_response_uses_nan_for_missing_optional_values() {
         let mut diagnostics = sample_diagnostics();
         diagnostics.process_memory.rss_bytes = None;
+        diagnostics
+            .process_memory
+            .peaks_24h
+            .latest_sample_age_seconds = None;
+        diagnostics.process_memory.peaks_24h.rss_peak_bytes = None;
+        diagnostics.process_memory.peaks_24h.rss_peak_unix_seconds = None;
+        diagnostics
+            .process_memory
+            .peaks_24h
+            .virtual_memory_peak_bytes = None;
+        diagnostics
+            .process_memory
+            .peaks_24h
+            .virtual_memory_peak_unix_seconds = None;
         diagnostics.sqlite_state.db_size_bytes = None;
         diagnostics.not_redis_state.stream_length = None;
         diagnostics.not_redis_state.configured_max_length = None;
 
         let output = prometheus_metrics_from_diagnostics(&diagnostics);
         assert!(output.contains("jetstream_turbo_process_memory_rss_bytes NaN"));
+        assert!(output.contains("jetstream_turbo_process_memory_latest_sample_age_seconds NaN"));
+        assert!(output.contains("jetstream_turbo_process_memory_rss_peak_24h_bytes NaN"));
+        assert!(output.contains("jetstream_turbo_process_memory_virtual_peak_24h_unix_seconds NaN"));
         assert!(output.contains("jetstream_turbo_sqlite_db_size_bytes NaN"));
         assert!(output.contains("jetstream_turbo_not_redis_stream_length NaN"));
         assert!(output.contains("jetstream_turbo_not_redis_configured_max_length NaN"));

@@ -28,13 +28,23 @@ pub struct SQLiteStateSnapshot {
     pub journal_size_limit_bytes: i64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SQLitePragmaConfig {
+    pub cache_size_kib: u32,
+    pub mmap_size_mb: u64,
+    pub journal_size_limit_mb: u64,
+}
+
 pub struct SQLiteStore {
     pool: SqlitePool,
     db_path: String,
 }
 
 impl SQLiteStore {
-    pub async fn new<P: AsRef<Path>>(db_path: P) -> TurboResult<Self> {
+    pub async fn new<P: AsRef<Path>>(
+        db_path: P,
+        pragma_config: SQLitePragmaConfig,
+    ) -> TurboResult<Self> {
         let db_path_str = db_path.as_ref().to_string_lossy().to_string();
 
         info!("Creating SQLite database at: {}", db_path_str);
@@ -58,7 +68,7 @@ impl SQLiteStore {
         let pool = SqlitePool::connect_with(connect_options).await?;
 
         // Apply performance optimizations
-        Self::apply_pragmas(&pool).await?;
+        Self::apply_pragmas(&pool, pragma_config).await?;
 
         // Initialize schema
         Self::initialize_schema(&pool).await?;
@@ -101,14 +111,18 @@ impl SQLiteStore {
         Ok(())
     }
 
-    async fn apply_pragmas(pool: &SqlitePool) -> TurboResult<()> {
+    async fn apply_pragmas(
+        pool: &SqlitePool,
+        pragma_config: SQLitePragmaConfig,
+    ) -> TurboResult<()> {
         // synchronous = NORMAL: Good performance with WAL mode, still safe
         sqlx::query("PRAGMA synchronous = NORMAL")
             .execute(pool)
             .await?;
 
-        // cache_size = -64000: 64MB page cache (negative = KB units)
-        sqlx::query("PRAGMA cache_size = -64000")
+        let cache_size_pragma = -(pragma_config.cache_size_kib as i64);
+        // cache_size uses negative values to mean kibibytes.
+        sqlx::query(&format!("PRAGMA cache_size = {cache_size_pragma}"))
             .execute(pool)
             .await?;
 
@@ -117,18 +131,29 @@ impl SQLiteStore {
             .execute(pool)
             .await?;
 
-        // mmap_size = 256MB memory-mapped I/O for faster reads (skip for in-memory)
+        let mmap_size_bytes = pragma_config.mmap_size_mb.saturating_mul(1024 * 1024);
+        // mmap_size for faster reads (skip for in-memory)
         // In-memory databases don't benefit from mmap
-        let _ = sqlx::query("PRAGMA mmap_size = 268435456")
+        let _ = sqlx::query(&format!("PRAGMA mmap_size = {mmap_size_bytes}"))
             .execute(pool)
             .await;
 
-        // Limit WAL size to 5GB to prevent unbounded growth
-        sqlx::query("PRAGMA journal_size_limit = 5368709120")
-            .execute(pool)
-            .await?;
+        // Limit WAL size to prevent unbounded growth.
+        let journal_size_limit_bytes = pragma_config
+            .journal_size_limit_mb
+            .saturating_mul(1024 * 1024);
+        sqlx::query(&format!(
+            "PRAGMA journal_size_limit = {journal_size_limit_bytes}"
+        ))
+        .execute(pool)
+        .await?;
 
-        info!("Applied SQLite performance PRAGMAs");
+        info!(
+            "Applied SQLite PRAGMAs: cache_size={}KiB, mmap_size={}MB, journal_size_limit={}MB",
+            pragma_config.cache_size_kib,
+            pragma_config.mmap_size_mb,
+            pragma_config.journal_size_limit_mb
+        );
         Ok(())
     }
 
@@ -522,7 +547,16 @@ mod tests {
         let temp_dir = std::env::temp_dir();
         let db_path = temp_dir.join(format!("test_sqlite_{}.db", uuid::Uuid::new_v4()));
         let db_path_str = db_path.to_string_lossy().to_string();
-        SQLiteStore::new(&db_path_str).await.unwrap()
+        SQLiteStore::new(
+            &db_path_str,
+            SQLitePragmaConfig {
+                cache_size_kib: 48 * 1024,
+                mmap_size_mb: 128,
+                journal_size_limit_mb: 768,
+            },
+        )
+        .await
+        .unwrap()
     }
 
     #[tokio::test]
@@ -545,6 +579,16 @@ mod tests {
         assert!(snapshot.page_size_bytes > 0);
         assert!(!snapshot.journal_mode.is_empty());
         assert!(snapshot.wal_size_bytes.is_some());
+        assert!(
+            snapshot.cache_size_pages < 0,
+            "cache_size pragma should remain in kibibyte mode"
+        );
+        assert_eq!(snapshot.mmap_size_bytes, (128 * 1024 * 1024) as i64);
+        assert!(
+            snapshot.journal_size_limit_bytes == (768 * 1024 * 1024) as i64
+                || snapshot.journal_size_limit_bytes == -1,
+            "journal_size_limit should be configured or report SQLite's unlimited sentinel"
+        );
 
         store.close().await.unwrap();
     }

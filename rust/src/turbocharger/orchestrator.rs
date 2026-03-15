@@ -6,14 +6,14 @@ use crate::models::{
     errors::{TurboError, TurboResult},
     jetstream::JetstreamMessage,
 };
-use crate::storage::{RedisStore, SQLiteStore};
+use crate::storage::{RedisStore, SQLitePragmaConfig, SQLiteStore};
 use crate::telemetry::ErrorReporter;
 use futures::StreamExt;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::process::Command;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::{interval, sleep};
@@ -21,6 +21,7 @@ use tracing::{error, info, trace};
 
 const BATCH_SIZE: usize = 25;
 const MAX_WAIT_TIME_MS: u64 = 200;
+const MEMORY_PEAK_WINDOW_SECS: u64 = 24 * 60 * 60;
 
 pub struct TurboCharger {
     settings: Settings,
@@ -33,6 +34,7 @@ pub struct TurboCharger {
     semaphore: Arc<Semaphore>,
     broadcast_sender: broadcast::Sender<EnrichedRecord>,
     error_reporter: ErrorReporter,
+    memory_peak_window: Mutex<MemoryPeakWindow>,
 }
 
 impl TurboCharger {
@@ -85,7 +87,17 @@ impl TurboCharger {
 
         // Initialize storage
         let db_path = format!("{}/jetstream.db", settings.db_dir);
-        let sqlite_store = Arc::new(SQLiteStore::new(&db_path).await?);
+        let sqlite_store = Arc::new(
+            SQLiteStore::new(
+                &db_path,
+                SQLitePragmaConfig {
+                    cache_size_kib: settings.sqlite_cache_size_kib,
+                    mmap_size_mb: settings.sqlite_mmap_size_mb,
+                    journal_size_limit_mb: settings.sqlite_journal_size_limit_mb,
+                },
+            )
+            .await?,
+        );
 
         let redis_store = Arc::new(
             RedisStore::new(
@@ -117,6 +129,7 @@ impl TurboCharger {
             semaphore,
             broadcast_sender,
             error_reporter,
+            memory_peak_window: Mutex::new(MemoryPeakWindow::new(MEMORY_PEAK_WINDOW_SECS)),
         })
     }
 
@@ -178,6 +191,8 @@ impl TurboCharger {
             }
 
             if last_stats.elapsed() >= Duration::from_secs(30) {
+                let process_memory = collect_process_memory_diagnostics();
+                let _ = self.observe_memory_sample(&process_memory);
                 let (user_hit_rate, post_hit_rate) =
                     self.hydrator.get_cache().get_hit_rates().await;
                 info!(
@@ -403,7 +418,9 @@ impl TurboCharger {
             }
         };
         let session_count = self.bluesky_client.get_session_count().await;
-        let diagnostics = self.collect_health_diagnostics(redis_healthy, sqlite_available).await;
+        let diagnostics = self
+            .collect_health_diagnostics(redis_healthy, sqlite_available)
+            .await;
 
         Ok(HealthStatus {
             healthy: derive_health(redis_healthy, sqlite_available, session_count),
@@ -493,8 +510,11 @@ impl TurboCharger {
             },
         };
 
+        let mut process_memory = collect_process_memory_diagnostics();
+        process_memory.peaks_24h = self.observe_memory_sample(&process_memory);
+
         HealthDiagnostics {
-            process_memory: collect_process_memory_diagnostics(),
+            process_memory,
             cache_state: CacheStateDiagnostics {
                 user_entries,
                 post_entries,
@@ -510,6 +530,30 @@ impl TurboCharger {
             sqlite_state,
             not_redis_state,
         }
+    }
+
+    fn observe_memory_sample(
+        &self,
+        process_memory: &ProcessMemoryDiagnostics,
+    ) -> MemoryPeakDiagnostics {
+        let now_unix_seconds = unix_timestamp_seconds();
+        let mut peak_window = self
+            .memory_peak_window
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if let (Some(rss_bytes), Some(virtual_memory_bytes)) = (
+            process_memory.rss_bytes,
+            process_memory.virtual_memory_bytes,
+        ) {
+            peak_window.record(MemorySample {
+                captured_at_unix_seconds: now_unix_seconds,
+                rss_bytes,
+                virtual_memory_bytes,
+            });
+        }
+
+        peak_window.snapshot(now_unix_seconds)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<EnrichedRecord> {
@@ -640,6 +684,34 @@ pub struct ProcessMemoryDiagnostics {
     pub virtual_memory_bytes: Option<u64>,
     pub source: &'static str,
     pub collection_error: Option<String>,
+    pub peaks_24h: MemoryPeakDiagnostics,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryPeakDiagnostics {
+    pub window_seconds: u64,
+    pub samples_collected: usize,
+    pub latest_sample_unix_seconds: Option<u64>,
+    pub latest_sample_age_seconds: Option<u64>,
+    pub rss_peak_bytes: Option<u64>,
+    pub rss_peak_unix_seconds: Option<u64>,
+    pub virtual_memory_peak_bytes: Option<u64>,
+    pub virtual_memory_peak_unix_seconds: Option<u64>,
+}
+
+impl MemoryPeakDiagnostics {
+    fn empty(window_seconds: u64) -> Self {
+        Self {
+            window_seconds,
+            samples_collected: 0,
+            latest_sample_unix_seconds: None,
+            latest_sample_age_seconds: None,
+            rss_peak_bytes: None,
+            rss_peak_unix_seconds: None,
+            virtual_memory_peak_bytes: None,
+            virtual_memory_peak_unix_seconds: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -698,6 +770,7 @@ fn collect_process_memory_diagnostics() -> ProcessMemoryDiagnostics {
                 virtual_memory_bytes: Some(virtual_memory_bytes),
                 source: "procfs",
                 collection_error: None,
+                peaks_24h: MemoryPeakDiagnostics::empty(MEMORY_PEAK_WINDOW_SECS),
             };
         }
     }
@@ -709,6 +782,7 @@ fn collect_process_memory_diagnostics() -> ProcessMemoryDiagnostics {
             virtual_memory_bytes: Some(virtual_memory_bytes),
             source: "ps",
             collection_error: None,
+            peaks_24h: MemoryPeakDiagnostics::empty(MEMORY_PEAK_WINDOW_SECS),
         },
         Err(error_message) => ProcessMemoryDiagnostics {
             pid,
@@ -716,8 +790,94 @@ fn collect_process_memory_diagnostics() -> ProcessMemoryDiagnostics {
             virtual_memory_bytes: None,
             source: "unavailable",
             collection_error: Some(error_message),
+            peaks_24h: MemoryPeakDiagnostics::empty(MEMORY_PEAK_WINDOW_SECS),
         },
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MemorySample {
+    captured_at_unix_seconds: u64,
+    rss_bytes: u64,
+    virtual_memory_bytes: u64,
+}
+
+#[derive(Debug)]
+struct MemoryPeakWindow {
+    window_seconds: u64,
+    samples: VecDeque<MemorySample>,
+}
+
+impl MemoryPeakWindow {
+    fn new(window_seconds: u64) -> Self {
+        Self {
+            window_seconds,
+            samples: VecDeque::new(),
+        }
+    }
+
+    fn record(&mut self, sample: MemorySample) {
+        self.samples.push_back(sample);
+        self.trim_old_samples(sample.captured_at_unix_seconds);
+    }
+
+    fn snapshot(&mut self, now_unix_seconds: u64) -> MemoryPeakDiagnostics {
+        self.trim_old_samples(now_unix_seconds);
+
+        let mut rss_peak: Option<(u64, u64)> = None;
+        let mut virtual_peak: Option<(u64, u64)> = None;
+
+        for sample in &self.samples {
+            if rss_peak
+                .map(|(_, peak_rss)| sample.rss_bytes > peak_rss)
+                .unwrap_or(true)
+            {
+                rss_peak = Some((sample.captured_at_unix_seconds, sample.rss_bytes));
+            }
+            if virtual_peak
+                .map(|(_, peak_virtual)| sample.virtual_memory_bytes > peak_virtual)
+                .unwrap_or(true)
+            {
+                virtual_peak = Some((sample.captured_at_unix_seconds, sample.virtual_memory_bytes));
+            }
+        }
+
+        let latest_sample_unix_seconds = self
+            .samples
+            .back()
+            .map(|sample| sample.captured_at_unix_seconds);
+
+        MemoryPeakDiagnostics {
+            window_seconds: self.window_seconds,
+            samples_collected: self.samples.len(),
+            latest_sample_unix_seconds,
+            latest_sample_age_seconds: latest_sample_unix_seconds
+                .map(|captured| now_unix_seconds.saturating_sub(captured)),
+            rss_peak_bytes: rss_peak.map(|(_, rss)| rss),
+            rss_peak_unix_seconds: rss_peak.map(|(captured, _)| captured),
+            virtual_memory_peak_bytes: virtual_peak.map(|(_, virtual_memory)| virtual_memory),
+            virtual_memory_peak_unix_seconds: virtual_peak.map(|(captured, _)| captured),
+        }
+    }
+
+    fn trim_old_samples(&mut self, now_unix_seconds: u64) {
+        let window_start = now_unix_seconds.saturating_sub(self.window_seconds);
+        while self
+            .samples
+            .front()
+            .map(|sample| sample.captured_at_unix_seconds < window_start)
+            .unwrap_or(false)
+        {
+            self.samples.pop_front();
+        }
+    }
+}
+
+fn unix_timestamp_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_secs()
 }
 
 fn parse_proc_status_memory_bytes(contents: &str) -> Option<(u64, u64)> {
@@ -813,6 +973,62 @@ VmRSS:\t  1024 kB\n";
     fn parse_ps_memory_output_extracts_values() {
         let parsed = parse_ps_memory_output("12345   67890\n");
         assert_eq!(parsed, Some((12_641_280, 69_519_360)));
+    }
+
+    #[test]
+    fn memory_peak_window_tracks_high_watermarks_within_window() {
+        let mut window = MemoryPeakWindow::new(60);
+        window.record(MemorySample {
+            captured_at_unix_seconds: 100,
+            rss_bytes: 10,
+            virtual_memory_bytes: 40,
+        });
+        window.record(MemorySample {
+            captured_at_unix_seconds: 130,
+            rss_bytes: 25,
+            virtual_memory_bytes: 30,
+        });
+
+        let snapshot = window.snapshot(150);
+        assert_eq!(snapshot.samples_collected, 2);
+        assert_eq!(snapshot.window_seconds, 60);
+        assert_eq!(snapshot.latest_sample_unix_seconds, Some(130));
+        assert_eq!(snapshot.latest_sample_age_seconds, Some(20));
+        assert_eq!(snapshot.rss_peak_bytes, Some(25));
+        assert_eq!(snapshot.rss_peak_unix_seconds, Some(130));
+        assert_eq!(snapshot.virtual_memory_peak_bytes, Some(40));
+        assert_eq!(snapshot.virtual_memory_peak_unix_seconds, Some(100));
+    }
+
+    #[test]
+    fn memory_peak_window_expires_old_samples() {
+        let mut window = MemoryPeakWindow::new(60);
+        window.record(MemorySample {
+            captured_at_unix_seconds: 10,
+            rss_bytes: 10,
+            virtual_memory_bytes: 10,
+        });
+        window.record(MemorySample {
+            captured_at_unix_seconds: 70,
+            rss_bytes: 20,
+            virtual_memory_bytes: 20,
+        });
+        window.record(MemorySample {
+            captured_at_unix_seconds: 75,
+            rss_bytes: 30,
+            virtual_memory_bytes: 30,
+        });
+
+        let first_snapshot = window.snapshot(80);
+        assert_eq!(first_snapshot.samples_collected, 2);
+        assert_eq!(first_snapshot.rss_peak_bytes, Some(30));
+        assert_eq!(first_snapshot.rss_peak_unix_seconds, Some(75));
+
+        let second_snapshot = window.snapshot(140);
+        assert_eq!(second_snapshot.samples_collected, 0);
+        assert_eq!(second_snapshot.latest_sample_unix_seconds, None);
+        assert_eq!(second_snapshot.rss_peak_bytes, None);
+        assert_eq!(second_snapshot.virtual_memory_peak_bytes, None);
     }
 
     #[test]

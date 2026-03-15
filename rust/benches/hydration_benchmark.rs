@@ -3,7 +3,7 @@ use jetstream_turbo_rs::hydration::TurboCache;
 use jetstream_turbo_rs::models::bluesky::{BlueskyPost, BlueskyProfile};
 use jetstream_turbo_rs::models::enriched::{EnrichedRecord, HydratedMetadata, ProcessingMetrics};
 use jetstream_turbo_rs::models::jetstream::{CommitData, JetstreamMessage};
-use jetstream_turbo_rs::storage::SQLiteStore;
+use jetstream_turbo_rs::storage::{SQLitePragmaConfig, SQLiteStore};
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -59,6 +59,14 @@ fn create_test_message(i: usize) -> JetstreamMessage {
             })),
             cid: Some(format!("bafyrei{}", i)),
         }),
+    }
+}
+
+fn benchmark_sqlite_pragmas() -> SQLitePragmaConfig {
+    SQLitePragmaConfig {
+        cache_size_kib: 32 * 1024,
+        mmap_size_mb: 64,
+        journal_size_limit_mb: 512,
     }
 }
 
@@ -290,7 +298,11 @@ fn bench_sqlite_operations(c: &mut Criterion) {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
 
-        let store = rt.block_on(async { SQLiteStore::new(&db_path).await.unwrap() });
+        let store = rt.block_on(async {
+            SQLiteStore::new(&db_path, benchmark_sqlite_pragmas())
+                .await
+                .unwrap()
+        });
 
         let message = create_test_message(0);
         let record = EnrichedRecord {
@@ -317,7 +329,11 @@ fn bench_sqlite_operations(c: &mut Criterion) {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.db");
 
-        let store = rt.block_on(async { SQLiteStore::new(&db_path).await.unwrap() });
+        let store = rt.block_on(async {
+            SQLiteStore::new(&db_path, benchmark_sqlite_pragmas())
+                .await
+                .unwrap()
+        });
 
         let records: Vec<EnrichedRecord> = (0..100)
             .map(|i| {
@@ -356,7 +372,11 @@ fn bench_sqlite_operations(c: &mut Criterion) {
                 let temp_dir = TempDir::new().unwrap();
                 let db_path = temp_dir.path().join("test.db");
 
-                let store = rt.block_on(async { SQLiteStore::new(&db_path).await.unwrap() });
+                let store = rt.block_on(async {
+                    SQLiteStore::new(&db_path, benchmark_sqlite_pragmas())
+                        .await
+                        .unwrap()
+                });
 
                 let records: Vec<EnrichedRecord> = (0..batch_size)
                     .map(|i| {
