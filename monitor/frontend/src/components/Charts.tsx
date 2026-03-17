@@ -210,14 +210,19 @@ function normalizeTickValue(value: number): number {
   return Object.is(normalized, -0) ? 0 : normalized;
 }
 
+function readNumericTickValue(value: number | string): number | null {
+  const numericValue = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numericValue) ? numericValue : null;
+}
+
 function formatAdaptiveYAxisTick(
   tickValue: number | string,
   min: number,
   max: number,
   suffix: string,
 ): string {
-  const numericValue = typeof tickValue === "number" ? tickValue : Number(tickValue);
-  if (!Number.isFinite(numericValue)) {
+  const numericValue = readNumericTickValue(tickValue);
+  if (numericValue === null) {
     return `${tickValue}${suffix}`;
   }
 
@@ -544,6 +549,18 @@ export function RateChart({
             grid: { color: palette.grid, drawTicks: false },
           },
           y: {
+            type: "linear" as const,
+            afterBuildTicks: (scale: unknown) => {
+              const axis = scale as { ticks: Array<{ value: number | string }> };
+              axis.ticks.sort((a: { value: number | string }, b: { value: number | string }) => {
+                const left = readNumericTickValue(a.value);
+                const right = readNumericTickValue(b.value);
+                if (left === null && right === null) return 0;
+                if (left === null) return 1;
+                if (right === null) return -1;
+                return left - right;
+              });
+            },
             ticks: {
               color: palette.text,
               callback: (v: number | string) =>
