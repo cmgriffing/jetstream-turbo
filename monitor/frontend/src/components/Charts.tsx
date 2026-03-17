@@ -10,6 +10,7 @@ import {
   Legend,
 } from "chart.js";
 import { HourlyUptime } from "../hooks/useStream";
+import { readNumericTickValue, sortNumericAxisTicks } from "./rateAxis";
 
 ChartJS.register(
   CategoryScale,
@@ -216,8 +217,8 @@ function formatAdaptiveYAxisTick(
   max: number,
   suffix: string,
 ): string {
-  const numericValue = typeof tickValue === "number" ? tickValue : Number(tickValue);
-  if (!Number.isFinite(numericValue)) {
+  const numericValue = readNumericTickValue(tickValue);
+  if (numericValue === null) {
     return `${tickValue}${suffix}`;
   }
 
@@ -544,6 +545,11 @@ export function RateChart({
             grid: { color: palette.grid, drawTicks: false },
           },
           y: {
+            type: "linear" as const,
+            afterBuildTicks: (scale: unknown) => {
+              const axis = scale as { ticks: Array<{ value: number | string }> };
+              sortNumericAxisTicks(axis.ticks);
+            },
             ticks: {
               color: palette.text,
               callback: (v: number | string) =>
