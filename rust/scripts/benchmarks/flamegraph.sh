@@ -5,8 +5,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-OUTPUT_DIR="$PROJECT_DIR/flamegraphs"
+RUST_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+OUTPUT_DIR="$RUST_DIR/flamegraphs"
 
 # Colors for output
 RED='\033[0;31m'
@@ -71,10 +71,11 @@ echo "  Title:    $TITLE"
 echo "  Output:   $OUTPUT_FILE"
 echo ""
 
-# Check for .env file
-if [ ! -f "$PROJECT_DIR/.env" ]; then
-    echo -e "${YELLOW}Warning: .env file not found${NC}"
-    echo "Some features may not work without configuration"
+# Validate script layout assumptions
+if [ ! -f "$RUST_DIR/Cargo.toml" ]; then
+    echo -e "${RED}Error: Could not locate rust project root from script path${NC}"
+    echo "Expected Cargo.toml at: $RUST_DIR/Cargo.toml"
+    exit 1
 fi
 
 echo -e "${GREEN}Starting flamegraph generation...${NC}"
@@ -85,7 +86,7 @@ echo ""
 # Note: On macOS, you may need to disable SIP or use sudo for full profiling
 # cargo-flamegraph uses dtrace which requires special permissions on macOS
 
-cd "$PROJECT_DIR/rust"
+cd "$RUST_DIR"
 
 if command -v sudo &> /dev/null && [ "$(uname)" = "Darwin" ]; then
     # Try with sudo on macOS
