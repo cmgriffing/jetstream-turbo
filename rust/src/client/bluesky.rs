@@ -108,6 +108,26 @@ impl BlueskyClient {
         profile_batch_wait_ms: u64,
         post_batch_wait_ms: u64,
     ) -> TurboResult<Self> {
+        Self::new_with_api_base_url(
+            session_strings,
+            auth_client,
+            profile_batch_size,
+            post_batch_size,
+            profile_batch_wait_ms,
+            post_batch_wait_ms,
+            "https://bsky.social/xrpc".to_string(),
+        )
+    }
+
+    pub fn new_with_api_base_url(
+        session_strings: Vec<String>,
+        auth_client: Option<Arc<BlueskyAuthClient>>,
+        profile_batch_size: usize,
+        post_batch_size: usize,
+        profile_batch_wait_ms: u64,
+        post_batch_wait_ms: u64,
+        api_base_url: String,
+    ) -> TurboResult<Self> {
         let quota = Quota::with_period(Duration::from_millis(REQUESTS_PER_SECOND_MS))
             .expect("Valid quota")
             .allow_burst(NonZeroU32::new(1).unwrap());
@@ -126,7 +146,6 @@ impl BlueskyClient {
         let refresh_jwt = Arc::new(RwLock::new(None));
         let expires_at = Arc::new(RwLock::new(None));
         let rate_limiter = Arc::new(RateLimiter::direct(quota));
-        let api_base_url = "https://bsky.social/xrpc".to_string();
         let max_retries = 3;
         let retry_delay = Duration::from_millis(200);
 
