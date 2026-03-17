@@ -13,8 +13,6 @@ interface StreamCardProps {
   uptime?: number;
   uptimeAllTime?: number;
   connected: boolean;
-  liveLatencyMetric?: string;
-  liveLatencyMs?: number;
 }
 
 function formatDuration(ms: number): string {
@@ -43,20 +41,6 @@ function formatCountingStartedAt(timestamp?: string): string {
   });
 }
 
-function getLiveLatencyLabel(metric?: string): string {
-  if (metric === "delivery_latency") {
-    return "Delivery Latency";
-  }
-  return "Connection Latency";
-}
-
-function getLiveLatencyDescription(metric?: string): string {
-  if (metric === "delivery_latency") {
-    return "Delivery latency average measured over the latest 10-second interval.";
-  }
-  return "Time to establish the most recent successful websocket connection.";
-}
-
 export const StreamCard = memo(function StreamCard({
   streamId,
   name,
@@ -66,13 +50,9 @@ export const StreamCard = memo(function StreamCard({
   streak,
   uptimeAllTime,
   connected,
-  liveLatencyMetric,
-  liveLatencyMs,
 }: StreamCardProps) {
   const streamVariantClass =
     streamId === "a" ? "monitor-stream-card--a" : "monitor-stream-card--b";
-  const liveLatencyLabel = getLiveLatencyLabel(liveLatencyMetric);
-  const liveLatencyDescription = getLiveLatencyDescription(liveLatencyMetric);
 
   return (
     <article className={cn("monitor-stream-card", streamVariantClass)}>
@@ -123,34 +103,6 @@ export const StreamCard = memo(function StreamCard({
           <p className="monitor-stream-metric-value">
             {rate.toFixed(0)}
             <span className="monitor-stream-metric-unit">/s</span>
-          </p>
-        </div>
-
-        <div className="monitor-stream-metric">
-          <p className="monitor-stream-metric-label">
-            {liveLatencyLabel}
-            <button
-              type="button"
-              className="monitor-tooltip-trigger relative inline-flex cursor-pointer"
-              aria-label={`More info about ${liveLatencyLabel.toLowerCase()}`}
-            >
-              <Info className="h-2.5 w-2.5" aria-hidden="true" />
-              <span className="monitor-tooltip">{liveLatencyDescription}</span>
-            </button>
-          </p>
-          <p className="monitor-stream-metric-value">
-            {liveLatencyMs !== undefined && liveLatencyMs > 0 ? (
-              <>
-                {liveLatencyMs < 1000
-                  ? liveLatencyMs.toFixed(0)
-                  : `${(liveLatencyMs / 1000).toFixed(1)}s`}
-                <span className="monitor-stream-metric-unit">
-                  {liveLatencyMs < 1000 ? "ms" : ""}
-                </span>
-              </>
-            ) : (
-              <span className="monitor-stream-metric-value--empty">--</span>
-            )}
           </p>
         </div>
 
