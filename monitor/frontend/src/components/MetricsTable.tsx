@@ -98,14 +98,6 @@ function calculateStats(
   let disconnectsB = 0;
   let messagesA = 0;
   let messagesB = 0;
-  let deliveryLatencySumA = 0;
-  let deliveryLatencySumB = 0;
-  let deliveryLatencyCountA = 0;
-  let deliveryLatencyCountB = 0;
-  let mttrSumA = 0;
-  let mttrSumB = 0;
-  let mttrCountA = 0;
-  let mttrCountB = 0;
 
   data.forEach((row) => {
     const rowUptimeA = toNonNegative(row.stream_a_seconds);
@@ -121,28 +113,6 @@ function calculateStats(
     disconnectsB += toNonNegative(row.stream_b_disconnects);
     messagesA += toNonNegative(row.stream_a_messages);
     messagesB += toNonNegative(row.stream_b_messages);
-
-    const latencyA = toNonNegative(row.stream_a_delivery_latency_ms);
-    const latencyB = toNonNegative(row.stream_b_delivery_latency_ms);
-    if (latencyA > 0) {
-      deliveryLatencySumA += latencyA;
-      deliveryLatencyCountA += 1;
-    }
-    if (latencyB > 0) {
-      deliveryLatencySumB += latencyB;
-      deliveryLatencyCountB += 1;
-    }
-
-    const mttrA = toNonNegative(row.stream_a_mttr_ms);
-    const mttrB = toNonNegative(row.stream_b_mttr_ms);
-    if (mttrA > 0) {
-      mttrSumA += mttrA;
-      mttrCountA += 1;
-    }
-    if (mttrB > 0) {
-      mttrSumB += mttrB;
-      mttrCountB += 1;
-    }
   });
 
   const fallbackObservedSeconds = Math.max(
@@ -182,10 +152,6 @@ function calculateStats(
     rateB: effectiveObservedB > 0 ? messagesB / effectiveObservedB : 0,
     coverageA: requestedWindow > 0 ? clampPercent((effectiveObservedA / requestedWindow) * 100) : 0,
     coverageB: requestedWindow > 0 ? clampPercent((effectiveObservedB / requestedWindow) * 100) : 0,
-    deliveryLatencyA: deliveryLatencyCountA > 0 ? deliveryLatencySumA / deliveryLatencyCountA : 0,
-    deliveryLatencyB: deliveryLatencyCountB > 0 ? deliveryLatencySumB / deliveryLatencyCountB : 0,
-    mttrA: mttrCountA > 0 ? mttrSumA / mttrCountA : 0,
-    mttrB: mttrCountB > 0 ? mttrSumB / mttrCountB : 0,
   };
 }
 
@@ -325,26 +291,6 @@ export function MetricsTable({
               </TableCell>
               <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
                 {stats.disconnectsB}
-              </TableCell>
-            </TableRow>
-
-            <TableRow className="monitor-metrics-row">
-              <TableCell className="monitor-table-label whitespace-normal">Delivery Latency</TableCell>
-              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
-                {stats.deliveryLatencyA > 0 ? `${stats.deliveryLatencyA.toFixed(0)}ms` : "--"}
-              </TableCell>
-              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
-                {stats.deliveryLatencyB > 0 ? `${stats.deliveryLatencyB.toFixed(0)}ms` : "--"}
-              </TableCell>
-            </TableRow>
-
-            <TableRow className="monitor-metrics-row">
-              <TableCell className="monitor-table-label whitespace-normal">MTTR</TableCell>
-              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
-                {stats.mttrA > 0 ? formatDurationLong(stats.mttrA / 1000) : "--"}
-              </TableCell>
-              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
-                {stats.mttrB > 0 ? formatDurationLong(stats.mttrB / 1000) : "--"}
               </TableCell>
             </TableRow>
 

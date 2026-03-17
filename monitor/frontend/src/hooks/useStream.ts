@@ -21,13 +21,6 @@ export interface StreamStats {
   connected_b?: boolean
   stream_a_name?: string
   stream_b_name?: string
-  live_latency_metric?: string
-  live_latency_a_ms?: number
-  live_latency_b_ms?: number
-  delivery_latency_a_ms?: number
-  delivery_latency_b_ms?: number
-  mttr_a_ms?: number
-  mttr_b_ms?: number
 }
 
 interface UptimeHistoryResponse {
@@ -100,10 +93,6 @@ function normalizeUptimeRow(value: unknown): HourlyUptime | null {
     stream_b_disconnects: pickNumber(row, ['stream_b_disconnects', 'disconnects_b']),
     stream_a_messages: pickNumber(row, ['stream_a_messages', 'messages_a']),
     stream_b_messages: pickNumber(row, ['stream_b_messages', 'messages_b']),
-    stream_a_delivery_latency_ms: pickNumber(row, ['stream_a_delivery_latency_ms', 'delivery_latency_a_ms']),
-    stream_b_delivery_latency_ms: pickNumber(row, ['stream_b_delivery_latency_ms', 'delivery_latency_b_ms']),
-    stream_a_mttr_ms: pickNumber(row, ['stream_a_mttr_ms', 'mttr_a_ms']),
-    stream_b_mttr_ms: pickNumber(row, ['stream_b_mttr_ms', 'mttr_b_ms']),
   }
 }
 
@@ -311,8 +300,4 @@ export interface HourlyUptime {
   stream_b_disconnects: number
   stream_a_messages: number
   stream_b_messages: number
-  stream_a_delivery_latency_ms: number
-  stream_b_delivery_latency_ms: number
-  stream_a_mttr_ms: number
-  stream_b_mttr_ms: number
 }

@@ -60,6 +60,9 @@ const terminalFont = {
   size: 10,
 };
 
+const MAX_Y_AXIS_DECIMALS = 6;
+const TARGET_Y_AXIS_TICKS = 6;
+
 function readCssVar(variableName: string, fallback: string): string {
   if (typeof window === "undefined") {
     return fallback;
@@ -188,6 +191,43 @@ function formatHourLabel(value: string): string {
   });
 }
 
+function getAdaptiveTickDecimals(min: number, max: number): number {
+  const span = Math.abs(max - min);
+  if (!Number.isFinite(span) || span <= 0) {
+    return 0;
+  }
+
+  const step = span / TARGET_Y_AXIS_TICKS;
+  if (!Number.isFinite(step) || step <= 0) {
+    return 0;
+  }
+
+  return Math.min(MAX_Y_AXIS_DECIMALS, Math.max(0, Math.ceil(-Math.log10(step))));
+}
+
+function normalizeTickValue(value: number): number {
+  const normalized = Number.parseFloat(value.toFixed(MAX_Y_AXIS_DECIMALS));
+  return Object.is(normalized, -0) ? 0 : normalized;
+}
+
+function formatAdaptiveYAxisTick(
+  tickValue: number | string,
+  min: number,
+  max: number,
+  suffix: string,
+): string {
+  const numericValue = typeof tickValue === "number" ? tickValue : Number(tickValue);
+  if (!Number.isFinite(numericValue)) {
+    return `${tickValue}${suffix}`;
+  }
+
+  const decimals = getAdaptiveTickDecimals(min, max);
+  const normalized = normalizeTickValue(numericValue);
+  const rounded = Number.parseFloat(normalized.toFixed(decimals));
+  const text = rounded.toFixed(decimals).replace(/\.?0+$/, "");
+  return `${text}${suffix}`;
+}
+
 function getStateMessage(state: ChartRenderState): string {
   switch (state) {
     case "loading":
@@ -309,18 +349,18 @@ export function UptimeChart24h({
           {
             label: streamAName,
             data: uptimeA,
-            backgroundColor: palette.streamABg,
+            backgroundColor: palette.streamA,
             borderColor: palette.streamA,
-            borderWidth: 2,
+            borderWidth: 0,
             borderRadius: 0,
             borderSkipped: false,
           },
           {
             label: streamBName,
             data: uptimeB,
-            backgroundColor: palette.streamBBg,
+            backgroundColor: palette.streamB,
             borderColor: palette.streamB,
-            borderWidth: 2,
+            borderWidth: 0,
             borderRadius: 0,
             borderSkipped: false,
           },
@@ -361,7 +401,8 @@ export function UptimeChart24h({
           y: {
             ticks: {
               color: palette.text,
-              callback: (v: number | string) => `${v}%`,
+              callback: (v: number | string) =>
+                formatAdaptiveYAxisTick(v, uptimeDomain.min, uptimeDomain.max, "%"),
               font: terminalFont,
             },
             grid: { color: palette.grid, drawTicks: false },
@@ -505,7 +546,8 @@ export function RateChart({
           y: {
             ticks: {
               color: palette.text,
-              callback: (v: number | string) => `${v}/s`,
+              callback: (v: number | string) =>
+                formatAdaptiveYAxisTick(v, rateDomain.min, rateDomain.max, "/s"),
               font: terminalFont,
             },
             grid: { color: palette.grid, drawTicks: false },

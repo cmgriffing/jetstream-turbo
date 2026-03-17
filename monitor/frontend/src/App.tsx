@@ -193,8 +193,6 @@ function App() {
                   streak={stats.current_streak_a}
                   uptimeAllTime={stats.uptime_a_all_time}
                   connected={stats.connected_a || false}
-                  liveLatencyMetric={stats.live_latency_metric}
-                  liveLatencyMs={stats.live_latency_a_ms}
                 />
                 <StreamCard
                   streamId="b"
@@ -205,8 +203,6 @@ function App() {
                   streak={stats.current_streak_b}
                   uptimeAllTime={stats.uptime_b_all_time}
                   connected={stats.connected_b || false}
-                  liveLatencyMetric={stats.live_latency_metric}
-                  liveLatencyMs={stats.live_latency_b_ms}
                 />
               </div>
             </div>
