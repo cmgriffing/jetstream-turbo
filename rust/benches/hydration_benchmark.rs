@@ -1,5 +1,6 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use jetstream_turbo_rs::hydration::TurboCache;
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use jetstream_turbo_rs::client::BlueskyClient;
+use jetstream_turbo_rs::hydration::{Hydrator, TurboCache};
 use jetstream_turbo_rs::models::bluesky::{BlueskyPost, BlueskyProfile};
 use jetstream_turbo_rs::models::enriched::{EnrichedRecord, HydratedMetadata, ProcessingMetrics};
 use jetstream_turbo_rs::models::jetstream::{CommitData, JetstreamMessage};
@@ -7,6 +8,8 @@ use jetstream_turbo_rs::storage::{SQLitePragmaConfig, SQLiteStore};
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn create_test_profile(i: usize) -> BlueskyProfile {
     BlueskyProfile {
@@ -60,6 +63,100 @@ fn create_test_message(i: usize) -> JetstreamMessage {
             cid: Some(format!("bafyrei{}", i)),
         }),
     }
+}
+
+fn create_hydrate_batch_message(i: usize) -> JetstreamMessage {
+    let author_did = format!("did:plc:author{}", i);
+    let parent_did = format!("did:plc:parent{}", i);
+    let root_did = format!("did:plc:root{}", i);
+    let quote_did = format!("did:plc:quote{}", i);
+    let mention_did = format!("did:plc:mention{}", i);
+
+    JetstreamMessage {
+        did: author_did.clone(),
+        time_us: Some(1640995200000000 + i as u64),
+        seq: Some(i as u64),
+        kind: "commit".to_string(),
+        commit: Some(CommitData {
+            rev: Some(format!("3hydrate{}", i)),
+            operation_type: "create".to_string(),
+            collection: Some("app.bsky.feed.post".to_string()),
+            rkey: Some(format!("hydrate{}", i)),
+            record: Some(json!({
+                "$type": "app.bsky.feed.post",
+                "text": format!("Hydrate benchmark message {}", i),
+                "createdAt": "2024-01-01T00:00:00.000Z",
+                "reply": {
+                    "parent": {
+                        "uri": format!("at://{}/app.bsky.feed.post/parent{}", parent_did, i),
+                        "cid": format!("bafyparent{}", i)
+                    },
+                    "root": {
+                        "uri": format!("at://{}/app.bsky.feed.post/root{}", root_did, i),
+                        "cid": format!("bafyroot{}", i)
+                    }
+                },
+                "embed": {
+                    "record": {
+                        "uri": format!("at://{}/app.bsky.feed.post/quote{}", quote_did, i),
+                        "cid": format!("bafyquote{}", i)
+                    }
+                },
+                "facets": [{
+                    "features": [{
+                        "$type": "app.bsky.richtext.facet#mention",
+                        "did": mention_did
+                    }]
+                }]
+            })),
+            cid: Some(format!("bafyhydrate{}", i)),
+        }),
+    }
+}
+
+fn create_mock_profile_fixture(i: usize) -> serde_json::Value {
+    json!({
+        "did": format!("did:plc:mock{}", i),
+        "handle": format!("mock{}.bsky.social", i),
+        "display_name": format!("Mock User {}", i),
+        "description": format!("Mock profile {}", i),
+        "avatar": format!("https://avatar.example.com/mock{}", i),
+        "banner": serde_json::Value::Null,
+        "followers_count": i as u64,
+        "follows_count": i as u64 / 2,
+        "posts_count": i as u64 * 2,
+        "indexed_at": "2024-01-01T00:00:00Z",
+        "created_at": "2024-01-01T00:00:00Z",
+        "labels": serde_json::Value::Null
+    })
+}
+
+fn create_mock_post_fixture(uri: &str, i: usize) -> serde_json::Value {
+    json!({
+        "uri": uri,
+        "cid": format!("bafymockpost{}", i),
+        "author": create_mock_profile_fixture(i),
+        "record": {
+            "text": format!("Mock referenced post {}", i),
+            "createdAt": "2024-01-01T00:00:00.000Z"
+        },
+        "embed": serde_json::Value::Null,
+        "reply": serde_json::Value::Null,
+        "labels": serde_json::Value::Null,
+        "like_count": 1,
+        "repost_count": 0,
+        "reply_count": 0
+    })
+}
+
+fn collect_reference_uris(messages: &[JetstreamMessage]) -> Vec<String> {
+    let mut uris = Vec::new();
+    for message in messages {
+        uris.extend(message.extract_post_uris());
+    }
+    uris.sort();
+    uris.dedup();
+    uris
 }
 
 fn benchmark_sqlite_pragmas() -> SQLitePragmaConfig {
@@ -362,6 +459,41 @@ fn bench_sqlite_operations(c: &mut Criterion) {
         });
     });
 
+    c.bench_function("sqlite_store_batch_direct", |b| {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        let store = rt.block_on(async {
+            SQLiteStore::new(&db_path, benchmark_sqlite_pragmas())
+                .await
+                .unwrap()
+        });
+
+        let records: Vec<EnrichedRecord> = (0..100)
+            .map(|i| {
+                let message = create_test_message(i);
+                EnrichedRecord {
+                    message,
+                    hydrated_metadata: HydratedMetadata::default(),
+                    processed_at: chrono::Utc::now(),
+                    metrics: ProcessingMetrics {
+                        hydration_time_ms: 10,
+                        api_calls_count: 2,
+                        cache_hit_rate: 0.5,
+                        cache_hits: 5,
+                        cache_misses: 5,
+                    },
+                }
+            })
+            .collect();
+
+        b.iter(|| {
+            rt.block_on(async {
+                let _ids = store.store_batch(&records).await.unwrap();
+            });
+        });
+    });
+
     let mut group = c.benchmark_group("sqlite_batch_sizes");
 
     for batch_size in [10, 50, 100, 500].iter() {
@@ -496,12 +628,103 @@ fn bench_batch_operations(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_hydrate_batch_mock(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let batch_sizes = [25usize, 100usize];
+    let max_batch_size = *batch_sizes.iter().max().unwrap();
+
+    let fixture_messages: Vec<JetstreamMessage> = (0..max_batch_size)
+        .map(create_hydrate_batch_message)
+        .collect();
+    let reference_uris = collect_reference_uris(&fixture_messages);
+
+    let mock_server = rt.block_on(async { MockServer::start().await });
+
+    let profile_count = max_batch_size * 8;
+    let profiles_body = json!({
+        "profiles": (0..profile_count)
+            .map(create_mock_profile_fixture)
+            .collect::<Vec<_>>()
+    });
+    let posts_body = json!({
+        "posts": reference_uris
+            .iter()
+            .enumerate()
+            .map(|(i, uri)| create_mock_post_fixture(uri, i))
+            .collect::<Vec<_>>()
+    });
+
+    rt.block_on(async {
+        Mock::given(method("GET"))
+            .and(path("/xrpc/app.bsky.actor.getProfiles"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(profiles_body))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/xrpc/app.bsky.feed.getPosts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(posts_body))
+            .mount(&mock_server)
+            .await;
+    });
+
+    let bluesky_client = Arc::new(
+        BlueskyClient::new_with_api_base_url(
+            vec!["mock-session".to_string()],
+            None,
+            512,
+            512,
+            0,
+            0,
+            format!("{}/xrpc", mock_server.uri()),
+        )
+        .unwrap(),
+    );
+
+    let mut group = c.benchmark_group("hydrate_batch_mock");
+
+    for batch_size in batch_sizes {
+        let messages: Vec<JetstreamMessage> =
+            fixture_messages.iter().take(batch_size).cloned().collect();
+        let client = Arc::clone(&bluesky_client);
+
+        group.bench_with_input(
+            BenchmarkId::new("hydrate_batch", batch_size),
+            &messages,
+            |b, messages| {
+                let client = Arc::clone(&client);
+                b.iter_batched(
+                    || {
+                        let batch_len = messages.len();
+                        let cache = TurboCache::new(batch_len * 8, batch_len * 8);
+                        (
+                            Hydrator::new(cache, Arc::clone(&client)),
+                            messages.clone(),
+                            batch_len,
+                        )
+                    },
+                    |(hydrator, batch, batch_len)| {
+                        rt.block_on(async {
+                            let hydrated = hydrator.hydrate_batch(batch).await.unwrap();
+                            assert_eq!(hydrated.len(), batch_len);
+                        });
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_cache_operations,
     bench_serialization,
     bench_sqlite_operations,
     bench_enriched_record_creation,
-    bench_batch_operations
+    bench_batch_operations,
+    bench_hydrate_batch_mock
 );
 criterion_main!(benches);
