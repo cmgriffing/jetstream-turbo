@@ -424,6 +424,10 @@ impl ProfileBatchCollector {
         }
     }
 
+    async fn lock_state(&self) -> tokio::sync::MutexGuard<'_, BatchQueueState> {
+        self.state.lock().await
+    }
+
     async fn lock_state_with_telemetry(&self) -> tokio::sync::MutexGuard<'_, BatchQueueState> {
         let wait_started = Instant::now();
         let guard = self.state.lock().await;
@@ -469,12 +473,12 @@ impl ProfileBatchCollector {
     }
 
     async fn set_last_flush_now(&self) {
-        let mut state = self.lock_state_with_telemetry().await;
+        let mut state = self.lock_state().await;
         state.last_flush = Instant::now();
     }
 
     async fn next_queue_action(&self, incoming: &mut Vec<String>) -> QueueAction {
-        let mut state = self.lock_state_with_telemetry().await;
+        let mut state = self.lock_state().await;
         if !incoming.is_empty() {
             state.pending.append(incoming);
         }
@@ -498,7 +502,7 @@ impl ProfileBatchCollector {
     }
 
     async fn take_pending(&self) -> Option<Vec<String>> {
-        let mut state = self.lock_state_with_telemetry().await;
+        let mut state = self.lock_state().await;
         if state.pending.is_empty() {
             None
         } else {
@@ -775,6 +779,10 @@ impl PostBatchCollector {
         }
     }
 
+    async fn lock_state(&self) -> tokio::sync::MutexGuard<'_, BatchQueueState> {
+        self.state.lock().await
+    }
+
     async fn lock_state_with_telemetry(&self) -> tokio::sync::MutexGuard<'_, BatchQueueState> {
         let wait_started = Instant::now();
         let guard = self.state.lock().await;
@@ -820,12 +828,12 @@ impl PostBatchCollector {
     }
 
     async fn set_last_flush_now(&self) {
-        let mut state = self.lock_state_with_telemetry().await;
+        let mut state = self.lock_state().await;
         state.last_flush = Instant::now();
     }
 
     async fn next_queue_action(&self, incoming: &mut Vec<String>) -> QueueAction {
-        let mut state = self.lock_state_with_telemetry().await;
+        let mut state = self.lock_state().await;
         if !incoming.is_empty() {
             state.pending.append(incoming);
         }
@@ -849,7 +857,7 @@ impl PostBatchCollector {
     }
 
     async fn take_pending(&self) -> Option<Vec<String>> {
-        let mut state = self.lock_state_with_telemetry().await;
+        let mut state = self.lock_state().await;
         if state.pending.is_empty() {
             None
         } else {
