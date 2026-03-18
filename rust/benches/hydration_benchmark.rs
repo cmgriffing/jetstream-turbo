@@ -161,9 +161,9 @@ fn collect_reference_uris(messages: &[JetstreamMessage]) -> Vec<String> {
 
 fn benchmark_sqlite_pragmas() -> SQLitePragmaConfig {
     SQLitePragmaConfig {
-        cache_size_kib: 32 * 1024,
-        mmap_size_mb: 64,
-        journal_size_limit_mb: 512,
+        cache_size_kib: 64 * 1024,
+        mmap_size_mb: 256,
+        journal_size_limit_mb: 5 * 1024,
     }
 }
 
