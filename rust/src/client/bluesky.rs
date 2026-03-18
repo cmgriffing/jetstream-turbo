@@ -10,10 +10,12 @@ use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, instrument, trace, warn};
 
 const REQUESTS_PER_SECOND_MS: u64 = 1000 / 10;
+const LOCK_WAIT_CONTENTION_THRESHOLD_US: u64 = 1_000;
+const CONTENTION_LOG_EVERY_ACQUISITIONS: u64 = 50;
 
 pub struct BlueskyClient {
     session_strings: Arc<RwLock<Vec<String>>>,
@@ -22,8 +24,8 @@ pub struct BlueskyClient {
     auth_client: Option<Arc<BlueskyAuthClient>>,
     #[allow(dead_code)]
     retry_delay_ms: u64,
-    profile_batch_collector: Arc<RwLock<ProfileBatchCollector>>,
-    post_batch_collector: Arc<RwLock<PostBatchCollector>>,
+    profile_batch_collector: Arc<ProfileBatchCollector>,
+    post_batch_collector: Arc<PostBatchCollector>,
 }
 
 #[derive(Clone)]
@@ -32,10 +34,20 @@ struct BatchConfig {
     wait_ms: u64,
 }
 
-struct ProfileBatchCollector {
-    config: BatchConfig,
+struct BatchQueueState {
     pending: Vec<String>,
     last_flush: Instant,
+}
+
+enum QueueAction {
+    Fetch(Vec<String>),
+    Wait,
+    Done,
+}
+
+struct ProfileBatchCollector {
+    config: BatchConfig,
+    state: Mutex<BatchQueueState>,
     http_client: Client,
     session_strings: Arc<RwLock<Vec<String>>>,
     rate_limiter: Arc<
@@ -53,12 +65,16 @@ struct ProfileBatchCollector {
     expires_at: Arc<RwLock<Option<String>>>,
     batches_total: AtomicU64,
     batches_partial: AtomicU64,
+    lock_acquisitions: AtomicU64,
+    lock_wait_total_us: AtomicU64,
+    lock_wait_max_us: AtomicU64,
+    lock_wait_contention_events: AtomicU64,
+    queue_depth_max: AtomicU64,
 }
 
 struct PostBatchCollector {
     config: BatchConfig,
-    pending: Vec<String>,
-    last_flush: Instant,
+    state: Mutex<BatchQueueState>,
     http_client: Client,
     session_strings: Arc<RwLock<Vec<String>>>,
     rate_limiter: Arc<
@@ -76,6 +92,11 @@ struct PostBatchCollector {
     expires_at: Arc<RwLock<Option<String>>>,
     batches_total: AtomicU64,
     batches_partial: AtomicU64,
+    lock_acquisitions: AtomicU64,
+    lock_wait_total_us: AtomicU64,
+    lock_wait_max_us: AtomicU64,
+    lock_wait_contention_events: AtomicU64,
+    queue_depth_max: AtomicU64,
 }
 
 async fn handle_rate_limit_response(
@@ -97,6 +118,16 @@ async fn handle_rate_limit_response(
 
     let backoff_ms = retry_delay.as_millis() as u64 * (2u64.pow(attempt.min(5)));
     Some(Duration::from_millis(backoff_ms))
+}
+
+fn update_atomic_max(target: &AtomicU64, candidate: u64) {
+    let mut current = target.load(Ordering::Relaxed);
+    while candidate > current {
+        match target.compare_exchange(current, candidate, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
 }
 
 impl BlueskyClient {
@@ -149,7 +180,7 @@ impl BlueskyClient {
         let max_retries = 3;
         let retry_delay = Duration::from_millis(200);
 
-        let profile_batch_collector = Arc::new(RwLock::new(ProfileBatchCollector::new(
+        let profile_batch_collector = Arc::new(ProfileBatchCollector::new(
             BatchConfig {
                 batch_size: profile_batch_size,
                 wait_ms: profile_batch_wait_ms,
@@ -163,9 +194,9 @@ impl BlueskyClient {
             auth_client.clone(),
             refresh_jwt.clone(),
             expires_at.clone(),
-        )));
+        ));
 
-        let post_batch_collector = Arc::new(RwLock::new(PostBatchCollector::new(
+        let post_batch_collector = Arc::new(PostBatchCollector::new(
             BatchConfig {
                 batch_size: post_batch_size,
                 wait_ms: post_batch_wait_ms,
@@ -179,7 +210,7 @@ impl BlueskyClient {
             auth_client.clone(),
             refresh_jwt.clone(),
             expires_at.clone(),
-        )));
+        ));
 
         Ok(Self {
             session_strings,
@@ -203,9 +234,11 @@ impl BlueskyClient {
             return Ok(vec![]);
         }
 
-        let mut collector = self.profile_batch_collector.write().await;
-        let profiles = collector.add_and_fetch(dids.to_vec()).await?;
-        collector.log_partial_percentage();
+        let profiles = self
+            .profile_batch_collector
+            .add_and_fetch(dids.to_vec())
+            .await?;
+        self.profile_batch_collector.log_partial_percentage();
 
         Ok(profiles)
     }
@@ -251,9 +284,8 @@ impl BlueskyClient {
             return Ok(vec![]);
         }
 
-        let mut collector = self.post_batch_collector.write().await;
-        let posts = collector.add_and_fetch(valid_uris).await?;
-        collector.log_partial_percentage();
+        let posts = self.post_batch_collector.add_and_fetch(valid_uris).await?;
+        self.post_batch_collector.log_partial_percentage();
 
         Ok(posts)
     }
@@ -369,8 +401,10 @@ impl ProfileBatchCollector {
     ) -> Self {
         Self {
             config,
-            pending: Vec::new(),
-            last_flush: Instant::now(),
+            state: Mutex::new(BatchQueueState {
+                pending: Vec::new(),
+                last_flush: Instant::now(),
+            }),
             http_client,
             session_strings,
             rate_limiter,
@@ -382,6 +416,93 @@ impl ProfileBatchCollector {
             expires_at,
             batches_total: AtomicU64::new(0),
             batches_partial: AtomicU64::new(0),
+            lock_acquisitions: AtomicU64::new(0),
+            lock_wait_total_us: AtomicU64::new(0),
+            lock_wait_max_us: AtomicU64::new(0),
+            lock_wait_contention_events: AtomicU64::new(0),
+            queue_depth_max: AtomicU64::new(0),
+        }
+    }
+
+    async fn lock_state_with_telemetry(&self) -> tokio::sync::MutexGuard<'_, BatchQueueState> {
+        let wait_started = Instant::now();
+        let guard = self.state.lock().await;
+        let wait_us = wait_started.elapsed().as_micros() as u64;
+
+        let acquisitions = self.lock_acquisitions.fetch_add(1, Ordering::Relaxed) + 1;
+        self.lock_wait_total_us
+            .fetch_add(wait_us, Ordering::Relaxed);
+        update_atomic_max(&self.lock_wait_max_us, wait_us);
+        if wait_us >= LOCK_WAIT_CONTENTION_THRESHOLD_US {
+            self.lock_wait_contention_events
+                .fetch_add(1, Ordering::Relaxed);
+        }
+
+        let queue_depth = guard.pending.len() as u64;
+        update_atomic_max(&self.queue_depth_max, queue_depth);
+
+        if acquisitions % CONTENTION_LOG_EVERY_ACQUISITIONS == 0 {
+            let total_wait = self.lock_wait_total_us.load(Ordering::Relaxed);
+            let max_wait = self.lock_wait_max_us.load(Ordering::Relaxed);
+            let contention_events = self.lock_wait_contention_events.load(Ordering::Relaxed);
+            let max_queue_depth = self.queue_depth_max.load(Ordering::Relaxed);
+            let avg_wait = total_wait as f64 / acquisitions as f64;
+            info!(
+                "Profile collector contention: avg_lock_wait_us={:.1} max_lock_wait_us={} contention_events={} queue_depth={} queue_depth_max={} acquisitions={}",
+                avg_wait, max_wait, contention_events, queue_depth, max_queue_depth, acquisitions
+            );
+        }
+
+        guard
+    }
+
+    fn log_batch_capacity(&self, batch_len: usize) {
+        self.batches_total.fetch_add(1, Ordering::Relaxed);
+        if batch_len < self.config.batch_size {
+            self.batches_partial.fetch_add(1, Ordering::Relaxed);
+        }
+        let pct = (batch_len as f64 / self.config.batch_size as f64) * 100.0;
+        info!(
+            "Profile batch capacity: {}/{} ({:.0}%)",
+            batch_len, self.config.batch_size, pct
+        );
+    }
+
+    async fn set_last_flush_now(&self) {
+        let mut state = self.lock_state_with_telemetry().await;
+        state.last_flush = Instant::now();
+    }
+
+    async fn next_queue_action(&self, incoming: &mut Vec<String>) -> QueueAction {
+        let mut state = self.lock_state_with_telemetry().await;
+        if !incoming.is_empty() {
+            state.pending.append(incoming);
+        }
+
+        if state.pending.len() >= self.config.batch_size {
+            let batch = state.pending.drain(..self.config.batch_size).collect();
+            return QueueAction::Fetch(batch);
+        }
+
+        if !state.pending.is_empty()
+            && state.last_flush.elapsed() >= Duration::from_millis(self.config.wait_ms)
+        {
+            return QueueAction::Fetch(std::mem::take(&mut state.pending));
+        }
+
+        if state.pending.is_empty() {
+            QueueAction::Done
+        } else {
+            QueueAction::Wait
+        }
+    }
+
+    async fn take_pending(&self) -> Option<Vec<String>> {
+        let mut state = self.lock_state_with_telemetry().await;
+        if state.pending.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut state.pending))
         }
     }
 
@@ -563,76 +684,35 @@ impl ProfileBatchCollector {
     }
 
     pub async fn add_and_fetch(
-        &mut self,
+        &self,
         dids: Vec<String>,
     ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
         let mut results = Vec::new();
-        let mut remaining: Vec<String> = dids.into_iter().collect();
+        let mut incoming = dids;
 
-        while !remaining.is_empty() {
-            self.pending.extend(remaining.drain(..));
-
-            while self.pending.len() >= self.config.batch_size {
-                let batch: Vec<String> = self.pending.drain(..self.config.batch_size).collect();
-                self.batches_total.fetch_add(1, Ordering::Relaxed);
-                let batch_len = batch.len();
-                if batch_len < self.config.batch_size {
-                    self.batches_partial.fetch_add(1, Ordering::Relaxed);
+        loop {
+            match self.next_queue_action(&mut incoming).await {
+                QueueAction::Fetch(batch) => {
+                    self.log_batch_capacity(batch.len());
+                    let batch_results = self.fetch_batch(&batch).await?;
+                    results.extend(batch_results);
+                    self.set_last_flush_now().await;
                 }
-                let pct = (batch_len as f64 / self.config.batch_size as f64) * 100.0;
-                info!(
-                    "Profile batch capacity: {}/{} ({:.0}%)",
-                    batch_len, self.config.batch_size, pct
-                );
-
-                let batch_results = self.fetch_batch(&batch).await?;
-                results.extend(batch_results);
-                self.last_flush = Instant::now();
-            }
-
-            if self.pending.len() > 0
-                && self.last_flush.elapsed() >= Duration::from_millis(self.config.wait_ms)
-            {
-                let batch: Vec<String> = std::mem::take(&mut self.pending);
-                self.batches_total.fetch_add(1, Ordering::Relaxed);
-                let batch_len = batch.len();
-                if batch_len < self.config.batch_size {
-                    self.batches_partial.fetch_add(1, Ordering::Relaxed);
+                QueueAction::Wait => {
+                    if incoming.is_empty() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                let pct = (batch_len as f64 / self.config.batch_size as f64) * 100.0;
-                info!(
-                    "Profile batch capacity: {}/{} ({:.0}%)",
-                    batch_len, self.config.batch_size, pct
-                );
-
-                let batch_results = self.fetch_batch(&batch).await?;
-                results.extend(batch_results);
-                self.last_flush = Instant::now();
+                QueueAction::Done => break,
             }
-
-            if self.pending.is_empty() {
-                break;
-            }
-
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
-        if !self.pending.is_empty() {
-            let batch: Vec<String> = std::mem::take(&mut self.pending);
-            self.batches_total.fetch_add(1, Ordering::Relaxed);
-            let batch_len = batch.len();
-            if batch_len < self.config.batch_size {
-                self.batches_partial.fetch_add(1, Ordering::Relaxed);
-            }
-            let pct = (batch_len as f64 / self.config.batch_size as f64) * 100.0;
-            info!(
-                "Profile batch capacity: {}/{} ({:.0}%)",
-                batch_len, self.config.batch_size, pct
-            );
-
+        if let Some(batch) = self.take_pending().await {
+            self.log_batch_capacity(batch.len());
             let batch_results = self.fetch_batch(&batch).await?;
             results.extend(batch_results);
-            self.last_flush = Instant::now();
+            self.set_last_flush_now().await;
         }
 
         Ok(results)
@@ -672,8 +752,10 @@ impl PostBatchCollector {
     ) -> Self {
         Self {
             config,
-            pending: Vec::new(),
-            last_flush: Instant::now(),
+            state: Mutex::new(BatchQueueState {
+                pending: Vec::new(),
+                last_flush: Instant::now(),
+            }),
             http_client,
             session_strings,
             rate_limiter,
@@ -685,6 +767,93 @@ impl PostBatchCollector {
             expires_at,
             batches_total: AtomicU64::new(0),
             batches_partial: AtomicU64::new(0),
+            lock_acquisitions: AtomicU64::new(0),
+            lock_wait_total_us: AtomicU64::new(0),
+            lock_wait_max_us: AtomicU64::new(0),
+            lock_wait_contention_events: AtomicU64::new(0),
+            queue_depth_max: AtomicU64::new(0),
+        }
+    }
+
+    async fn lock_state_with_telemetry(&self) -> tokio::sync::MutexGuard<'_, BatchQueueState> {
+        let wait_started = Instant::now();
+        let guard = self.state.lock().await;
+        let wait_us = wait_started.elapsed().as_micros() as u64;
+
+        let acquisitions = self.lock_acquisitions.fetch_add(1, Ordering::Relaxed) + 1;
+        self.lock_wait_total_us
+            .fetch_add(wait_us, Ordering::Relaxed);
+        update_atomic_max(&self.lock_wait_max_us, wait_us);
+        if wait_us >= LOCK_WAIT_CONTENTION_THRESHOLD_US {
+            self.lock_wait_contention_events
+                .fetch_add(1, Ordering::Relaxed);
+        }
+
+        let queue_depth = guard.pending.len() as u64;
+        update_atomic_max(&self.queue_depth_max, queue_depth);
+
+        if acquisitions % CONTENTION_LOG_EVERY_ACQUISITIONS == 0 {
+            let total_wait = self.lock_wait_total_us.load(Ordering::Relaxed);
+            let max_wait = self.lock_wait_max_us.load(Ordering::Relaxed);
+            let contention_events = self.lock_wait_contention_events.load(Ordering::Relaxed);
+            let max_queue_depth = self.queue_depth_max.load(Ordering::Relaxed);
+            let avg_wait = total_wait as f64 / acquisitions as f64;
+            info!(
+                "Post collector contention: avg_lock_wait_us={:.1} max_lock_wait_us={} contention_events={} queue_depth={} queue_depth_max={} acquisitions={}",
+                avg_wait, max_wait, contention_events, queue_depth, max_queue_depth, acquisitions
+            );
+        }
+
+        guard
+    }
+
+    fn log_batch_capacity(&self, batch_len: usize) {
+        self.batches_total.fetch_add(1, Ordering::Relaxed);
+        if batch_len < self.config.batch_size {
+            self.batches_partial.fetch_add(1, Ordering::Relaxed);
+        }
+        let pct = (batch_len as f64 / self.config.batch_size as f64) * 100.0;
+        info!(
+            "Post batch capacity: {}/{} ({:.0}%)",
+            batch_len, self.config.batch_size, pct
+        );
+    }
+
+    async fn set_last_flush_now(&self) {
+        let mut state = self.lock_state_with_telemetry().await;
+        state.last_flush = Instant::now();
+    }
+
+    async fn next_queue_action(&self, incoming: &mut Vec<String>) -> QueueAction {
+        let mut state = self.lock_state_with_telemetry().await;
+        if !incoming.is_empty() {
+            state.pending.append(incoming);
+        }
+
+        if state.pending.len() >= self.config.batch_size {
+            let batch = state.pending.drain(..self.config.batch_size).collect();
+            return QueueAction::Fetch(batch);
+        }
+
+        if !state.pending.is_empty()
+            && state.last_flush.elapsed() >= Duration::from_millis(self.config.wait_ms)
+        {
+            return QueueAction::Fetch(std::mem::take(&mut state.pending));
+        }
+
+        if state.pending.is_empty() {
+            QueueAction::Done
+        } else {
+            QueueAction::Wait
+        }
+    }
+
+    async fn take_pending(&self) -> Option<Vec<String>> {
+        let mut state = self.lock_state_with_telemetry().await;
+        if state.pending.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut state.pending))
         }
     }
 
@@ -897,77 +1066,33 @@ impl PostBatchCollector {
         }
     }
 
-    pub async fn add_and_fetch(
-        &mut self,
-        uris: Vec<String>,
-    ) -> TurboResult<Vec<Option<BlueskyPost>>> {
+    pub async fn add_and_fetch(&self, uris: Vec<String>) -> TurboResult<Vec<Option<BlueskyPost>>> {
         let mut results = Vec::new();
-        let mut remaining: Vec<String> = uris.into_iter().collect();
+        let mut incoming = uris;
 
-        while !remaining.is_empty() {
-            self.pending.extend(remaining.drain(..));
-
-            while self.pending.len() >= self.config.batch_size {
-                let batch: Vec<String> = self.pending.drain(..self.config.batch_size).collect();
-                self.batches_total.fetch_add(1, Ordering::Relaxed);
-                let batch_len = batch.len();
-                if batch_len < self.config.batch_size {
-                    self.batches_partial.fetch_add(1, Ordering::Relaxed);
+        loop {
+            match self.next_queue_action(&mut incoming).await {
+                QueueAction::Fetch(batch) => {
+                    self.log_batch_capacity(batch.len());
+                    let batch_results = self.fetch_batch(&batch).await?;
+                    results.extend(batch_results);
+                    self.set_last_flush_now().await;
                 }
-                let pct = (batch_len as f64 / self.config.batch_size as f64) * 100.0;
-                info!(
-                    "Post batch capacity: {}/{} ({:.0}%)",
-                    batch_len, self.config.batch_size, pct
-                );
-
-                let batch_results = self.fetch_batch(&batch).await?;
-                results.extend(batch_results);
-                self.last_flush = Instant::now();
-            }
-
-            if self.pending.len() > 0
-                && self.last_flush.elapsed() >= Duration::from_millis(self.config.wait_ms)
-            {
-                let batch: Vec<String> = std::mem::take(&mut self.pending);
-                self.batches_total.fetch_add(1, Ordering::Relaxed);
-                let batch_len = batch.len();
-                if batch_len < self.config.batch_size {
-                    self.batches_partial.fetch_add(1, Ordering::Relaxed);
+                QueueAction::Wait => {
+                    if incoming.is_empty() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                let pct = (batch_len as f64 / self.config.batch_size as f64) * 100.0;
-                info!(
-                    "Post batch capacity: {}/{} ({:.0}%)",
-                    batch_len, self.config.batch_size, pct
-                );
-
-                let batch_results = self.fetch_batch(&batch).await?;
-                results.extend(batch_results);
-                self.last_flush = Instant::now();
+                QueueAction::Done => break,
             }
-
-            if self.pending.is_empty() {
-                break;
-            }
-
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
-        if !self.pending.is_empty() {
-            let batch: Vec<String> = std::mem::take(&mut self.pending);
-            self.batches_total.fetch_add(1, Ordering::Relaxed);
-            let batch_len = batch.len();
-            if batch_len < self.config.batch_size {
-                self.batches_partial.fetch_add(1, Ordering::Relaxed);
-            }
-            let pct = (batch_len as f64 / self.config.batch_size as f64) * 100.0;
-            info!(
-                "Post batch capacity: {}/{} ({:.0}%)",
-                batch_len, self.config.batch_size, pct
-            );
-
+        if let Some(batch) = self.take_pending().await {
+            self.log_batch_capacity(batch.len());
             let batch_results = self.fetch_batch(&batch).await?;
             results.extend(batch_results);
-            self.last_flush = Instant::now();
+            self.set_last_flush_now().await;
         }
 
         Ok(results)
