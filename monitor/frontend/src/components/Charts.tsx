@@ -211,7 +211,7 @@ function normalizeTickValue(value: number): number {
   return Object.is(normalized, -0) ? 0 : normalized;
 }
 
-function formatAdaptiveYAxisTick(
+export function formatAdaptiveYAxisTick(
   tickValue: number | string,
   min: number,
   max: number,
@@ -225,7 +225,7 @@ function formatAdaptiveYAxisTick(
   const decimals = getAdaptiveTickDecimals(min, max);
   const normalized = normalizeTickValue(numericValue);
   const rounded = Number.parseFloat(normalized.toFixed(decimals));
-  const text = rounded.toFixed(decimals).replace(/\.?0+$/, "");
+  const text = rounded.toFixed(decimals).replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
   return `${text}${suffix}`;
 }
 
