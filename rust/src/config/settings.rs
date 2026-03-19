@@ -43,6 +43,10 @@ pub struct Settings {
     // HTTP Server Configuration
     pub http_port: u16,
 
+    // Channel Configuration
+    #[serde(default = "default_channel_capacity")]
+    pub channel_capacity: usize,
+
     // Performance Configuration
     pub batch_size: usize,
     pub profile_batch_size: usize,
@@ -87,14 +91,15 @@ impl Default for Settings {
             cleanup_check_interval_minutes: 5,
             vacuum_min_bytes_freed: 100 * 1024 * 1024,
             vacuum_min_percent_freed: 10.0,
-            cleanup_backoff_max_minutes: 60,
+            cleanup_backoff_max_minutes: 30,
             cleanup_backoff_reset_count: 3,
             cleanup_chunk_size: 1000,
             cleanup_chunk_delay_ms: 50,
-            sqlite_cache_size_kib: 48 * 1024,
-            sqlite_mmap_size_mb: 128,
-            sqlite_journal_size_limit_mb: 768,
+            sqlite_cache_size_kib: 16 * 1024,
+            sqlite_mmap_size_mb: 32,
+            sqlite_journal_size_limit_mb: 256,
             http_port: 8080,
+            channel_capacity: default_channel_capacity(),
             batch_size: 10,
             profile_batch_size: 25,
             post_batch_size: 25,
@@ -207,6 +212,10 @@ impl Settings {
             builder = builder.set_override("cache_size_posts", cache_size_posts)?;
         }
 
+        if let Ok(channel_capacity) = std::env::var("CHANNEL_CAPACITY") {
+            builder = builder.set_override("channel_capacity", channel_capacity)?;
+        }
+
         if let Ok(trim_maxlen) = std::env::var("TRIM_MAXLEN") {
             builder = builder.set_override("trim_maxlen", trim_maxlen)?;
         }
@@ -304,6 +313,10 @@ fn default_jetstream_hosts() -> Vec<String> {
     ]
 }
 
+fn default_channel_capacity() -> usize {
+    10_000
+}
+
 fn default_wanted_collections() -> String {
     "app.bsky.feed.post".to_string()
 }
@@ -333,9 +346,9 @@ mod tests {
         assert_eq!(settings.max_concurrent_requests, 6);
         assert_eq!(settings.cache_size_users, 12_000);
         assert_eq!(settings.cache_size_posts, 12_000);
-        assert_eq!(settings.sqlite_cache_size_kib, 48 * 1024);
-        assert_eq!(settings.sqlite_mmap_size_mb, 128);
-        assert_eq!(settings.sqlite_journal_size_limit_mb, 768);
+        assert_eq!(settings.sqlite_cache_size_kib, 16 * 1024);
+        assert_eq!(settings.sqlite_mmap_size_mb, 32);
+        assert_eq!(settings.sqlite_journal_size_limit_mb, 256);
     }
 
     #[test]

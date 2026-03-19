@@ -50,7 +50,8 @@ impl TurboCharger {
         );
 
         // Initialize Jetstream client
-        let jetstream_client = JetstreamClient::with_defaults(settings.jetstream_hosts.clone());
+        let jetstream_client = JetstreamClient::with_defaults(settings.jetstream_hosts.clone())
+            .with_channel_capacity(settings.channel_capacity);
 
         // Authenticate directly with Bluesky
         let auth_client = Arc::new(BlueskyAuthClient::new(

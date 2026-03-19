@@ -2,6 +2,7 @@ use crate::models::bluesky::{BlueskyPost, BlueskyProfile};
 use moka::sync::Cache as MokaCache;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{instrument, trace};
 
 #[derive(Clone)]
@@ -38,17 +39,23 @@ impl Clone for CacheMetrics {
 
 impl TurboCache {
     pub fn new(user_cache_size: usize, post_cache_size: usize) -> Self {
+        let metrics = Arc::new(CacheMetrics::default());
+
+        let user_metrics = Arc::clone(&metrics);
         let user_cache = MokaCache::builder()
             .max_capacity(user_cache_size as u64)
-            .eviction_listener(|_k, _v, cause| {
-                let _ = cause.was_evicted();
+            .time_to_live(Duration::from_secs(300))
+            .eviction_listener(move |_k, _v, _cause| {
+                user_metrics.cache_evictions.fetch_add(1, Ordering::Relaxed);
             })
             .build();
 
+        let post_metrics = Arc::clone(&metrics);
         let post_cache = MokaCache::builder()
             .max_capacity(post_cache_size as u64)
-            .eviction_listener(|_k, _v, cause| {
-                let _ = cause.was_evicted();
+            .time_to_live(Duration::from_secs(300))
+            .eviction_listener(move |_k, _v, _cause| {
+                post_metrics.cache_evictions.fetch_add(1, Ordering::Relaxed);
             })
             .build();
 
@@ -57,7 +64,7 @@ impl TurboCache {
             post_cache,
             user_capacity: user_cache_size,
             post_capacity: post_cache_size,
-            metrics: Arc::new(CacheMetrics::default()),
+            metrics,
         }
     }
 
@@ -167,8 +174,6 @@ impl TurboCache {
         self.post_cache.invalidate_all();
         trace!("Cleared all caches");
     }
-
-    pub async fn cleanup_concurrent(&self, _max_age: std::time::Duration) {}
 
     pub async fn get_hit_rates(&self) -> (f64, f64) {
         let user_hits = self.metrics.user_hits.load(Ordering::Relaxed);
