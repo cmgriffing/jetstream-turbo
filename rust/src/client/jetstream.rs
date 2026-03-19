@@ -3,15 +3,18 @@ use futures::{Stream, StreamExt};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, trace, warn};
+
+const DEFAULT_CHANNEL_CAPACITY: usize = 10_000;
 
 pub struct JetstreamClient {
     endpoints: Vec<String>,
     wanted_collections: String,
     max_reconnect_attempts: u32,
     reconnect_delay: Duration,
+    channel_capacity: usize,
 }
 
 impl JetstreamClient {
@@ -21,6 +24,7 @@ impl JetstreamClient {
             wanted_collections,
             max_reconnect_attempts: 10,
             reconnect_delay: Duration::from_secs(5),
+            channel_capacity: DEFAULT_CHANNEL_CAPACITY,
         }
     }
 
@@ -28,10 +32,15 @@ impl JetstreamClient {
         Self::new(endpoints, "app.bsky.feed.post".to_string())
     }
 
+    pub fn with_channel_capacity(mut self, capacity: usize) -> Self {
+        self.channel_capacity = capacity;
+        self
+    }
+
     pub async fn stream_messages(
         &self,
     ) -> TurboResult<impl Stream<Item = TurboResult<JetstreamMessage>>> {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(self.channel_capacity);
 
         // Start the connection loop
         let endpoints = self.endpoints.clone();
@@ -64,9 +73,15 @@ impl JetstreamClient {
                                     trace!("Received message: {}", text);
                                     match parse_message(&text) {
                                         Ok(message) => {
-                                            if tx.send(Ok(message)).is_err() {
-                                                info!("Receiver dropped, stopping stream");
-                                                return;
+                                            match tx.try_send(Ok(message)) {
+                                                Ok(()) => {}
+                                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                                    warn!("Channel full, dropping message");
+                                                }
+                                                Err(mpsc::error::TrySendError::Closed(_)) => {
+                                                    info!("Receiver dropped, stopping stream");
+                                                    return;
+                                                }
                                             }
                                         }
                                         Err(e) => {
@@ -109,13 +124,12 @@ impl JetstreamClient {
                         reconnect_attempts += 1;
                         if reconnect_attempts >= max_reconnect_attempts {
                             error!("Max reconnection attempts reached");
-                            if tx
-                                .send(Err(TurboError::WebSocketConnection(format!(
-                                    "Failed to connect after {max_reconnect_attempts} attempts"
-                                ))))
-                                .is_err()
-                            {
-                                return;
+                            let err = Err(TurboError::WebSocketConnection(format!(
+                                "Failed to connect after {max_reconnect_attempts} attempts"
+                            )));
+                            match tx.try_send(err) {
+                                Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
+                                Err(mpsc::error::TrySendError::Closed(_)) => return,
                             }
                             break;
                         }
@@ -136,7 +150,7 @@ impl JetstreamClient {
             }
         });
 
-        Ok(UnboundedReceiverStream::new(rx))
+        Ok(ReceiverStream::new(rx))
     }
 
     pub fn parse_message(&self, text: &str) -> TurboResult<JetstreamMessage> {
