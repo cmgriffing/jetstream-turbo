@@ -3,7 +3,7 @@ members = ["."]
 
 [package]
 name = "jetstream-turbo-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Chris Griffing <cmgriffing@gmail.com>"]
 description = "Turbocharged Jetstream messages - hydrates referenced objects and stores to SQLite"
