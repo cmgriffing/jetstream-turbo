@@ -78,7 +78,7 @@ pub struct Mention {
     pub end_byte: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProcessingMetrics {
     /// Time taken to hydrate this record
     pub hydration_time_ms: u64,
@@ -95,23 +95,9 @@ impl EnrichedRecord {
     pub fn new(message: JetstreamMessage) -> Self {
         Self {
             message,
-            hydrated_metadata: HydratedMetadata {
-                author_profile: None,
-                mentioned_profiles: Vec::new(),
-                referenced_posts: Vec::new(),
-                hashtags: Vec::new(),
-                urls: Vec::new(),
-                mentions: Vec::new(),
-                detected_language: None,
-            },
+            hydrated_metadata: HydratedMetadata::default(),
             processed_at: Utc::now(),
-            metrics: ProcessingMetrics {
-                hydration_time_ms: 0,
-                api_calls_count: 0,
-                cache_hit_rate: 0.0,
-                cache_hits: 0,
-                cache_misses: 0,
-            },
+            metrics: ProcessingMetrics::default(),
         }
     }
 
