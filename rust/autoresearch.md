@@ -37,7 +37,21 @@ These are the key files that contain hot-path code measured by the benchmark:
 5. **Changes should be production-appropriate** — avoid tuning that only helps the synthetic benchmark but would degrade real-world I/O latency. For example, removing concurrency entirely might speed up mocks but hurt real network calls. Prefer tunable knobs or balanced improvements.
 
 ## What's Been Tried
-(Will be updated as experiments progress)
+
+### Baseline (commit 382767c)
+- Measured `full_pipeline_batch_25` time: **98,024 ns**.
+- Fixed pre-existing test failures: `test_log_error_macro` by making `init_test_tracing` use `try_init()`; adjusted checks to run without `--release` and with single thread.
+
+### Experiment 1 (commit <next>)
+- **Change**: Avoid cloning `JetstreamMessage` in `Hydrator::hydrate_message`. Instead, extract needed fields (DID, at_uri, mentioned_dids) as owned data before consuming the message.
+- **Result**: time **90,234 ns** → **~7.9% improvement**.
+- **Impact**: No functional change. Reduces allocation and copy overhead.
+- **Status**: kept.
+
+### Ideas Under Consideration
+- Remove double-cloning of `enriched_records` in `process_batch_internal` by using references with `tokio::join!`.
+- Pre-size collections in `hydrate_batch` (HashSets, Vectors) to avoid rehashing and reallocation.
+- Explore bounded concurrency in `hydrate_messages` (e.g., `buffer_unordered(N)`) to reduce task-switch overhead for batch size 25.
 
 ## Initial Ideas & Hypotheses
 - **Remove redundant clones**:

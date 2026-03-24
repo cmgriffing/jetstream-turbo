@@ -41,20 +41,27 @@ where
     )]
     pub async fn hydrate_message(&self, message: JetstreamMessage) -> TurboResult<EnrichedRecord> {
         let start_time = Instant::now();
-        let mut enriched = EnrichedRecord::new(message.clone());
 
-        let author_did = message.extract_did();
-        let at_uri = message.extract_at_uri().map(|s| s.to_string());
+        // Extract needed fields as owned data before consuming the message
+        let author_did = message.extract_did().to_string();
+        let at_uri = message.extract_at_uri();
+        let mentioned_dids = message
+            .extract_mentioned_dids()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
 
         tracing::Span::current().record("did", &author_did);
         if let Some(ref uri) = at_uri {
             tracing::Span::current().record("at_uri", uri);
         }
 
-        let mentioned_dids = message.extract_mentioned_dids();
+        // Consume the message without cloning
+        let mut enriched = EnrichedRecord::new(message);
 
-        if let Some(_at_uri) = message.extract_at_uri() {
-            let mut author_profile = self.cache.get_user_profile(author_did).await;
+        // Hydrate author profile if this message has an at-uri (i.e., is a post)
+        if at_uri.is_some() {
+            let mut author_profile = self.cache.get_user_profile(author_did.as_str()).await;
 
             let hit = author_profile.is_some();
             tracing::Span::current().record("cache_hit", hit);
