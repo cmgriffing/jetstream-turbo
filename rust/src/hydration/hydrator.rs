@@ -3,7 +3,7 @@ use crate::hydration::TurboCache;
 use crate::models::{enriched::EnrichedRecord, jetstream::JetstreamMessage, TurboResult};
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{info, instrument, trace};
+use tracing::{info, trace};
 
 pub struct Hydrator<P, Po> {
     cache: TurboCache,
@@ -34,11 +34,6 @@ where
         }
     }
 
-    #[instrument(
-        name = "hydrate_message",
-        skip(self, message),
-        fields(did, at_uri, cache_hit)
-    )]
     pub async fn hydrate_message(&self, message: JetstreamMessage) -> TurboResult<EnrichedRecord> {
         let start_time = Instant::now();
 
@@ -98,19 +93,7 @@ where
         Ok(enriched)
     }
 
-    #[instrument(
-        name = "hydrate_batch",
-        skip(self, messages),
-        fields(
-            message_count,
-            unique_dids,
-            unique_uris,
-            cache_check_time_ms,
-            api_fetch_time_ms,
-            hydrate_time_ms,
-            total_time_ms
-        )
-    )]
+
     pub async fn hydrate_batch(
         &self,
         messages: Vec<JetstreamMessage>,

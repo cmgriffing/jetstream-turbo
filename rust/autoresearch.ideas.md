@@ -2,12 +2,12 @@
 
 Complex optimizations that are promising but not yet pursued. Revisit when stuck or after simpler wins are exhausted.
 
-- Switch `Hydrator::hydrate_messages` to use a bounded concurrency pattern (e.g., `stream::buffer_unordered(N)`) to reduce task-switch overhead while still parallelizing.
-- Tune `TurboCache` TTL from 300s to something shorter if data is short-lived, or longer if reuse across batches is possible in production.
-- Investigate using `crossbeam` or `moka` with different policies (e.g., `squeue_stats`) for potentially lower overhead under high contention.
-- Profile allocation patterns; consider using `Bytes` or `Arc<[u8]>` for binary data if messages are large.
-- Explore using `serde_json::value::RawValue` for zero-copy JSON deserialization of message records.
-- Batch SQLite operations with `transaction()` even for individual batch stores if not already done; also prepare statements reuse.
-- Consider removing `FuturesUnordered` entirely for small batches; a simple `for` loop with `.await` might be faster due to less state machine overhead and better CPU cache locality.
-- Pre-allocate vectors with exact capacity in `hydrate_batch` to eliminate reallocations: `HashSet::with_capacity(messages.len() * avg_dids_per_msg)`, etc.
-- Investigate whether `Arc<EnrichedRecord>` would reduce cloning when broadcasting multiple times.
+- ✅ **Already tried**: Removing `FuturesUnordered` (sequential loop) — big win, keep.
+- ❌ **Already tried**: Pre-sizing HashSet (over-allocated) — regression, discard.
+- **Bounded concurrency**: If we need to retain some parallelism for I/O-bound scenarios but want to limit overhead, switch to `stream::buffer_unordered(N)` with a small N (e.g., 4).
+- **TurboCache TTL tuning**: Current 300s may be arbitrary. Shorter TTL could free memory faster; longer TTL could improve hit rates if data reused across batches.
+- **Moka cache policies**: Explore `squeue_stats` or other eviction policies for lower contention/higher throughput.
+- **Zero-copy deserialization**: Use `serde_json::value::RawValue` to avoid allocating JSON strings for message records.
+- **SQLite optimizations**: Batch operations in transactions, reuse prepared statements, tune WAL checkpointing. (Not directly measurable in mocks, but could improve production.)
+- **Profile allocation patterns**: Use `dhat` or `tracing` to see where heap allocations happen; maybe replace `String` with `Arc<str>` or `Bytes` for certain fields.
+- **Arc<EnrichedRecord> for broadcast**: Currently broadcast moves each record; cloning an Arc might be cheaper if multiple consumers need the same record. But in pipeline only one consumer (broadcast channel) exists, so maybe not needed.
