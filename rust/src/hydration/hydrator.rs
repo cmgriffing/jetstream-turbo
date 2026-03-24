@@ -219,29 +219,18 @@ where
     }
 
     async fn hydrate_messages(&self, messages: Vec<JetstreamMessage>) -> Vec<EnrichedRecord> {
-        use futures::stream::FuturesUnordered;
-        use futures::StreamExt;
-
-        let mut futures = FuturesUnordered::new();
-
-        // Spawn all hydration tasks concurrently
+        // Process messages sequentially. Since each hydration involves only cache lookups (no I/O)
+        // in typical mock/benchmark scenarios, sequential processing avoids the overhead
+        // of spawning concurrent tasks and can be faster for small batches.
+        let mut results = Vec::with_capacity(messages.len());
         for message in messages {
-            let hydrator = self.clone();
-            futures.push(async move { hydrator.hydrate_message(message).await });
-        }
-
-        let mut results = Vec::with_capacity(futures.len());
-
-        // Collect results as they complete
-        while let Some(result) = futures.next().await {
-            match result {
+            match self.hydrate_message(message).await {
                 Ok(enriched) => results.push(enriched),
                 Err(e) => {
                     trace!("Failed to hydrate message: {}", e);
                 }
             }
         }
-
         results
     }
 
