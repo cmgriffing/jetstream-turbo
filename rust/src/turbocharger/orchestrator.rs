@@ -1,4 +1,4 @@
-use crate::client::{BlueskyAuthClient, BlueskyClient, JetstreamClient};
+use crate::client::{BlueskyAuthClient, BlueskyClient, JetstreamClient, MessageSource, PostFetcher, ProfileFetcher};
 use crate::config::Settings;
 use crate::hydration::{Hydrator, TurboCache};
 use crate::models::enriched::EnrichedRecord;
@@ -6,7 +6,7 @@ use crate::models::{
     errors::{TurboError, TurboResult},
     jetstream::JetstreamMessage,
 };
-use crate::storage::{RedisStore, SQLitePragmaConfig, SQLiteStore};
+use crate::storage::{EventPublisher, RecordStore, RedisStore, SQLitePragmaConfig, SQLiteStore};
 use crate::telemetry::ErrorReporter;
 use futures::StreamExt;
 use serde::Serialize;
@@ -23,12 +23,14 @@ const BATCH_SIZE: usize = 25;
 const MAX_WAIT_TIME_MS: u64 = 200;
 const MEMORY_PEAK_WINDOW_SECS: u64 = 24 * 60 * 60;
 
-pub struct TurboCharger {
+pub struct TurboCharger<M, P, Po, S, E> {
     settings: Settings,
-    jetstream_client: JetstreamClient,
+    message_source: M,
     bluesky_client: Arc<BlueskyClient>,
     auth_client: Arc<BlueskyAuthClient>,
-    hydrator: Hydrator,
+    hydrator: Hydrator<P, Po>,
+    record_store: Arc<S>,
+    event_publisher: Arc<E>,
     sqlite_store: Arc<SQLiteStore>,
     redis_store: Arc<RedisStore>,
     semaphore: Arc<Semaphore>,
@@ -37,7 +39,7 @@ pub struct TurboCharger {
     memory_peak_window: Mutex<MemoryPeakWindow>,
 }
 
-impl TurboCharger {
+impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, RedisStore> {
     pub async fn new(
         settings: Settings,
         modulo: u32,
@@ -84,7 +86,7 @@ impl TurboCharger {
         let cache = TurboCache::new(settings.cache_size_users, settings.cache_size_posts);
 
         // Initialize hydrator
-        let hydrator = Hydrator::new(cache, bluesky_client.clone());
+        let hydrator = Hydrator::new(cache, bluesky_client.clone(), bluesky_client.clone());
 
         // Initialize storage
         let db_path = format!("{}/jetstream.db", settings.db_dir);
@@ -121,10 +123,12 @@ impl TurboCharger {
 
         Ok(Self {
             settings,
-            jetstream_client,
+            message_source: jetstream_client,
             bluesky_client,
             auth_client,
             hydrator,
+            record_store: sqlite_store.clone(),
+            event_publisher: redis_store.clone(),
             sqlite_store,
             redis_store,
             semaphore,
@@ -133,11 +137,20 @@ impl TurboCharger {
             memory_peak_window: Mutex::new(MemoryPeakWindow::new(MEMORY_PEAK_WINDOW_SECS)),
         })
     }
+}
 
+impl<M, P, Po, S, E> TurboCharger<M, P, Po, S, E>
+where
+    M: MessageSource + Send + Sync + 'static,
+    P: ProfileFetcher + Send + Sync + 'static,
+    Po: PostFetcher + Send + Sync + 'static,
+    S: RecordStore + Send + Sync + 'static,
+    E: EventPublisher + Send + Sync + 'static,
+{
     pub async fn run(&self) -> TurboResult<()> {
         info!("Starting TurboCharger main loop");
 
-        let message_stream = self.jetstream_client.stream_messages().await?;
+        let message_stream = self.message_source.stream_messages().await?;
 
         let mut last_stats = std::time::Instant::now();
         let mut buffer: Vec<JetstreamMessage> = Vec::with_capacity(BATCH_SIZE);
@@ -222,8 +235,8 @@ impl TurboCharger {
         batch_tasks: &mut JoinSet<TurboResult<usize>>,
     ) -> TurboResult<()> {
         let hydrator = self.hydrator.clone();
-        let sqlite_store = Arc::clone(&self.sqlite_store);
-        let redis_store = Arc::clone(&self.redis_store);
+        let record_store = Arc::clone(&self.record_store);
+        let event_publisher = Arc::clone(&self.event_publisher);
         let broadcast_sender = self.broadcast_sender.clone();
         let permit = self.semaphore.clone().acquire_owned().await.map_err(|e| {
             TurboError::Internal(format!("Batch semaphore closed unexpectedly: {e}"))
@@ -233,8 +246,8 @@ impl TurboCharger {
             let _permit = permit;
             Self::process_batch_internal(
                 hydrator,
-                sqlite_store,
-                redis_store,
+                record_store,
+                event_publisher,
                 broadcast_sender,
                 batch,
             )
@@ -244,7 +257,7 @@ impl TurboCharger {
         Ok(())
     }
 
-    fn resolve_batch_task_result(
+    pub(crate) fn resolve_batch_task_result(
         task_result: Result<TurboResult<usize>, tokio::task::JoinError>,
     ) -> TurboResult<usize> {
         match task_result {
@@ -290,8 +303,8 @@ impl TurboCharger {
         })?;
         let count = Self::process_batch_internal(
             self.hydrator.clone(),
-            Arc::clone(&self.sqlite_store),
-            Arc::clone(&self.redis_store),
+            Arc::clone(&self.record_store),
+            Arc::clone(&self.event_publisher),
             self.broadcast_sender.clone(),
             batch,
         )
@@ -301,9 +314,9 @@ impl TurboCharger {
     }
 
     async fn process_batch_internal(
-        hydrator: Hydrator,
-        sqlite_store: Arc<SQLiteStore>,
-        redis_store: Arc<RedisStore>,
+        hydrator: Hydrator<P, Po>,
+        record_store: Arc<S>,
+        event_publisher: Arc<E>,
         broadcast_sender: broadcast::Sender<EnrichedRecord>,
         batch: Vec<JetstreamMessage>,
     ) -> TurboResult<usize> {
@@ -314,20 +327,20 @@ impl TurboCharger {
             return Ok(0);
         }
 
-        // Parallelize SQLite batch insert and Redis operations
-        let sqlite_records = enriched_records.clone();
-        let redis_records = enriched_records.clone();
+        // Parallelize record store and event publisher operations
+        let store_records = enriched_records.clone();
+        let publish_records = enriched_records.clone();
 
-        let sqlite_future = async { sqlite_store.store_batch(&sqlite_records).await };
+        let store_future = async { record_store.store_batch(&store_records).await };
 
-        let redis_future = async { redis_store.publish_batch(&redis_records).await };
+        let publish_future = async { event_publisher.publish_batch(&publish_records).await };
 
-        // Run SQLite and Redis operations concurrently
-        let (sqlite_result, redis_result) = tokio::join!(sqlite_future, redis_future);
+        // Run store and publish operations concurrently
+        let (store_result, publish_result) = tokio::join!(store_future, publish_future);
 
         // Check results
-        let _sqlite_ids = sqlite_result?;
-        let _redis_ids = redis_result?;
+        let _store_ids = store_result?;
+        let _publish_ids = publish_result?;
 
         // Broadcast records (fire and forget)
         for enriched in enriched_records {
@@ -343,6 +356,42 @@ impl TurboCharger {
         true
     }
 
+    pub fn subscribe(&self) -> broadcast::Receiver<EnrichedRecord> {
+        self.broadcast_sender.subscribe()
+    }
+
+    fn observe_memory_sample(
+        &self,
+        process_memory: &ProcessMemoryDiagnostics,
+    ) -> MemoryPeakDiagnostics {
+        let now_unix_seconds = unix_timestamp_seconds();
+        let mut peak_window = self
+            .memory_peak_window
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if let (Some(rss_bytes), Some(virtual_memory_bytes)) = (
+            process_memory.rss_bytes,
+            process_memory.virtual_memory_bytes,
+        ) {
+            peak_window.record(MemorySample {
+                captured_at_unix_seconds: now_unix_seconds,
+                rss_bytes,
+                virtual_memory_bytes,
+            });
+        }
+
+        peak_window.snapshot(now_unix_seconds)
+    }
+}
+
+// Production-specific methods that require concrete SQLiteStore and RedisStore
+impl<M, P, Po> TurboCharger<M, P, Po, SQLiteStore, RedisStore>
+where
+    M: MessageSource + Send + Sync + 'static,
+    P: ProfileFetcher + Send + Sync + 'static,
+    Po: PostFetcher + Send + Sync + 'static,
+{
     pub async fn refresh_sessions(&self) -> TurboResult<()> {
         info!("Refreshing Bluesky session");
 
@@ -531,34 +580,6 @@ impl TurboCharger {
             sqlite_state,
             not_redis_state,
         }
-    }
-
-    fn observe_memory_sample(
-        &self,
-        process_memory: &ProcessMemoryDiagnostics,
-    ) -> MemoryPeakDiagnostics {
-        let now_unix_seconds = unix_timestamp_seconds();
-        let mut peak_window = self
-            .memory_peak_window
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        if let (Some(rss_bytes), Some(virtual_memory_bytes)) = (
-            process_memory.rss_bytes,
-            process_memory.virtual_memory_bytes,
-        ) {
-            peak_window.record(MemorySample {
-                captured_at_unix_seconds: now_unix_seconds,
-                rss_bytes,
-                virtual_memory_bytes,
-            });
-        }
-
-        peak_window.snapshot(now_unix_seconds)
-    }
-
-    pub fn subscribe(&self) -> broadcast::Receiver<EnrichedRecord> {
-        self.broadcast_sender.subscribe()
     }
 
     pub async fn check_and_cleanup_db(
@@ -753,6 +774,10 @@ pub struct NotRedisStateDiagnostics {
     pub configured_max_length: Option<usize>,
     pub collection_error: Option<String>,
 }
+
+/// Concrete type alias for the production TurboCharger
+pub type ProductionTurboCharger =
+    TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, RedisStore>;
 
 fn derive_health(redis_connected: bool, sqlite_available: bool, session_count: usize) -> bool {
     redis_connected && sqlite_available && session_count > 0
@@ -1034,9 +1059,9 @@ VmRSS:\t  1024 kB\n";
 
     #[test]
     fn resolve_batch_task_result_propagates_worker_error() {
-        let result = TurboCharger::resolve_batch_task_result(Ok(Err(TurboError::Internal(
-            "batch failed".to_string(),
-        ))));
+        let result = ProductionTurboCharger::resolve_batch_task_result(Ok(Err(
+            TurboError::Internal("batch failed".to_string()),
+        )));
         assert!(matches!(result, Err(TurboError::Internal(msg)) if msg == "batch failed"));
     }
 
@@ -1050,7 +1075,7 @@ VmRSS:\t  1024 kB\n";
         .await
         .expect_err("task should panic");
 
-        let result = TurboCharger::resolve_batch_task_result(Err(join_error));
+        let result = ProductionTurboCharger::resolve_batch_task_result(Err(join_error));
         assert!(matches!(result, Err(TurboError::TaskJoin(_))));
     }
 }

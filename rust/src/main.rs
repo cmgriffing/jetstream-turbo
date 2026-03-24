@@ -3,7 +3,7 @@ use clap::Parser;
 use jetstream_turbo_rs::config::Settings;
 use jetstream_turbo_rs::server::create_server;
 use jetstream_turbo_rs::telemetry::ErrorReporter;
-use jetstream_turbo_rs::turbocharger::TurboCharger;
+use jetstream_turbo_rs::turbocharger::ProductionTurboCharger as TurboCharger;
 use std::any::Any;
 use std::collections::HashMap;
 use std::env;

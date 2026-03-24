@@ -1,11 +1,20 @@
 use crate::models::{errors::TurboError, jetstream::JetstreamMessage, TurboResult};
 use futures::{Stream, StreamExt};
+use std::pin::Pin;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, trace, warn};
+
+pub trait MessageSource {
+    fn stream_messages(
+        &self,
+    ) -> impl std::future::Future<
+        Output = TurboResult<Pin<Box<dyn Stream<Item = TurboResult<JetstreamMessage>> + Send>>>,
+    > + Send;
+}
 
 const DEFAULT_CHANNEL_CAPACITY: usize = 10_000;
 
@@ -37,9 +46,15 @@ impl JetstreamClient {
         self
     }
 
-    pub async fn stream_messages(
+    pub fn parse_message(&self, text: &str) -> TurboResult<JetstreamMessage> {
+        parse_message(text)
+    }
+}
+
+impl MessageSource for JetstreamClient {
+    async fn stream_messages(
         &self,
-    ) -> TurboResult<impl Stream<Item = TurboResult<JetstreamMessage>>> {
+    ) -> TurboResult<Pin<Box<dyn Stream<Item = TurboResult<JetstreamMessage>> + Send>>> {
         let (tx, rx) = mpsc::channel(self.channel_capacity);
 
         // Start the connection loop
@@ -150,11 +165,7 @@ impl JetstreamClient {
             }
         });
 
-        Ok(ReceiverStream::new(rx))
-    }
-
-    pub fn parse_message(&self, text: &str) -> TurboResult<JetstreamMessage> {
-        parse_message(text)
+        Ok(Box::pin(ReceiverStream::new(rx)))
     }
 }
 

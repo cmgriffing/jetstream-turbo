@@ -35,6 +35,13 @@ pub struct SQLitePragmaConfig {
     pub journal_size_limit_mb: u64,
 }
 
+pub trait RecordStore {
+    fn store_batch(
+        &self,
+        records: &[EnrichedRecord],
+    ) -> impl std::future::Future<Output = TurboResult<Vec<i64>>> + Send;
+}
+
 pub struct SQLiteStore {
     pool: SqlitePool,
     db_path: String,
@@ -201,82 +208,6 @@ impl SQLiteStore {
         tracing::Span::current().record("duration_ms", duration);
         trace!("Stored record with ID: {}", id);
         Ok(id)
-    }
-
-    #[instrument(
-        name = "sqlite_store_batch",
-        skip(self, records),
-        fields(count, duration_ms)
-    )]
-    pub async fn store_batch(&self, records: &[EnrichedRecord]) -> TurboResult<Vec<i64>> {
-        let start = Instant::now();
-
-        if records.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let count = records.len();
-        tracing::Span::current().record("count", count);
-
-        let now = Utc::now();
-        let now_str = now.to_rfc3339();
-
-        const MAX_PARAMS: usize = 999;
-        const COLUMNS: usize = 12;
-        const MAX_ROWS_PER_INSERT: usize = MAX_PARAMS / COLUMNS;
-
-        static SINGLE_ROW_PLACEHOLDER: &str = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-
-        let mut all_ids = Vec::with_capacity(count);
-
-        for chunk in records.chunks(MAX_ROWS_PER_INSERT) {
-            let mut tx = self.pool.begin().await?;
-
-            let placeholders: String = std::iter::repeat(SINGLE_ROW_PLACEHOLDER)
-                .take(chunk.len())
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            let insert_sql = format!(
-                r#"INSERT INTO records (
-                    at_uri, did, time_us, message, message_metadata,
-                    created_at, hydrated_at, hydration_time_ms,
-                    api_calls_count, cache_hit_rate, cache_hits, cache_misses
-                ) VALUES {}"#,
-                placeholders
-            );
-
-            let mut query = sqlx::query(&insert_sql);
-
-            for record in chunk {
-                query = query
-                    .bind(record.get_at_uri())
-                    .bind(record.get_did())
-                    .bind(record.message.time_us.map(|t| t as i64))
-                    .bind(simd_json_to_string(&record.message).unwrap())
-                    .bind(simd_json_to_string(&record.hydrated_metadata).unwrap())
-                    .bind(record.processed_at.to_rfc3339())
-                    .bind(&now_str)
-                    .bind(record.metrics.hydration_time_ms as i64)
-                    .bind(record.metrics.api_calls_count as i64)
-                    .bind(record.metrics.cache_hit_rate)
-                    .bind(record.metrics.cache_hits as i64)
-                    .bind(record.metrics.cache_misses as i64);
-            }
-
-            let result = query.execute(&mut *tx).await?;
-            tx.commit().await?;
-
-            let base_id = result.last_insert_rowid();
-            for i in 0..chunk.len() {
-                all_ids.push(base_id - (chunk.len() - 1 - i) as i64);
-            }
-        }
-
-        let duration = start.elapsed().as_millis() as u64;
-        tracing::Span::current().record("duration_ms", duration);
-        trace!("Stored batch of {} records", count);
-        Ok(all_ids)
     }
 
     pub async fn get_record_by_uri(&self, at_uri: &str) -> TurboResult<Option<EnrichedRecord>> {
@@ -535,6 +466,84 @@ impl SQLiteStore {
         self.pool.close().await;
         info!("SQLite connection pool closed");
         Ok(())
+    }
+}
+
+impl RecordStore for SQLiteStore {
+    #[instrument(
+        name = "sqlite_store_batch",
+        skip(self, records),
+        fields(count, duration_ms)
+    )]
+    async fn store_batch(&self, records: &[EnrichedRecord]) -> TurboResult<Vec<i64>> {
+        let start = Instant::now();
+
+        if records.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let count = records.len();
+        tracing::Span::current().record("count", count);
+
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+
+        const MAX_PARAMS: usize = 999;
+        const COLUMNS: usize = 12;
+        const MAX_ROWS_PER_INSERT: usize = MAX_PARAMS / COLUMNS;
+
+        static SINGLE_ROW_PLACEHOLDER: &str = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+        let mut all_ids = Vec::with_capacity(count);
+
+        for chunk in records.chunks(MAX_ROWS_PER_INSERT) {
+            let mut tx = self.pool.begin().await?;
+
+            let placeholders: String = std::iter::repeat(SINGLE_ROW_PLACEHOLDER)
+                .take(chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let insert_sql = format!(
+                r#"INSERT INTO records (
+                    at_uri, did, time_us, message, message_metadata,
+                    created_at, hydrated_at, hydration_time_ms,
+                    api_calls_count, cache_hit_rate, cache_hits, cache_misses
+                ) VALUES {}"#,
+                placeholders
+            );
+
+            let mut query = sqlx::query(&insert_sql);
+
+            for record in chunk {
+                query = query
+                    .bind(record.get_at_uri())
+                    .bind(record.get_did())
+                    .bind(record.message.time_us.map(|t| t as i64))
+                    .bind(simd_json_to_string(&record.message).unwrap())
+                    .bind(simd_json_to_string(&record.hydrated_metadata).unwrap())
+                    .bind(record.processed_at.to_rfc3339())
+                    .bind(&now_str)
+                    .bind(record.metrics.hydration_time_ms as i64)
+                    .bind(record.metrics.api_calls_count as i64)
+                    .bind(record.metrics.cache_hit_rate)
+                    .bind(record.metrics.cache_hits as i64)
+                    .bind(record.metrics.cache_misses as i64);
+            }
+
+            let result = query.execute(&mut *tx).await?;
+            tx.commit().await?;
+
+            let base_id = result.last_insert_rowid();
+            for i in 0..chunk.len() {
+                all_ids.push(base_id - (chunk.len() - 1 - i) as i64);
+            }
+        }
+
+        let duration = start.elapsed().as_millis() as u64;
+        tracing::Span::current().record("duration_ms", duration);
+        trace!("Stored batch of {} records", count);
+        Ok(all_ids)
     }
 }
 

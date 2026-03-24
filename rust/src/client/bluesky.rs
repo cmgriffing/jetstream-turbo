@@ -13,6 +13,20 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{error, info, instrument, trace, warn};
 
+pub trait ProfileFetcher {
+    fn bulk_fetch_profiles(
+        &self,
+        dids: &[String],
+    ) -> impl std::future::Future<Output = TurboResult<Vec<Option<BlueskyProfile>>>> + Send;
+}
+
+pub trait PostFetcher {
+    fn bulk_fetch_posts(
+        &self,
+        uris: &[String],
+    ) -> impl std::future::Future<Output = TurboResult<Vec<Option<BlueskyPost>>>> + Send;
+}
+
 const REQUESTS_PER_SECOND_MS: u64 = 1000 / 10;
 
 pub struct BlueskyClient {
@@ -173,72 +187,6 @@ impl BlueskyClient {
         })
     }
 
-    #[instrument(name = "bulk_fetch_profiles", skip(self, dids), fields(count))]
-    pub async fn bulk_fetch_profiles(
-        &self,
-        dids: &[String],
-    ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
-        tracing::Span::current().record("count", dids.len());
-
-        if dids.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let mut collector = self.profile_batch_collector.write().await;
-        let profiles = collector.add_and_fetch(dids.to_vec()).await?;
-        collector.log_partial_percentage();
-
-        Ok(profiles)
-    }
-
-    #[instrument(
-        name = "bulk_fetch_posts",
-        skip(self, uris),
-        fields(count, valid_count)
-    )]
-    pub async fn bulk_fetch_posts(&self, uris: &[String]) -> TurboResult<Vec<Option<BlueskyPost>>> {
-        if uris.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let count = uris.len();
-        tracing::Span::current().record("count", count);
-
-        let valid_uris: Vec<String> = uris
-            .iter()
-            .filter(|uri| !uri.is_empty() && is_valid_at_uri(uri))
-            .cloned()
-            .collect();
-
-        let valid_count = valid_uris.len();
-        tracing::Span::current().record("valid_count", valid_count);
-
-        let filtered_count = uris.len() - valid_uris.len();
-        if filtered_count > 0 {
-            warn!(
-                "Filtered {} invalid URIs out of {}",
-                filtered_count,
-                uris.len()
-            );
-            trace!(
-                "Invalid URIs: {:?}",
-                uris.iter()
-                    .filter(|u| !is_valid_at_uri(u))
-                    .collect::<Vec<_>>()
-            );
-        }
-
-        if valid_uris.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let mut collector = self.post_batch_collector.write().await;
-        let posts = collector.add_and_fetch(valid_uris).await?;
-        collector.log_partial_percentage();
-
-        Ok(posts)
-    }
-
     pub async fn refresh_sessions(
         &self,
         new_sessions: Vec<String>,
@@ -326,6 +274,76 @@ impl BlueskyClient {
 
     pub async fn get_session_count(&self) -> usize {
         self.session_strings.read().await.len()
+    }
+}
+
+impl ProfileFetcher for BlueskyClient {
+    #[instrument(name = "bulk_fetch_profiles", skip(self, dids), fields(count))]
+    async fn bulk_fetch_profiles(
+        &self,
+        dids: &[String],
+    ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
+        tracing::Span::current().record("count", dids.len());
+
+        if dids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut collector = self.profile_batch_collector.write().await;
+        let profiles = collector.add_and_fetch(dids.to_vec()).await?;
+        collector.log_partial_percentage();
+
+        Ok(profiles)
+    }
+}
+
+impl PostFetcher for BlueskyClient {
+    #[instrument(
+        name = "bulk_fetch_posts",
+        skip(self, uris),
+        fields(count, valid_count)
+    )]
+    async fn bulk_fetch_posts(&self, uris: &[String]) -> TurboResult<Vec<Option<BlueskyPost>>> {
+        if uris.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let count = uris.len();
+        tracing::Span::current().record("count", count);
+
+        let valid_uris: Vec<String> = uris
+            .iter()
+            .filter(|uri| !uri.is_empty() && is_valid_at_uri(uri))
+            .cloned()
+            .collect();
+
+        let valid_count = valid_uris.len();
+        tracing::Span::current().record("valid_count", valid_count);
+
+        let filtered_count = uris.len() - valid_uris.len();
+        if filtered_count > 0 {
+            warn!(
+                "Filtered {} invalid URIs out of {}",
+                filtered_count,
+                uris.len()
+            );
+            trace!(
+                "Invalid URIs: {:?}",
+                uris.iter()
+                    .filter(|u| !is_valid_at_uri(u))
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        if valid_uris.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut collector = self.post_batch_collector.write().await;
+        let posts = collector.add_and_fetch(valid_uris).await?;
+        collector.log_partial_percentage();
+
+        Ok(posts)
     }
 }
 
