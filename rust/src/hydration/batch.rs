@@ -1,17 +1,22 @@
+use crate::client::{PostFetcher, ProfileFetcher};
 use crate::hydration::Hydrator;
 use crate::models::{enriched::EnrichedRecord, jetstream::JetstreamMessage, TurboResult};
 use futures::StreamExt;
 use std::time::Duration;
 use tracing::{info, trace};
 
-pub struct BatchProcessor {
-    hydrator: Hydrator,
+pub struct BatchProcessor<P, Po> {
+    hydrator: Hydrator<P, Po>,
     batch_size: usize,
     max_wait_time: Duration,
 }
 
-impl BatchProcessor {
-    pub fn new(hydrator: Hydrator, batch_size: usize, max_wait_time: Duration) -> Self {
+impl<P, Po> BatchProcessor<P, Po>
+where
+    P: ProfileFetcher + Send + Sync + 'static,
+    Po: PostFetcher + Send + Sync + 'static,
+{
+    pub fn new(hydrator: Hydrator<P, Po>, batch_size: usize, max_wait_time: Duration) -> Self {
         Self {
             hydrator,
             batch_size,

@@ -1761,6 +1761,7 @@ dependencies = [
  "futures-util",
  "governor",
  "hostname",
+ "jetstream-turbo-rs",
  "lru",
  "metrics 0.24.3",
  "metrics-exporter-prometheus",

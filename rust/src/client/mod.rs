@@ -4,5 +4,5 @@ pub mod jetstream;
 pub mod pool;
 
 pub use auth::BlueskyAuthClient;
-pub use bluesky::BlueskyClient;
-pub use jetstream::JetstreamClient;
+pub use bluesky::{BlueskyClient, PostFetcher, ProfileFetcher};
+pub use jetstream::{JetstreamClient, MessageSource};

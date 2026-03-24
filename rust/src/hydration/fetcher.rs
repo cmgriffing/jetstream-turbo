@@ -1,22 +1,28 @@
-use crate::client::BlueskyClient;
+use crate::client::{PostFetcher, ProfileFetcher};
 use crate::hydration::TurboCache;
 use crate::models::TurboResult;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, trace};
 
-pub struct DataFetcher {
+pub struct DataFetcher<P, Po> {
     cache: TurboCache,
-    bluesky_client: Arc<BlueskyClient>,
+    profile_fetcher: Arc<P>,
+    post_fetcher: Arc<Po>,
     #[allow(dead_code)]
     request_timeout: Duration,
 }
 
-impl DataFetcher {
-    pub fn new(cache: TurboCache, bluesky_client: Arc<BlueskyClient>) -> Self {
+impl<P, Po> DataFetcher<P, Po>
+where
+    P: ProfileFetcher + Send + Sync + 'static,
+    Po: PostFetcher + Send + Sync + 'static,
+{
+    pub fn new(cache: TurboCache, profile_fetcher: Arc<P>, post_fetcher: Arc<Po>) -> Self {
         Self {
             cache,
-            bluesky_client,
+            profile_fetcher,
+            post_fetcher,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -43,7 +49,7 @@ impl DataFetcher {
         // Fetch missing profiles in batches
         let mut fetched_count = 0;
         for chunk in missing_dids.chunks(25) {
-            let profiles = self.bluesky_client.bulk_fetch_profiles(chunk).await?;
+            let profiles = self.profile_fetcher.bulk_fetch_profiles(chunk).await?;
 
             for (did, maybe_profile) in chunk.iter().zip(profiles) {
                 if let Some(profile) = maybe_profile {
@@ -81,7 +87,7 @@ impl DataFetcher {
         // Fetch missing posts
         let mut fetched_count = 0;
         for chunk in missing_uris.chunks(10) {
-            let posts = self.bluesky_client.bulk_fetch_posts(chunk).await?;
+            let posts = self.post_fetcher.bulk_fetch_posts(chunk).await?;
 
             for (uri, maybe_post) in chunk.iter().zip(posts) {
                 if let Some(post) = maybe_post {
@@ -108,9 +114,5 @@ impl DataFetcher {
 
     pub fn get_cache(&self) -> &TurboCache {
         &self.cache
-    }
-
-    pub fn get_bluesky_client(&self) -> &BlueskyClient {
-        &self.bluesky_client
     }
 }

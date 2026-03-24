@@ -1,21 +1,36 @@
-use crate::client::BlueskyClient;
+use crate::client::{PostFetcher, ProfileFetcher};
 use crate::hydration::TurboCache;
 use crate::models::{enriched::EnrichedRecord, jetstream::JetstreamMessage, TurboResult};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, instrument, trace};
 
-#[derive(Clone)]
-pub struct Hydrator {
+pub struct Hydrator<P, Po> {
     cache: TurboCache,
-    bluesky_client: Arc<BlueskyClient>,
+    profile_fetcher: Arc<P>,
+    post_fetcher: Arc<Po>,
 }
 
-impl Hydrator {
-    pub fn new(cache: TurboCache, bluesky_client: Arc<BlueskyClient>) -> Self {
+impl<P, Po> Clone for Hydrator<P, Po> {
+    fn clone(&self) -> Self {
+        Self {
+            cache: self.cache.clone(),
+            profile_fetcher: Arc::clone(&self.profile_fetcher),
+            post_fetcher: Arc::clone(&self.post_fetcher),
+        }
+    }
+}
+
+impl<P, Po> Hydrator<P, Po>
+where
+    P: ProfileFetcher + Send + Sync + 'static,
+    Po: PostFetcher + Send + Sync + 'static,
+{
+    pub fn new(cache: TurboCache, profile_fetcher: Arc<P>, post_fetcher: Arc<Po>) -> Self {
         Self {
             cache,
-            bluesky_client,
+            profile_fetcher,
+            post_fetcher,
         }
     }
 
@@ -46,7 +61,7 @@ impl Hydrator {
 
             if !hit {
                 let profiles = self
-                    .bluesky_client
+                    .profile_fetcher
                     .bulk_fetch_profiles(&[author_did.to_string()])
                     .await?;
 
@@ -144,7 +159,7 @@ impl Hydrator {
             if uncached_dids.is_empty() {
                 return Ok(vec![]);
             }
-            self.bluesky_client
+            self.profile_fetcher
                 .bulk_fetch_profiles(&uncached_dids)
                 .await
         }
@@ -154,7 +169,7 @@ impl Hydrator {
             if uncached_uris.is_empty() {
                 return Ok(vec![]);
             }
-            self.bluesky_client.bulk_fetch_posts(&uncached_uris).await
+            self.post_fetcher.bulk_fetch_posts(&uncached_uris).await
         }
         .await;
 

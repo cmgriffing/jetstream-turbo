@@ -1,5 +1,5 @@
 use crate::models::errors::{TurboError, TurboResult};
-use crate::turbocharger::{HealthDiagnostics, HealthStatus, TurboCharger, TurboStats};
+use crate::turbocharger::{HealthDiagnostics, HealthStatus, ProductionTurboCharger, TurboStats};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -38,7 +38,7 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-pub fn create_router(turbocharger: Arc<TurboCharger>) -> Router {
+pub fn create_router(turbocharger: Arc<ProductionTurboCharger>) -> Router {
     Router::new()
         .route("/health", get(health_check))
         .route("/stats", get(get_stats))
@@ -48,7 +48,7 @@ pub fn create_router(turbocharger: Arc<TurboCharger>) -> Router {
 }
 
 async fn health_check(
-    State(turbocharger): State<Arc<TurboCharger>>,
+    State(turbocharger): State<Arc<ProductionTurboCharger>>,
 ) -> Result<(StatusCode, Json<HealthResponse>), StatusCode> {
     match turbocharger.health_check().await {
         Ok(status) => {
@@ -60,7 +60,7 @@ async fn health_check(
 }
 
 async fn get_stats(
-    State(turbocharger): State<Arc<TurboCharger>>,
+    State(turbocharger): State<Arc<ProductionTurboCharger>>,
     Query(_query): Query<StatsQuery>,
 ) -> Result<Json<StatsResponse>, StatusCode> {
     match turbocharger.get_stats().await {
@@ -72,13 +72,13 @@ async fn get_stats(
     }
 }
 
-async fn get_metrics(State(turbocharger): State<Arc<TurboCharger>>) -> String {
+async fn get_metrics(State(turbocharger): State<Arc<ProductionTurboCharger>>) -> String {
     let diagnostics = turbocharger.get_runtime_diagnostics().await;
     prometheus_metrics_from_diagnostics(&diagnostics)
 }
 
 async fn ws_handler(
-    State(turbocharger): State<Arc<TurboCharger>>,
+    State(turbocharger): State<Arc<ProductionTurboCharger>>,
     ws: WebSocketUpgrade,
 ) -> axum::response::Response {
     ws.on_upgrade(move |socket| handle_websocket(socket, turbocharger.subscribe()))
@@ -115,7 +115,7 @@ async fn handle_websocket(
     }
 }
 
-pub async fn create_server(port: u16, turbocharger: Arc<TurboCharger>) -> TurboResult<()> {
+pub async fn create_server(port: u16, turbocharger: Arc<ProductionTurboCharger>) -> TurboResult<()> {
     let readiness_turbocharger = Arc::clone(&turbocharger);
     let app = Router::new()
         .nest("/api/v1", create_router(turbocharger))
