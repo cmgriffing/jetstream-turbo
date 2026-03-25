@@ -559,9 +559,9 @@ mod tests {
         SQLiteStore::new(
             &db_path_str,
             SQLitePragmaConfig {
-                cache_size_kib: 16 * 1024,
-                mmap_size_mb: 32,
-                journal_size_limit_mb: 256,
+                cache_size_kib: 64 * 1024,
+                mmap_size_mb: 256,
+                journal_size_limit_mb: 512,
             },
         )
         .await
@@ -592,9 +592,9 @@ mod tests {
             snapshot.cache_size_pages < 0,
             "cache_size pragma should remain in kibibyte mode"
         );
-        assert_eq!(snapshot.mmap_size_bytes, (32 * 1024 * 1024) as i64);
+        assert_eq!(snapshot.mmap_size_bytes, (256 * 1024 * 1024) as i64);
         assert!(
-            snapshot.journal_size_limit_bytes == (256 * 1024 * 1024) as i64
+            snapshot.journal_size_limit_bytes == (512 * 1024 * 1024) as i64
                 || snapshot.journal_size_limit_bytes == -1,
             "journal_size_limit should be configured or report SQLite's unlimited sentinel"
         );
