@@ -19,10 +19,10 @@ pub fn init_tracing(log_level: &str) -> Result<(), Box<dyn std::error::Error>> {
 /// Initialize tracing for testing
 #[cfg(test)]
 pub fn init_test_tracing() {
-    tracing_subscriber::fmt()
+    let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .with_test_writer()
-        .init();
+        .try_init();
 }
 
 /// Macro for logging errors with context

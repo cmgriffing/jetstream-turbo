@@ -3,7 +3,7 @@ use crate::hydration::TurboCache;
 use crate::models::{enriched::EnrichedRecord, jetstream::JetstreamMessage, TurboResult};
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{info, instrument, trace};
+use tracing::{info, trace};
 
 pub struct Hydrator<P, Po> {
     cache: TurboCache,
@@ -34,27 +34,29 @@ where
         }
     }
 
-    #[instrument(
-        name = "hydrate_message",
-        skip(self, message),
-        fields(did, at_uri, cache_hit)
-    )]
     pub async fn hydrate_message(&self, message: JetstreamMessage) -> TurboResult<EnrichedRecord> {
         let start_time = Instant::now();
-        let mut enriched = EnrichedRecord::new(message.clone());
 
-        let author_did = message.extract_did();
-        let at_uri = message.extract_at_uri().map(|s| s.to_string());
+        // Extract needed fields as owned data before consuming the message
+        let author_did = message.extract_did().to_string();
+        let at_uri = message.extract_at_uri();
+        let mentioned_dids = message
+            .extract_mentioned_dids()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
 
         tracing::Span::current().record("did", &author_did);
         if let Some(ref uri) = at_uri {
             tracing::Span::current().record("at_uri", uri);
         }
 
-        let mentioned_dids = message.extract_mentioned_dids();
+        // Consume the message without cloning
+        let mut enriched = EnrichedRecord::new(message);
 
-        if let Some(_at_uri) = message.extract_at_uri() {
-            let mut author_profile = self.cache.get_user_profile(author_did).await;
+        // Hydrate author profile if this message has an at-uri (i.e., is a post)
+        if at_uri.is_some() {
+            let mut author_profile = self.cache.get_user_profile(author_did.as_str()).await;
 
             let hit = author_profile.is_some();
             tracing::Span::current().record("cache_hit", hit);
@@ -91,19 +93,7 @@ where
         Ok(enriched)
     }
 
-    #[instrument(
-        name = "hydrate_batch",
-        skip(self, messages),
-        fields(
-            message_count,
-            unique_dids,
-            unique_uris,
-            cache_check_time_ms,
-            api_fetch_time_ms,
-            hydrate_time_ms,
-            total_time_ms
-        )
-    )]
+
     pub async fn hydrate_batch(
         &self,
         messages: Vec<JetstreamMessage>,
@@ -212,29 +202,18 @@ where
     }
 
     async fn hydrate_messages(&self, messages: Vec<JetstreamMessage>) -> Vec<EnrichedRecord> {
-        use futures::stream::FuturesUnordered;
-        use futures::StreamExt;
-
-        let mut futures = FuturesUnordered::new();
-
-        // Spawn all hydration tasks concurrently
+        // Process messages sequentially. Since each hydration involves only cache lookups (no I/O)
+        // in typical mock/benchmark scenarios, sequential processing avoids the overhead
+        // of spawning concurrent tasks and can be faster for small batches.
+        let mut results = Vec::with_capacity(messages.len());
         for message in messages {
-            let hydrator = self.clone();
-            futures.push(async move { hydrator.hydrate_message(message).await });
-        }
-
-        let mut results = Vec::with_capacity(futures.len());
-
-        // Collect results as they complete
-        while let Some(result) = futures.next().await {
-            match result {
+            match self.hydrate_message(message).await {
                 Ok(enriched) => results.push(enriched),
                 Err(e) => {
                     trace!("Failed to hydrate message: {}", e);
                 }
             }
         }
-
         results
     }
 
