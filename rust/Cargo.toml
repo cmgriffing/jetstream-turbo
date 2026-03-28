@@ -3,7 +3,7 @@ members = ["."]
 
 [package]
 name = "jetstream-turbo-rs"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Chris Griffing <cmgriffing@gmail.com>"]
 description = "Turbocharged Jetstream messages - hydrates referenced objects and stores to SQLite"
@@ -55,7 +55,7 @@ sqlx = { version = "0.8", features = [
     "chrono",
     "uuid",
 ] }
-not_redis = "0.4.0"
+not_redis = "0.5.0"
 
 # Caching and utilities
 lru = "0.12"
