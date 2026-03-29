@@ -124,23 +124,25 @@ where
         let uris: Vec<String> = unique_uris.into_iter().collect();
 
         let cache_check_start = Instant::now();
-        let cached_profile_flags = self.cache.check_user_profiles_cached(&dids).await;
-        let cached_post_flags = self.cache.check_posts_cached(&uris).await;
+        let cached_profile_flags = self.cache.check_user_profiles_cached(&dids);
+        let cached_post_flags = self.cache.check_posts_cached(&uris);
         let cache_check_time = cache_check_start.elapsed().as_millis() as u64;
         tracing::Span::current().record("cache_check_time_ms", cache_check_time);
 
+        // Partition uncached items: consume `dids` and `uris` vectors,
+        // moving the strings directly into `uncached_dids`/`uncached_uris`.
         let uncached_dids: Vec<String> = dids
-            .iter()
-            .zip(cached_profile_flags)
-            .filter(|(_, is_cached)| !*is_cached)
-            .map(|(did, _)| did.clone())
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !cached_profile_flags[*i])
+            .map(|(_, did)| did)
             .collect();
 
         let uncached_uris: Vec<String> = uris
-            .iter()
-            .zip(cached_post_flags)
-            .filter(|(_, is_cached)| !*is_cached)
-            .map(|(uri, _)| uri.clone())
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !cached_post_flags[*i])
+            .map(|(_, uri)| uri)
             .collect();
 
         // Fetch profiles and posts sequentially to avoid rate limiting
