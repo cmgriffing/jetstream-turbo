@@ -76,7 +76,7 @@ impl TurboCache {
         (self.user_capacity, self.post_capacity)
     }
 
-    pub async fn get_user_profile(&self, did: &str) -> Option<Arc<BlueskyProfile>> {
+    pub fn get_user_profile(&self, did: &str) -> Option<Arc<BlueskyProfile>> {
         if let Some(profile) = self.user_cache.get(did) {
             self.metrics.user_hits.fetch_add(1, Ordering::Relaxed);
             self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
@@ -88,7 +88,7 @@ impl TurboCache {
         None
     }
 
-    pub async fn get_user_profiles(&self, dids: &[String]) -> Vec<Option<Arc<BlueskyProfile>>> {
+    pub fn get_user_profiles(&self, dids: &[String]) -> Vec<Option<Arc<BlueskyProfile>>> {
         dids.iter()
             .map(|did| {
                 if let Some(profile) = self.user_cache.get(did) {
@@ -104,12 +104,12 @@ impl TurboCache {
             .collect()
     }
 
-    pub async fn set_user_profile(&self, did: String, profile: Arc<BlueskyProfile>) {
+    pub fn set_user_profile(&self, did: String, profile: Arc<BlueskyProfile>) {
         self.user_cache.insert(did.clone(), profile);
         trace!("Cached user profile: {}", did);
     }
 
-    pub async fn get_post(&self, uri: &str) -> Option<Arc<BlueskyPost>> {
+    pub fn get_post(&self, uri: &str) -> Option<Arc<BlueskyPost>> {
         if let Some(post) = self.post_cache.get(uri) {
             self.metrics.post_hits.fetch_add(1, Ordering::Relaxed);
             self.metrics.total_requests.fetch_add(1, Ordering::Relaxed);
@@ -121,7 +121,7 @@ impl TurboCache {
         None
     }
 
-    pub async fn get_posts(&self, uris: &[String]) -> Vec<Option<Arc<BlueskyPost>>> {
+    pub fn get_posts(&self, uris: &[String]) -> Vec<Option<Arc<BlueskyPost>>> {
         uris.iter()
             .map(|uri| {
                 if let Some(post) = self.post_cache.get(uri) {
@@ -137,13 +137,13 @@ impl TurboCache {
             .collect()
     }
 
-    pub async fn set_post(&self, uri: String, post: Arc<BlueskyPost>) {
+    pub fn set_post(&self, uri: String, post: Arc<BlueskyPost>) {
         self.post_cache.insert(uri.clone(), post);
         trace!("Cached post: {}", uri);
     }
 
     #[instrument(name = "cache_check_profiles", skip(self), fields(count))]
-    pub async fn check_user_profiles_cached(&self, dids: &[String]) -> Vec<bool> {
+    pub fn check_user_profiles_cached(&self, dids: &[String]) -> Vec<bool> {
         tracing::Span::current().record("count", dids.len());
         dids.iter()
             .map(|did| self.user_cache.contains_key(did))
@@ -151,14 +151,14 @@ impl TurboCache {
     }
 
     #[instrument(name = "cache_check_posts", skip(self), fields(count))]
-    pub async fn check_posts_cached(&self, uris: &[String]) -> Vec<bool> {
+    pub fn check_posts_cached(&self, uris: &[String]) -> Vec<bool> {
         tracing::Span::current().record("count", uris.len());
         uris.iter()
             .map(|uri| self.post_cache.contains_key(uri))
             .collect()
     }
 
-    pub async fn get_metrics(&self) -> CacheMetricsSnapshot {
+    pub fn get_metrics(&self) -> CacheMetricsSnapshot {
         CacheMetricsSnapshot {
             user_hits: self.metrics.user_hits.load(Ordering::Relaxed),
             user_misses: self.metrics.user_misses.load(Ordering::Relaxed),
@@ -169,13 +169,13 @@ impl TurboCache {
         }
     }
 
-    pub async fn clear(&self) {
+    pub fn clear(&self) {
         self.user_cache.invalidate_all();
         self.post_cache.invalidate_all();
         trace!("Cleared all caches");
     }
 
-    pub async fn get_hit_rates(&self) -> (f64, f64) {
+    pub fn get_hit_rates(&self) -> (f64, f64) {
         let user_hits = self.metrics.user_hits.load(Ordering::Relaxed);
         let user_misses = self.metrics.user_misses.load(Ordering::Relaxed);
         let post_hits = self.metrics.post_hits.load(Ordering::Relaxed);
@@ -215,7 +215,7 @@ mod tests {
     async fn test_user_profile_cache() {
         let cache = TurboCache::new(100, 100);
 
-        let result = cache.get_user_profile("did:plc:test").await;
+        let result = cache.get_user_profile("did:plc:test");
         assert!(result.is_none());
 
         let profile = BlueskyProfile {
@@ -234,14 +234,13 @@ mod tests {
         };
 
         cache
-            .set_user_profile("did:plc:test".to_string(), Arc::new(profile.clone()))
-            .await;
+            .set_user_profile("did:plc:test".to_string(), Arc::new(profile.clone()));
 
-        let result = cache.get_user_profile("did:plc:test").await;
+        let result = cache.get_user_profile("did:plc:test");
         assert!(result.is_some());
         assert_eq!(result.unwrap().did.as_ref(), "did:plc:test");
 
-        let metrics = cache.get_metrics().await;
+        let metrics = cache.get_metrics();
         assert_eq!(metrics.user_hits, 1);
         assert_eq!(metrics.user_misses, 1);
     }
@@ -279,23 +278,20 @@ mod tests {
         };
 
         cache
-            .get_post("at://did:plc:test/app.bsky.feed.post/notfound")
-            .await;
+            .get_post("at://did:plc:test/app.bsky.feed.post/notfound");
 
         cache
             .set_post(
                 "at://did:plc:test/app.bsky.feed.post/test".to_string(),
                 Arc::new(post.clone()),
-            )
-            .await;
+            );
 
         let result = cache
-            .get_post("at://did:plc:test/app.bsky.feed.post/test")
-            .await;
+            .get_post("at://did:plc:test/app.bsky.feed.post/test");
         assert!(result.is_some());
         assert_eq!(result.unwrap().text, "Hello world");
 
-        let metrics = cache.get_metrics().await;
+        let metrics = cache.get_metrics();
         assert_eq!(metrics.post_hits, 1);
         assert_eq!(metrics.post_misses, 1);
     }
@@ -304,8 +300,8 @@ mod tests {
     async fn test_hit_rates() {
         let cache = TurboCache::new(10, 10);
 
-        cache.get_user_profile("did:plc:test1").await;
-        cache.get_user_profile("did:plc:test2").await;
+        cache.get_user_profile("did:plc:test1");
+        cache.get_user_profile("did:plc:test2");
 
         let profile = BlueskyProfile {
             did: "did:plc:test1".into(),
@@ -323,11 +319,10 @@ mod tests {
         };
 
         cache
-            .set_user_profile("did:plc:test1".to_string(), Arc::new(profile))
-            .await;
-        cache.get_user_profile("did:plc:test1").await;
+            .set_user_profile("did:plc:test1".to_string(), Arc::new(profile));
+        cache.get_user_profile("did:plc:test1");
 
-        let (user_hit_rate, post_hit_rate) = cache.get_hit_rates().await;
+        let (user_hit_rate, post_hit_rate) = cache.get_hit_rates();
         assert_eq!(user_hit_rate, 1.0 / 3.0);
         assert_eq!(post_hit_rate, 0.0);
     }
