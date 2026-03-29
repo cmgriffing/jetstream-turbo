@@ -105,8 +105,7 @@ mod tests {
                 .set_user_profile(
                     format!("did:plc:test{}", i),
                     std::sync::Arc::new(profile.clone()),
-                )
-                .await;
+                );
         }
 
         let set_time = start.elapsed();
@@ -114,7 +113,7 @@ mod tests {
         let start = std::time::Instant::now();
 
         for i in 0..10000 {
-            let _result = cache.get_user_profile(&format!("did:plc:test{}", i)).await;
+            let _result = cache.get_user_profile(&format!("did:plc:test{}", i));
         }
 
         let get_time = start.elapsed();
@@ -123,7 +122,7 @@ mod tests {
         println!("Cache get time for 10k items: {:?}", get_time);
 
         // Verify cache hit rates
-        let (user_hit_rate, post_hit_rate) = cache.get_hit_rates().await;
+        let (user_hit_rate, post_hit_rate) = cache.get_hit_rates();
         assert_eq!(user_hit_rate, 1.0); // All should be hits
         assert_eq!(post_hit_rate, 0.0); // No post operations
 
@@ -212,7 +211,7 @@ mod tests {
             let author_did = message.extract_did();
 
             // Check if we have the author profile cached
-            let profile = cache.get_user_profile(author_did).await;
+            let profile = cache.get_user_profile(author_did);
 
             if profile.is_none() {
                 // Simulate API call and cache result
@@ -232,13 +231,12 @@ mod tests {
                 };
 
                 cache
-                    .set_user_profile(author_did.to_string(), std::sync::Arc::new(new_profile))
-                    .await;
+                    .set_user_profile(author_did.to_string(), std::sync::Arc::new(new_profile));
             }
         }
 
         // 4. Verify results
-        let final_profile = cache.get_user_profile("did:plc:user1").await;
+        let final_profile = cache.get_user_profile("did:plc:user1");
         assert!(final_profile.is_some());
         assert_eq!(
             final_profile.unwrap().display_name,
@@ -246,7 +244,7 @@ mod tests {
         );
 
         // 5. Check metrics
-        let metrics = cache.get_metrics().await;
+        let metrics = cache.get_metrics();
         assert!(metrics.user_hits > 0);
         assert!(metrics.user_misses > 0);
     }

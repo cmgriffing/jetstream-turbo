@@ -56,7 +56,7 @@ where
 
         // Hydrate author profile if this message has an at-uri (i.e., is a post)
         if at_uri.is_some() {
-            let mut author_profile = self.cache.get_user_profile(author_did.as_str()).await;
+            let mut author_profile = self.cache.get_user_profile(author_did.as_str());
 
             let hit = author_profile.is_some();
             tracing::Span::current().record("cache_hit", hit);
@@ -71,8 +71,7 @@ where
                     let profile_arc = Arc::new(profile);
                     author_profile = Some(Arc::clone(&profile_arc));
                     self.cache
-                        .set_user_profile(author_did.to_string(), profile_arc)
-                        .await;
+                        .set_user_profile(author_did.to_string(), profile_arc);
                 }
             }
 
@@ -81,7 +80,7 @@ where
 
         // Process mentions
         for did in &mentioned_dids {
-            if let Some(profile) = self.cache.get_user_profile(did).await {
+            if let Some(profile) = self.cache.get_user_profile(did) {
                 enriched.hydrated_metadata.add_mentioned_profile(profile);
             }
         }
@@ -125,23 +124,25 @@ where
         let uris: Vec<String> = unique_uris.into_iter().collect();
 
         let cache_check_start = Instant::now();
-        let cached_profile_flags = self.cache.check_user_profiles_cached(&dids).await;
-        let cached_post_flags = self.cache.check_posts_cached(&uris).await;
+        let cached_profile_flags = self.cache.check_user_profiles_cached(&dids);
+        let cached_post_flags = self.cache.check_posts_cached(&uris);
         let cache_check_time = cache_check_start.elapsed().as_millis() as u64;
         tracing::Span::current().record("cache_check_time_ms", cache_check_time);
 
+        // Partition uncached items: consume `dids` and `uris` vectors,
+        // moving the strings directly into `uncached_dids`/`uncached_uris`.
         let uncached_dids: Vec<String> = dids
-            .iter()
-            .zip(cached_profile_flags)
-            .filter(|(_, is_cached)| !*is_cached)
-            .map(|(did, _)| did.clone())
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !cached_profile_flags[*i])
+            .map(|(_, did)| did)
             .collect();
 
         let uncached_uris: Vec<String> = uris
-            .iter()
-            .zip(cached_post_flags)
-            .filter(|(_, is_cached)| !*is_cached)
-            .map(|(uri, _)| uri.clone())
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !cached_post_flags[*i])
+            .map(|(_, uri)| uri)
             .collect();
 
         // Fetch profiles and posts sequentially to avoid rate limiting
@@ -170,8 +171,7 @@ where
             for (did, maybe_profile) in uncached_dids.iter().zip(profiles) {
                 if let Some(profile) = maybe_profile {
                     self.cache
-                        .set_user_profile(did.clone(), Arc::new(profile))
-                        .await;
+                        .set_user_profile(did.clone(), Arc::new(profile));
                 }
             }
         }
@@ -179,7 +179,7 @@ where
         if let Ok(posts) = posts_result {
             for (uri, maybe_post) in uncached_uris.iter().zip(posts) {
                 if let Some(post) = maybe_post {
-                    self.cache.set_post(uri.clone(), Arc::new(post)).await;
+                    self.cache.set_post(uri.clone(), Arc::new(post));
                 }
             }
         }

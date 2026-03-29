@@ -208,7 +208,7 @@ where
                 let process_memory = collect_process_memory_diagnostics();
                 let _ = self.observe_memory_sample(&process_memory);
                 let (user_hit_rate, post_hit_rate) =
-                    self.hydrator.get_cache().get_hit_rates().await;
+                    self.hydrator.get_cache().get_hit_rates();
                 info!(
                     "Cache hit rates: users={:.2}%, posts={:.2}%",
                     user_hit_rate * 100.0,
@@ -441,8 +441,8 @@ where
 
     pub async fn get_stats(&self) -> TurboResult<TurboStats> {
         let record_count = self.sqlite_store.count_records().await?;
-        let cache_metrics = self.hydrator.get_cache().get_metrics().await;
-        let (user_hit_rate, post_hit_rate) = self.hydrator.get_cache().get_hit_rates().await;
+        let cache_metrics = self.hydrator.get_cache().get_metrics();
+        let (user_hit_rate, post_hit_rate) = self.hydrator.get_cache().get_hit_rates();
         let redis_info = self.redis_store.get_stream_info().await?;
 
         Ok(TurboStats {
@@ -508,7 +508,7 @@ where
         sqlite_available: bool,
     ) -> HealthDiagnostics {
         let cache = self.hydrator.get_cache();
-        let cache_metrics = cache.get_metrics().await;
+        let cache_metrics = cache.get_metrics();
         let (user_entries, post_entries) = cache.get_entry_counts();
         let (user_capacity, post_capacity) = cache.get_capacity_limits();
 
