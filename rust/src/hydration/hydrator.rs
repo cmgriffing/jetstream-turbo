@@ -56,7 +56,7 @@ where
 
         // Hydrate author profile if this message has an at-uri (i.e., is a post)
         if at_uri.is_some() {
-            let mut author_profile = self.cache.get_user_profile(author_did.as_str()).await;
+            let mut author_profile = self.cache.get_user_profile(author_did.as_str());
 
             let hit = author_profile.is_some();
             tracing::Span::current().record("cache_hit", hit);
@@ -71,8 +71,7 @@ where
                     let profile_arc = Arc::new(profile);
                     author_profile = Some(Arc::clone(&profile_arc));
                     self.cache
-                        .set_user_profile(author_did.to_string(), profile_arc)
-                        .await;
+                        .set_user_profile(author_did.to_string(), profile_arc);
                 }
             }
 
@@ -81,7 +80,7 @@ where
 
         // Process mentions
         for did in &mentioned_dids {
-            if let Some(profile) = self.cache.get_user_profile(did).await {
+            if let Some(profile) = self.cache.get_user_profile(did) {
                 enriched.hydrated_metadata.add_mentioned_profile(profile);
             }
         }
@@ -170,8 +169,7 @@ where
             for (did, maybe_profile) in uncached_dids.iter().zip(profiles) {
                 if let Some(profile) = maybe_profile {
                     self.cache
-                        .set_user_profile(did.clone(), Arc::new(profile))
-                        .await;
+                        .set_user_profile(did.clone(), Arc::new(profile));
                 }
             }
         }
@@ -179,7 +177,7 @@ where
         if let Ok(posts) = posts_result {
             for (uri, maybe_post) in uncached_uris.iter().zip(posts) {
                 if let Some(post) = maybe_post {
-                    self.cache.set_post(uri.clone(), Arc::new(post)).await;
+                    self.cache.set_post(uri.clone(), Arc::new(post));
                 }
             }
         }
