@@ -1,4 +1,5 @@
 use crate::models::errors::TurboError;
+use serde_json::json;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -11,6 +12,7 @@ const DEFAULT_FLUSH_INTERVAL_SECS: u64 = 60;
 pub struct ErrorEvent {
     pub error_type: String,
     pub message: String,
+    pub handled: bool,
     pub is_retryable: bool,
     pub is_critical: bool,
     pub context: HashMap<String, String>,
@@ -81,6 +83,7 @@ impl ErrorReporter {
         let event = ErrorEvent {
             error_type: Self::error_type_name(error),
             message: error.to_string(),
+            handled: true,
             is_retryable: error.is_retryable(),
             is_critical: error.is_critical(),
             context: context
@@ -204,6 +207,7 @@ impl ErrorReporter {
         ErrorEvent {
             error_type: failure_type.to_string(),
             message: message.to_string(),
+            handled: false,
             is_retryable: false,
             is_critical: true,
             context: context
@@ -215,6 +219,12 @@ impl ErrorReporter {
 
     async fn validate_connection(client: &posthog_rs::Client, api_key: &str) -> Result<(), String> {
         let mut test_event = posthog_rs::Event::new("$exception", "jetstream-turbo");
+        Self::attach_exception_properties(
+            &mut test_event,
+            "ValidationCheck",
+            "PostHog connectivity check",
+            true,
+        );
         let _ = test_event.insert_prop("$lib", "jetstream-turbo");
         let _ = test_event.insert_prop("test_event", true);
 
@@ -288,8 +298,12 @@ impl ErrorReporter {
             .iter()
             .map(|event| {
                 let mut ph_event = posthog_rs::Event::new("$exception", "jetstream-turbo");
-                let _ = ph_event.insert_prop("$exception_type", &event.error_type);
-                let _ = ph_event.insert_prop("$exception_message", &event.message);
+                Self::attach_exception_properties(
+                    &mut ph_event,
+                    &event.error_type,
+                    &event.message,
+                    event.handled,
+                );
                 let _ = ph_event.insert_prop("is_retryable", event.is_retryable);
                 let _ = ph_event.insert_prop("is_critical", event.is_critical);
                 for (key, value) in &event.context {
@@ -336,6 +350,28 @@ impl ErrorReporter {
             tracing::debug!("Successfully sent {} error events to PostHog", event_count);
         }
     }
+
+    fn attach_exception_properties(
+        event: &mut posthog_rs::Event,
+        error_type: &str,
+        message: &str,
+        handled: bool,
+    ) {
+        let _ = event.insert_prop("$exception_level", "error");
+        let _ = event.insert_prop(
+            "$exception_list",
+            json!([{
+                "type": error_type,
+                "value": message,
+                "mechanism": {
+                    "handled": handled,
+                    "synthetic": false
+                }
+            }]),
+        );
+        let _ = event.insert_prop("$exception_type", error_type);
+        let _ = event.insert_prop("$exception_message", message);
+    }
 }
 
 #[cfg(test)]
@@ -367,6 +403,7 @@ mod tests {
 
         assert_eq!(event.error_type, "panic");
         assert_eq!(event.message, "boom");
+        assert!(!event.handled);
         assert!(!event.is_retryable);
         assert!(event.is_critical);
         assert_eq!(event.context.get("component"), Some(&"main".to_string()));
@@ -432,27 +469,49 @@ mod tests {
 
         let validation_payload: Value =
             serde_json::from_slice(&requests[0].body).expect("validation payload should be json");
-        let validation_events = validation_payload["batch"]
-            .as_array()
+        let validation_events = validation_payload
+            .get("batch")
+            .and_then(Value::as_array)
             .expect("validation payload should include a batch array");
         assert_eq!(validation_events.len(), 1);
         assert_eq!(validation_payload["api_key"], "phc_test_project_key");
+        assert_eq!(validation_payload["historical_migration"], false);
         assert_eq!(validation_events[0]["event"], "$exception");
         assert_eq!(validation_events[0]["api_key"], "phc_test_project_key");
         assert_eq!(validation_events[0]["$distinct_id"], "jetstream-turbo");
+        assert_eq!(
+            validation_events[0]["properties"]["$exception_level"],
+            "error"
+        );
+        assert_eq!(
+            validation_events[0]["properties"]["$exception_list"][0]["type"],
+            "ValidationCheck"
+        );
+        assert_eq!(
+            validation_events[0]["properties"]["$exception_list"][0]["value"],
+            "PostHog connectivity check"
+        );
+        assert_eq!(
+            validation_events[0]["properties"]["$exception_list"][0]["mechanism"]["handled"],
+            true
+        );
         assert_eq!(validation_events[0]["properties"]["test_event"], true);
 
         let flush_payload: Value =
             serde_json::from_slice(&requests[1].body).expect("flush payload should be json");
-        let flushed_events = flush_payload["batch"]
-            .as_array()
+        let flushed_events = flush_payload
+            .get("batch")
+            .and_then(Value::as_array)
             .expect("flush payload should include a batch array");
         assert_eq!(flushed_events.len(), 2);
+        assert_eq!(flush_payload["api_key"], "phc_test_project_key");
+        assert_eq!(flush_payload["historical_migration"], false);
 
         assert_exception_event(
             &flushed_events[0],
             "Internal",
             "Internal error: server failed",
+            true,
             false,
             false,
             &[("component", "main"), ("operation", "server_run")],
@@ -461,6 +520,7 @@ mod tests {
             &flushed_events[1],
             "Panic",
             "simulated panic",
+            false,
             false,
             true,
             &[
@@ -475,12 +535,27 @@ mod tests {
         event: &Value,
         error_type: &str,
         message: &str,
+        handled: bool,
         is_retryable: bool,
         is_critical: bool,
         context_pairs: &[(&str, &str)],
     ) {
         assert_eq!(event["event"], "$exception");
         assert_eq!(event["$distinct_id"], "jetstream-turbo");
+        assert_eq!(event["properties"]["$exception_level"], "error");
+        assert_eq!(
+            event["properties"]["$exception_list"][0]["type"],
+            error_type
+        );
+        assert_eq!(event["properties"]["$exception_list"][0]["value"], message);
+        assert_eq!(
+            event["properties"]["$exception_list"][0]["mechanism"]["handled"],
+            handled
+        );
+        assert_eq!(
+            event["properties"]["$exception_list"][0]["mechanism"]["synthetic"],
+            false
+        );
         assert_eq!(event["properties"]["$exception_type"], error_type);
         assert_eq!(event["properties"]["$exception_message"], message);
         assert_eq!(event["properties"]["is_retryable"], is_retryable);
