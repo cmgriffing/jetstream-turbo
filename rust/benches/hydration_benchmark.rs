@@ -80,9 +80,7 @@ fn bench_cache_operations(c: &mut Criterion) {
                 let profile = create_test_profile(0);
 
                 for i in 0..1000 {
-                    cache
-                        .set_user_profile(format!("did:plc:test{}", i), Arc::new(profile.clone()))
-                        .await;
+                    cache.set_user_profile(format!("did:plc:test{}", i), Arc::new(profile.clone()));
                 }
             });
         });
@@ -94,9 +92,7 @@ fn bench_cache_operations(c: &mut Criterion) {
             let profile = create_test_profile(0);
 
             for i in 0..1000 {
-                cache
-                    .set_user_profile(format!("did:plc:test{}", i), Arc::new(profile.clone()))
-                    .await;
+                cache.set_user_profile(format!("did:plc:test{}", i), Arc::new(profile.clone()));
             }
 
             cache
@@ -105,7 +101,7 @@ fn bench_cache_operations(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 for i in 0..1000 {
-                    let _result = cache.get_user_profile(&format!("did:plc:test{}", i)).await;
+                    let _result = cache.get_user_profile(&format!("did:plc:test{}", i));
                 }
             });
         });
@@ -118,9 +114,7 @@ fn bench_cache_operations(c: &mut Criterion) {
                 let post = create_test_post(0);
 
                 for i in 0..1000 {
-                    cache
-                        .set_post(format!("at://test/{}", i), Arc::new(post.clone()))
-                        .await;
+                    cache.set_post(format!("at://test/{}", i), Arc::new(post.clone()));
                 }
             });
         });
@@ -132,9 +126,7 @@ fn bench_cache_operations(c: &mut Criterion) {
             let post = create_test_post(0);
 
             for i in 0..1000 {
-                cache
-                    .set_post(format!("at://test/{}", i), Arc::new(post.clone()))
-                    .await;
+                cache.set_post(format!("at://test/{}", i), Arc::new(post.clone()));
             }
 
             cache
@@ -143,7 +135,7 @@ fn bench_cache_operations(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 for i in 0..1000 {
-                    let _result = cache.get_post(&format!("at://test/{}", i)).await;
+                    let _result = cache.get_post(&format!("at://test/{}", i));
                 }
             });
         });
@@ -155,9 +147,7 @@ fn bench_cache_operations(c: &mut Criterion) {
             let profile = create_test_profile(0);
 
             for i in 0..100 {
-                cache
-                    .set_user_profile(format!("did:plc:test{}", i), Arc::new(profile.clone()))
-                    .await;
+                cache.set_user_profile(format!("did:plc:test{}", i), Arc::new(profile.clone()));
             }
 
             cache
@@ -166,7 +156,7 @@ fn bench_cache_operations(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let dids: Vec<String> = (0..100).map(|i| format!("did:plc:test{}", i)).collect();
-                let _results = cache.get_user_profiles(&dids).await;
+                let _results = cache.get_user_profiles(&dids);
             });
         });
     });
@@ -177,9 +167,7 @@ fn bench_cache_operations(c: &mut Criterion) {
             let post = create_test_post(0);
 
             for i in 0..100 {
-                cache
-                    .set_post(format!("at://test/{}", i), Arc::new(post.clone()))
-                    .await;
+                cache.set_post(format!("at://test/{}", i), Arc::new(post.clone()));
             }
 
             cache
@@ -188,7 +176,7 @@ fn bench_cache_operations(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 let uris: Vec<String> = (0..100).map(|i| format!("at://test/{}", i)).collect();
-                let _results = cache.get_posts(&uris).await;
+                let _results = cache.get_posts(&uris);
             });
         });
     });
@@ -206,12 +194,10 @@ fn bench_cache_operations(c: &mut Criterion) {
                         let profile = create_test_profile(0);
 
                         for i in 0..(cache_size / 2) {
-                            cache
-                                .set_user_profile(
-                                    format!("did:plc:test{}", i),
-                                    Arc::new(profile.clone()),
-                                )
-                                .await;
+                            cache.set_user_profile(
+                                format!("did:plc:test{}", i),
+                                Arc::new(profile.clone()),
+                            );
                         }
 
                         let mut hits = 0;
@@ -224,7 +210,7 @@ fn bench_cache_operations(c: &mut Criterion) {
                                 format!("did:plc:missing{}", i)
                             };
 
-                            if cache.get_user_profile(&did).await.is_some() {
+                            if cache.get_user_profile(&did).is_some() {
                                 hits += 1;
                             } else {
                                 misses += 1;
