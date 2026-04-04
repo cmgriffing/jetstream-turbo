@@ -193,7 +193,7 @@ impl ErrorReporter {
         let _ = test_event.insert_prop("$lib", "jetstream-turbo");
         let _ = test_event.insert_prop("test_event", true);
 
-        match client.capture_batch(vec![test_event]).await {
+        match client.capture_batch(vec![test_event], false).await {
             Ok(_) => Ok(()),
             Err(e) => {
                 let error_str = e.to_string().to_lowercase();
@@ -274,7 +274,7 @@ impl ErrorReporter {
             })
             .collect();
 
-        if let Err(e) = client.capture_batch(events).await {
+        if let Err(e) = client.capture_batch(events, false).await {
             let error_str = e.to_string().to_lowercase();
 
             if error_str.contains("401") || error_str.contains("unauthorized") {
