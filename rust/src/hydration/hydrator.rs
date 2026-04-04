@@ -93,7 +93,6 @@ where
         Ok(enriched)
     }
 
-
     pub async fn hydrate_batch(
         &self,
         messages: Vec<JetstreamMessage>,

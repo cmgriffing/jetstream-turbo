@@ -988,6 +988,8 @@ impl PostBatchCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
     async fn test_bluesky_client_creation() {
@@ -1014,5 +1016,73 @@ mod tests {
             .await;
 
         assert_eq!(client.get_session_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_refresh_session_with_fallback_reauthenticates_when_refresh_token_expired() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/com.atproto.server.refreshSession"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&mock_server)
+            .await;
+
+        let auth_response = crate::client::auth::AuthResponse {
+            access_jwt: "new_access_token".to_string(),
+            refresh_jwt: "new_refresh_token".to_string(),
+            handle: "test.bsky.social".to_string(),
+            did: "did:plc:test".to_string(),
+            email: None,
+            email_confirmed: None,
+            active: Some(true),
+            expires_at: Some("2026-04-05T00:00:00.000Z".to_string()),
+        };
+
+        Mock::given(method("POST"))
+            .and(path("/com.atproto.server.createSession"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&auth_response))
+            .mount(&mock_server)
+            .await;
+
+        let auth_client = Arc::new(
+            BlueskyAuthClient::with_api_url(
+                "test.bsky.social".to_string(),
+                "app-password".to_string(),
+                mock_server.uri(),
+            )
+            .expect("auth client should be created"),
+        );
+
+        let client = BlueskyClient::new(
+            vec!["stale_access_token".to_string()],
+            Some(auth_client),
+            25,
+            25,
+            150,
+            300,
+        )
+        .expect("client should be created");
+
+        client
+            .refresh_sessions(
+                vec!["stale_access_token".to_string()],
+                Some("expired_refresh_token".to_string()),
+                Some("2026-04-04T00:00:00.000Z".to_string()),
+            )
+            .await;
+
+        client
+            .refresh_session_with_fallback()
+            .await
+            .expect("client should re-authenticate after refresh expiry");
+
+        assert_eq!(
+            client.get_refresh_jwt().await,
+            Some("new_refresh_token".to_string())
+        );
+
+        let sessions = client.session_strings.read().await;
+        assert_eq!(sessions.as_slice(), ["new_access_token"]);
     }
 }
