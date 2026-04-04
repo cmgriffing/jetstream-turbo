@@ -21,6 +21,7 @@ pub struct ErrorEvent {
 #[derive(Clone)]
 pub struct ErrorReporter {
     tx: mpsc::Sender<ReporterMessage>,
+    enabled: bool,
 }
 
 enum ReporterMessage {
@@ -42,7 +43,7 @@ impl ErrorReporter {
         match api_key {
             None => {
                 tracing::info!("PostHog error reporting disabled (no POSTHOG_API_KEY configured)");
-                Self { tx }
+                Self { tx, enabled: false }
             }
             Some(key) => {
                 let host = host.unwrap_or_else(|| "https://us.i.posthog.com".to_string());
@@ -69,12 +70,16 @@ impl ErrorReporter {
                     Self::flush_loop(client, rx).await;
                 });
 
-                Self { tx }
+                Self { tx, enabled: true }
             }
         }
     }
 
     pub fn capture_error(&self, error: &TurboError, context: HashMap<&str, &str>) {
+        if !self.enabled {
+            return;
+        }
+
         let event = ErrorEvent {
             error_type: Self::error_type_name(error),
             message: error.to_string(),
@@ -87,8 +92,14 @@ impl ErrorReporter {
                 .collect(),
         };
 
-        if let Err(e) = self.tx.try_send(ReporterMessage::Event(event)) {
-            tracing::warn!("Error buffer full, dropping error: {}", e);
+        match self.tx.try_send(ReporterMessage::Event(event)) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!("Error buffer full, dropping error event");
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                tracing::warn!("Error reporter unavailable, dropping error event");
+            }
         }
     }
 
@@ -98,14 +109,28 @@ impl ErrorReporter {
         message: &str,
         context: HashMap<&str, &str>,
     ) {
+        if !self.enabled {
+            return;
+        }
+
         let event = Self::unhandled_failure_event(failure_type, message, context);
 
-        if let Err(e) = self.tx.try_send(ReporterMessage::Event(event)) {
-            tracing::warn!("Error buffer full, dropping unhandled failure: {}", e);
+        match self.tx.try_send(ReporterMessage::Event(event)) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!("Error buffer full, dropping unhandled failure event");
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                tracing::warn!("Error reporter unavailable, dropping unhandled failure event");
+            }
         }
     }
 
     pub async fn flush_with_timeout(&self, timeout_duration: Duration) -> bool {
+        if !self.enabled {
+            return false;
+        }
+
         let deadline = Instant::now() + timeout_duration;
         let (done_tx, done_rx) = oneshot::channel();
         let send_timeout = deadline.saturating_duration_since(Instant::now());
