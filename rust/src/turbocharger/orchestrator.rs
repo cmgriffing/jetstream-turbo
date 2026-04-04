@@ -1,4 +1,6 @@
-use crate::client::{BlueskyAuthClient, BlueskyClient, JetstreamClient, MessageSource, PostFetcher, ProfileFetcher};
+use crate::client::{
+    BlueskyAuthClient, BlueskyClient, JetstreamClient, MessageSource, PostFetcher, ProfileFetcher,
+};
 use crate::config::Settings;
 use crate::hydration::{Hydrator, TurboCache};
 use crate::models::enriched::EnrichedRecord;

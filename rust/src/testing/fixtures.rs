@@ -26,10 +26,7 @@ pub fn create_post_message(index: usize) -> JetstreamMessage {
                 "text": text,
                 "langs": ["en"]
             })),
-            cid: Some(format!(
-                "bafyreia{}",
-                &format!("{:032x}", index)[..32]
-            )),
+            cid: Some(format!("bafyreia{}", &format!("{:032x}", index)[..32])),
         }),
     }
 }
@@ -38,10 +35,7 @@ pub fn create_post_message(index: usize) -> JetstreamMessage {
 pub fn create_reply_message(index: usize, parent_did: &str, parent_rkey: &str) -> JetstreamMessage {
     let did = format!("did:plc:replier{:04}", index);
     let rkey = format!("3reply{:06}", index);
-    let parent_uri = format!(
-        "at://{}/app.bsky.feed.post/{}",
-        parent_did, parent_rkey
-    );
+    let parent_uri = format!("at://{}/app.bsky.feed.post/{}", parent_did, parent_rkey);
 
     JetstreamMessage {
         did,

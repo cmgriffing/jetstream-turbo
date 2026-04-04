@@ -87,18 +87,16 @@ impl MessageSource for JetstreamClient {
                                 Ok(Message::Text(text)) => {
                                     trace!("Received message: {}", text);
                                     match parse_message(&text) {
-                                        Ok(message) => {
-                                            match tx.try_send(Ok(message)) {
-                                                Ok(()) => {}
-                                                Err(mpsc::error::TrySendError::Full(_)) => {
-                                                    warn!("Channel full, dropping message");
-                                                }
-                                                Err(mpsc::error::TrySendError::Closed(_)) => {
-                                                    info!("Receiver dropped, stopping stream");
-                                                    return;
-                                                }
+                                        Ok(message) => match tx.try_send(Ok(message)) {
+                                            Ok(()) => {}
+                                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                                warn!("Channel full, dropping message");
                                             }
-                                        }
+                                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                                info!("Receiver dropped, stopping stream");
+                                                return;
+                                            }
+                                        },
                                         Err(e) => {
                                             warn!(
                                                 "Failed to parse message: {:?}. Raw: {}",
