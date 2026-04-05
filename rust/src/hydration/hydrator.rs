@@ -169,8 +169,7 @@ where
         if let Ok(profiles) = profiles_result {
             for (did, maybe_profile) in uncached_dids.iter().zip(profiles) {
                 if let Some(profile) = maybe_profile {
-                    self.cache
-                        .set_user_profile(did.clone(), Arc::new(profile));
+                    self.cache.set_user_profile(did.clone(), Arc::new(profile));
                 }
             }
         }
