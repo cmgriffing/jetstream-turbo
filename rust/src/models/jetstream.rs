@@ -30,15 +30,26 @@ pub struct CommitData {
 }
 
 impl JetstreamMessage {
+    #[inline(always)]
     pub fn extract_at_uri(&self) -> Option<String> {
         if let Some(commit) = &self.commit {
             if let (Some(collection), Some(rkey)) = (&commit.collection, &commit.rkey) {
-                return Some(format!("at://{}/{}/{}", self.did, collection, rkey));
+                let mut uri = String::with_capacity(
+                    "at://".len() + self.did.len() + collection.len() + rkey.len() + 2,
+                );
+                uri.push_str("at://");
+                uri.push_str(&self.did);
+                uri.push('/');
+                uri.push_str(collection);
+                uri.push('/');
+                uri.push_str(rkey);
+                return Some(uri);
             }
         }
         None
     }
 
+    #[inline(always)]
     pub fn extract_did(&self) -> &str {
         &self.did
     }
