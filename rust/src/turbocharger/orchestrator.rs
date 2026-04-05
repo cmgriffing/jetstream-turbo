@@ -29,7 +29,6 @@ pub struct TurboCharger<M, P, Po, S, E> {
     settings: Settings,
     message_source: M,
     bluesky_client: Arc<BlueskyClient>,
-    auth_client: Arc<BlueskyAuthClient>,
     hydrator: Hydrator<P, Po>,
     record_store: Arc<S>,
     event_publisher: Arc<E>,
@@ -127,7 +126,6 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             settings,
             message_source: jetstream_client,
             bluesky_client,
-            auth_client,
             hydrator,
             record_store: sqlite_store.clone(),
             event_publisher: redis_store.clone(),
@@ -396,23 +394,12 @@ where
     pub async fn refresh_sessions(&self) -> TurboResult<()> {
         info!("Refreshing Bluesky session");
 
-        let refresh_jwt = self
-            .bluesky_client
-            .get_refresh_jwt()
-            .await
-            .ok_or_else(|| TurboError::ExpiredToken("No refresh JWT available".to_string()))?;
+        self.bluesky_client.refresh_session_with_fallback().await?;
 
-        let auth_response = self.auth_client.refresh_session(&refresh_jwt).await?;
-
-        self.bluesky_client
-            .refresh_sessions(
-                vec![auth_response.access_jwt],
-                Some(auth_response.refresh_jwt),
-                auth_response.expires_at,
-            )
-            .await;
-
-        info!("Refreshed session for {}", self.settings.bluesky_handle);
+        info!(
+            "Refreshed session credentials for {}",
+            self.settings.bluesky_handle
+        );
         Ok(())
     }
 
