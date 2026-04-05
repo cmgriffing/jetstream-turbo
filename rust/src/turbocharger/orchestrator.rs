@@ -1,4 +1,6 @@
-use crate::client::{BlueskyAuthClient, BlueskyClient, JetstreamClient, MessageSource, PostFetcher, ProfileFetcher};
+use crate::client::{
+    BlueskyAuthClient, BlueskyClient, JetstreamClient, MessageSource, PostFetcher, ProfileFetcher,
+};
 use crate::config::Settings;
 use crate::hydration::{Hydrator, TurboCache};
 use crate::models::enriched::EnrichedRecord;
@@ -207,8 +209,7 @@ where
             if last_stats.elapsed() >= Duration::from_secs(30) {
                 let process_memory = collect_process_memory_diagnostics();
                 let _ = self.observe_memory_sample(&process_memory);
-                let (user_hit_rate, post_hit_rate) =
-                    self.hydrator.get_cache().get_hit_rates();
+                let (user_hit_rate, post_hit_rate) = self.hydrator.get_cache().get_hit_rates();
                 info!(
                     "Cache hit rates: users={:.2}%, posts={:.2}%",
                     user_hit_rate * 100.0,

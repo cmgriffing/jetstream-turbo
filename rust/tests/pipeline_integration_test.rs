@@ -148,11 +148,7 @@ async fn test_batch_25_messages_flows_through_pipeline() {
     let results = pipeline.process_batch(messages).await;
 
     // Verify: all 25 messages produced enriched records
-    assert_eq!(
-        results.len(),
-        25,
-        "should produce 25 enriched records"
-    );
+    assert_eq!(results.len(), 25, "should produce 25 enriched records");
 
     // Verify: record store received all 25
     assert_eq!(
@@ -228,7 +224,9 @@ async fn test_broadcast_delivers_records() {
     let _results = pipeline.process_batch(vec![message]).await;
 
     // Verify broadcast delivered the record
-    let broadcast_record = receiver.try_recv().expect("should receive broadcast record");
+    let broadcast_record = receiver
+        .try_recv()
+        .expect("should receive broadcast record");
     assert_eq!(broadcast_record.get_did(), did);
 }
 

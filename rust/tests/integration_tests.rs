@@ -101,11 +101,10 @@ mod tests {
         let start = std::time::Instant::now();
 
         for i in 0..10000 {
-            cache
-                .set_user_profile(
-                    format!("did:plc:test{}", i),
-                    std::sync::Arc::new(profile.clone()),
-                );
+            cache.set_user_profile(
+                format!("did:plc:test{}", i),
+                std::sync::Arc::new(profile.clone()),
+            );
         }
 
         let set_time = start.elapsed();
@@ -230,8 +229,7 @@ mod tests {
                     labels: None,
                 };
 
-                cache
-                    .set_user_profile(author_did.to_string(), std::sync::Arc::new(new_profile));
+                cache.set_user_profile(author_did.to_string(), std::sync::Arc::new(new_profile));
             }
         }
 

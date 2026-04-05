@@ -1,11 +1,11 @@
 use crate::client::{MessageSource, PostFetcher, ProfileFetcher};
+use crate::models::enriched::EnrichedRecord;
 use crate::models::{
     bluesky::{BlueskyPost, BlueskyProfile},
     errors::TurboResult,
     jetstream::JetstreamMessage,
 };
 use crate::storage::{EventPublisher, RecordStore};
-use crate::models::enriched::EnrichedRecord;
 use futures::Stream;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -67,15 +67,9 @@ impl ProfileFetcher for MockProfileFetcher {
         dids: &[String],
     ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
-        self.requested_dids
-            .lock()
-            .await
-            .push(dids.to_vec());
+        self.requested_dids.lock().await.push(dids.to_vec());
         let profiles = self.profiles.lock().await;
-        let results = dids
-            .iter()
-            .map(|did| profiles.get(did).cloned())
-            .collect();
+        let results = dids.iter().map(|did| profiles.get(did).cloned()).collect();
         Ok(results)
     }
 }
@@ -103,20 +97,11 @@ impl MockPostFetcher {
 }
 
 impl PostFetcher for MockPostFetcher {
-    async fn bulk_fetch_posts(
-        &self,
-        uris: &[String],
-    ) -> TurboResult<Vec<Option<BlueskyPost>>> {
+    async fn bulk_fetch_posts(&self, uris: &[String]) -> TurboResult<Vec<Option<BlueskyPost>>> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
-        self.requested_uris
-            .lock()
-            .await
-            .push(uris.to_vec());
+        self.requested_uris.lock().await.push(uris.to_vec());
         let posts = self.posts.lock().await;
-        let results = uris
-            .iter()
-            .map(|uri| posts.get(uri).cloned())
-            .collect();
+        let results = uris.iter().map(|uri| posts.get(uri).cloned()).collect();
         Ok(results)
     }
 }

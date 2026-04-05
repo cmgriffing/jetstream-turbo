@@ -23,6 +23,7 @@ pub struct EnrichedRecord {
     /// Original jetstream message
     pub message: JetstreamMessage,
     /// Hydrated metadata including profiles and referenced content
+    #[serde(default)]
     pub hydrated_metadata: HydratedMetadata,
     /// Processing timestamp
     pub processed_at: DateTime<Utc>,
@@ -31,20 +32,28 @@ pub struct EnrichedRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct HydratedMetadata {
     /// Author profile information
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub author_profile: Option<Arc<BlueskyProfile>>,
     /// Profiles of mentioned users
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mentioned_profiles: Vec<Arc<BlueskyProfile>>,
     /// Referenced posts (replies, quotes)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub referenced_posts: Vec<ReferencedPost>,
     /// Extracted hashtags
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hashtags: Vec<String>,
     /// Extracted URLs
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub urls: Vec<String>,
     /// Extracted mentions
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mentions: Vec<Mention>,
     /// Content language detection
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub detected_language: Option<String>,
 }
 
@@ -146,6 +155,16 @@ impl HydratedMetadata {
         if !self.mentioned_profiles.iter().any(|p| p.did == profile.did) {
             self.mentioned_profiles.push(profile);
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.author_profile.is_none()
+            && self.mentioned_profiles.is_empty()
+            && self.referenced_posts.is_empty()
+            && self.hashtags.is_empty()
+            && self.urls.is_empty()
+            && self.mentions.is_empty()
+            && self.detected_language.is_none()
     }
 
     pub fn add_referenced_post(&mut self, post: ReferencedPost) {
@@ -266,5 +285,65 @@ mod tests {
         enriched.calculate_cache_hit_rate();
 
         assert_eq!(enriched.metrics.cache_hit_rate, 0.8);
+    }
+
+    #[test]
+    fn test_empty_hydrated_metadata_serializes_compactly() {
+        let message = JetstreamMessage {
+            did: "did:plc:test".to_string(),
+            time_us: Some(1640995200000000),
+            seq: Some(12345),
+            kind: "commit".to_string(),
+            commit: Some(CommitData {
+                rev: Some("test-rev".to_string()),
+                operation_type: "create".to_string(),
+                collection: Some("app.bsky.feed.post".to_string()),
+                rkey: Some("test123".to_string()),
+                record: Some(json!({"text": "Hello world"})),
+                cid: Some("bafyrei".to_string()),
+            }),
+        };
+
+        let enriched = EnrichedRecord::new(message);
+        let json = serde_json::to_string(&enriched).unwrap();
+
+        assert!(json.contains("\"hydrated_metadata\":{}"));
+        assert!(!json.contains("\"mentioned_profiles\""));
+        assert!(!json.contains("\"referenced_posts\""));
+        assert!(!json.contains("\"hashtags\""));
+        assert!(!json.contains("\"urls\""));
+        assert!(!json.contains("\"mentions\""));
+    }
+
+    #[test]
+    fn test_hydrated_metadata_defaults_when_fields_are_missing() {
+        let enriched: EnrichedRecord = serde_json::from_value(json!({
+            "message": {
+                "did": "did:plc:test",
+                "time_us": 1640995200000000_u64,
+                "seq": 12345_u64,
+                "kind": "commit",
+                "commit": {
+                    "rev": "test-rev",
+                    "operation": "create",
+                    "collection": "app.bsky.feed.post",
+                    "rkey": "test123",
+                    "record": {"text": "Hello world"},
+                    "cid": "bafyrei"
+                }
+            },
+            "hydrated_metadata": {},
+            "processed_at": "2024-01-01T00:00:00Z",
+            "metrics": {
+                "hydration_time_ms": 0,
+                "api_calls_count": 0,
+                "cache_hit_rate": 0.0,
+                "cache_hits": 0,
+                "cache_misses": 0
+            }
+        }))
+        .unwrap();
+
+        assert!(enriched.hydrated_metadata.is_empty());
     }
 }
