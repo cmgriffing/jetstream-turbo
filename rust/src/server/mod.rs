@@ -115,7 +115,10 @@ async fn handle_websocket(
     }
 }
 
-pub async fn create_server(port: u16, turbocharger: Arc<ProductionTurboCharger>) -> TurboResult<()> {
+pub async fn create_server(
+    port: u16,
+    turbocharger: Arc<ProductionTurboCharger>,
+) -> TurboResult<()> {
     let readiness_turbocharger = Arc::clone(&turbocharger);
     let app = Router::new()
         .nest("/api/v1", create_router(turbocharger))
