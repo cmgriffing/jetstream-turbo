@@ -218,15 +218,12 @@ impl ErrorReporter {
     }
 
     async fn validate_connection(client: &posthog_rs::Client, api_key: &str) -> Result<(), String> {
-        let mut test_event = posthog_rs::Event::new("$exception", "jetstream-turbo");
-        Self::attach_exception_properties(
-            &mut test_event,
-            "ValidationCheck",
-            "PostHog connectivity check",
-            true,
-        );
+        let mut test_event =
+            posthog_rs::Event::new("posthog_connectivity_check", "jetstream-turbo");
         let _ = test_event.insert_prop("$lib", "jetstream-turbo");
+        let _ = test_event.insert_prop("$process_person_profile", false);
         let _ = test_event.insert_prop("test_event", true);
+        let _ = test_event.insert_prop("check_type", "connectivity");
 
         match client.capture_batch(vec![test_event], false).await {
             Ok(_) => Ok(()),
@@ -478,26 +475,18 @@ mod tests {
         assert_eq!(validation_events.len(), 1);
         assert_eq!(validation_payload["api_key"], "phc_test_project_key");
         assert_eq!(validation_payload["historical_migration"], false);
-        assert_eq!(validation_events[0]["event"], "$exception");
+        assert_eq!(validation_events[0]["event"], "posthog_connectivity_check");
         assert_eq!(validation_events[0]["api_key"], "phc_test_project_key");
         assert_eq!(validation_events[0]["$distinct_id"], "jetstream-turbo");
         assert_eq!(
-            validation_events[0]["properties"]["$exception_level"],
-            "error"
-        );
-        assert_eq!(
-            validation_events[0]["properties"]["$exception_list"][0]["type"],
-            "ValidationCheck"
-        );
-        assert_eq!(
-            validation_events[0]["properties"]["$exception_list"][0]["value"],
-            "PostHog connectivity check"
-        );
-        assert_eq!(
-            validation_events[0]["properties"]["$exception_list"][0]["mechanism"]["handled"],
-            true
+            validation_events[0]["properties"]["$process_person_profile"],
+            false
         );
         assert_eq!(validation_events[0]["properties"]["test_event"], true);
+        assert_eq!(
+            validation_events[0]["properties"]["check_type"],
+            "connectivity"
+        );
 
         let flush_payload: Value =
             serde_json::from_slice(&requests[1].body).expect("flush payload should be json");
