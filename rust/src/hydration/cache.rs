@@ -233,8 +233,7 @@ mod tests {
             labels: None,
         };
 
-        cache
-            .set_user_profile("did:plc:test".to_string(), Arc::new(profile.clone()));
+        cache.set_user_profile("did:plc:test".to_string(), Arc::new(profile.clone()));
 
         let result = cache.get_user_profile("did:plc:test");
         assert!(result.is_some());
@@ -277,17 +276,14 @@ mod tests {
             reply_count: None,
         };
 
-        cache
-            .get_post("at://did:plc:test/app.bsky.feed.post/notfound");
+        cache.get_post("at://did:plc:test/app.bsky.feed.post/notfound");
 
-        cache
-            .set_post(
-                "at://did:plc:test/app.bsky.feed.post/test".to_string(),
-                Arc::new(post.clone()),
-            );
+        cache.set_post(
+            "at://did:plc:test/app.bsky.feed.post/test".to_string(),
+            Arc::new(post.clone()),
+        );
 
-        let result = cache
-            .get_post("at://did:plc:test/app.bsky.feed.post/test");
+        let result = cache.get_post("at://did:plc:test/app.bsky.feed.post/test");
         assert!(result.is_some());
         assert_eq!(result.unwrap().text, "Hello world");
 
@@ -318,8 +314,7 @@ mod tests {
             labels: None,
         };
 
-        cache
-            .set_user_profile("did:plc:test1".to_string(), Arc::new(profile));
+        cache.set_user_profile("did:plc:test1".to_string(), Arc::new(profile));
         cache.get_user_profile("did:plc:test1");
 
         let (user_hit_rate, post_hit_rate) = cache.get_hit_rates();

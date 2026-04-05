@@ -1,6 +1,6 @@
 use crate::models::{bluesky::BlueskyProfile, jetstream::JetstreamMessage};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use std::sync::Arc;
 
 fn serialize_arc_str<S>(value: &Arc<str>, serializer: S) -> Result<S::Ok, S::Error>
@@ -8,14 +8,6 @@ where
     S: Serializer,
 {
     serializer.serialize_str(value)
-}
-
-fn deserialize_arc_str<'de, D>(deserializer: D) -> Result<Arc<str>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s: String = Deserialize::deserialize(deserializer)?;
-    Ok(Arc::from(s))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,10 +45,7 @@ pub struct ReferencedPost {
     pub uri: String,
     pub cid: String,
     pub text: String,
-    #[serde(
-        serialize_with = "serialize_arc_str",
-        deserialize_with = "deserialize_arc_str"
-    )]
+    #[serde(serialize_with = "serialize_arc_str")]
     pub author_did: Arc<str>,
     pub author_handle: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -67,10 +56,7 @@ pub struct ReferencedPost {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mention {
-    #[serde(
-        serialize_with = "serialize_arc_str",
-        deserialize_with = "deserialize_arc_str"
-    )]
+    #[serde(serialize_with = "serialize_arc_str")]
     pub did: Arc<str>,
     pub handle: Option<String>,
     pub display_name: Option<String>,
@@ -78,7 +64,7 @@ pub struct Mention {
     pub end_byte: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProcessingMetrics {
     /// Time taken to hydrate this record
     pub hydration_time_ms: u64,
@@ -92,6 +78,7 @@ pub struct ProcessingMetrics {
 }
 
 impl EnrichedRecord {
+    #[inline(always)]
     pub fn new(message: JetstreamMessage) -> Self {
         Self {
             message,
@@ -115,14 +102,17 @@ impl EnrichedRecord {
         }
     }
 
+    #[inline(always)]
     pub fn get_at_uri(&self) -> Option<String> {
         self.message.extract_at_uri()
     }
 
+    #[inline(always)]
     pub fn get_did(&self) -> &str {
         self.message.extract_did()
     }
 
+    #[inline(always)]
     pub fn get_text(&self) -> Option<&str> {
         self.message
             .commit
@@ -131,6 +121,7 @@ impl EnrichedRecord {
             .and_then(|r| r.get("text").and_then(|v| v.as_str()))
     }
 
+    #[inline(always)]
     pub fn calculate_cache_hit_rate(&mut self) {
         let total = self.metrics.cache_hits + self.metrics.cache_misses;
         self.metrics.cache_hit_rate = if total > 0 {
