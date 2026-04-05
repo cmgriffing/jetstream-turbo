@@ -433,7 +433,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .and(path("/i/v0/e/"))
+            .and(path("/batch/"))
             .respond_with(ResponseTemplate::new(200))
             .mount(&mock_server)
             .await;
@@ -469,6 +469,8 @@ mod tests {
 
         let validation_payload: Value =
             serde_json::from_slice(&requests[0].body).expect("validation payload should be json");
+        assert_eq!(validation_payload["api_key"], "phc_test_project_key");
+        assert_eq!(validation_payload["historical_migration"], false);
         let validation_events = validation_payload
             .get("batch")
             .and_then(Value::as_array)
@@ -499,6 +501,8 @@ mod tests {
 
         let flush_payload: Value =
             serde_json::from_slice(&requests[1].body).expect("flush payload should be json");
+        assert_eq!(flush_payload["api_key"], "phc_test_project_key");
+        assert_eq!(flush_payload["historical_migration"], false);
         let flushed_events = flush_payload
             .get("batch")
             .and_then(Value::as_array)

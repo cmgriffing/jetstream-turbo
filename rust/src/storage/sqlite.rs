@@ -2,11 +2,14 @@ use crate::models::{enriched::EnrichedRecord, TurboResult};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use simd_json::to_string as simd_json_to_string;
-use sqlx::{sqlite::SqliteConnectOptions, sqlite::SqliteJournalMode, Row, SqlitePool};
+use sqlx::{
+    sqlite::SqliteConnectOptions, sqlite::SqliteJournalMode, sqlite::SqlitePoolOptions, Row,
+    SqliteConnection, SqlitePool,
+};
 use std::path::Path;
 use std::time::Instant;
 use tokio::time::{sleep, Duration};
-use tracing::{error, info, instrument, trace};
+use tracing::{error, info, instrument, trace, warn};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CleanupResult {
@@ -72,10 +75,19 @@ impl SQLiteStore {
             connect_options = connect_options.journal_mode(SqliteJournalMode::Wal);
         }
 
-        let pool = SqlitePool::connect_with(connect_options).await?;
-
-        // Apply performance optimizations
-        Self::apply_pragmas(&pool, pragma_config).await?;
+        let pool = SqlitePoolOptions::new()
+            .after_connect({
+                let db_path = db_path_str.clone();
+                move |conn, _meta| {
+                    let db_path = db_path.clone();
+                    Box::pin(async move {
+                        Self::apply_pragmas(conn, pragma_config, &db_path).await?;
+                        Ok(())
+                    })
+                }
+            })
+            .connect_with(connect_options)
+            .await?;
 
         // Initialize schema
         Self::initialize_schema(&pool).await?;
@@ -119,30 +131,31 @@ impl SQLiteStore {
     }
 
     async fn apply_pragmas(
-        pool: &SqlitePool,
+        conn: &mut SqliteConnection,
         pragma_config: SQLitePragmaConfig,
-    ) -> TurboResult<()> {
+        db_path: &str,
+    ) -> Result<(), sqlx::Error> {
         // synchronous = NORMAL: Good performance with WAL mode, still safe
         sqlx::query("PRAGMA synchronous = NORMAL")
-            .execute(pool)
+            .execute(&mut *conn)
             .await?;
 
         let cache_size_pragma = -(pragma_config.cache_size_kib as i64);
         // cache_size uses negative values to mean kibibytes.
         sqlx::query(&format!("PRAGMA cache_size = {cache_size_pragma}"))
-            .execute(pool)
+            .execute(&mut *conn)
             .await?;
 
         // temp_store = MEMORY: Keep temp tables/indexes in memory
         sqlx::query("PRAGMA temp_store = MEMORY")
-            .execute(pool)
+            .execute(&mut *conn)
             .await?;
 
         let mmap_size_bytes = pragma_config.mmap_size_mb.saturating_mul(1024 * 1024);
         // mmap_size for faster reads (skip for in-memory)
         // In-memory databases don't benefit from mmap
         let _ = sqlx::query(&format!("PRAGMA mmap_size = {mmap_size_bytes}"))
-            .execute(pool)
+            .execute(&mut *conn)
             .await;
 
         // Limit WAL size to prevent unbounded growth.
@@ -152,15 +165,40 @@ impl SQLiteStore {
         sqlx::query(&format!(
             "PRAGMA journal_size_limit = {journal_size_limit_bytes}"
         ))
-        .execute(pool)
+        .execute(&mut *conn)
         .await?;
 
+        let (effective_mmap_size_bytes,): (i64,) = sqlx::query_as("PRAGMA mmap_size")
+            .fetch_one(&mut *conn)
+            .await?;
+        let (effective_journal_size_limit_bytes,): (i64,) =
+            sqlx::query_as("PRAGMA journal_size_limit")
+                .fetch_one(&mut *conn)
+                .await?;
+
         info!(
-            "Applied SQLite PRAGMAs: cache_size={}KiB, mmap_size={}MB, journal_size_limit={}MB",
+            "Applied SQLite PRAGMAs to {db_path}: cache_size={}KiB, mmap_size={}MB (effective {} bytes), journal_size_limit={}MB (effective {} bytes)",
             pragma_config.cache_size_kib,
             pragma_config.mmap_size_mb,
-            pragma_config.journal_size_limit_mb
+            effective_mmap_size_bytes,
+            pragma_config.journal_size_limit_mb,
+            effective_journal_size_limit_bytes
         );
+
+        if pragma_config.mmap_size_mb > 0 && effective_mmap_size_bytes == 0 {
+            warn!(
+                "SQLite mmap_size requested for {db_path} but remains disabled on this connection"
+            );
+        }
+
+        if effective_journal_size_limit_bytes != journal_size_limit_bytes as i64 {
+            warn!(
+                "SQLite journal_size_limit requested for {db_path} but effective value is {} bytes instead of {} bytes",
+                effective_journal_size_limit_bytes,
+                journal_size_limit_bytes
+            );
+        }
+
         Ok(())
     }
 
@@ -592,13 +630,41 @@ mod tests {
             snapshot.cache_size_pages < 0,
             "cache_size pragma should remain in kibibyte mode"
         );
-        assert_eq!(snapshot.mmap_size_bytes, (256 * 1024 * 1024) as i64);
+        assert!(
+            snapshot.mmap_size_bytes == (256 * 1024 * 1024) as i64
+                || snapshot.mmap_size_bytes == 0,
+            "mmap_size should be configured when supported, or remain disabled in environments where SQLite declines it"
+        );
         assert!(
             snapshot.journal_size_limit_bytes == (512 * 1024 * 1024) as i64
                 || snapshot.journal_size_limit_bytes == -1,
             "journal_size_limit should be configured or report SQLite's unlimited sentinel"
         );
 
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_connection_scoped_pragmas_are_applied_to_each_pool_connection() {
+        let store = create_test_db().await;
+
+        let mut conn1 = store.pool.acquire().await.unwrap();
+        let mut conn2 = store.pool.acquire().await.unwrap();
+
+        let (cache_size_1,): (i64,) = sqlx::query_as("PRAGMA cache_size")
+            .fetch_one(&mut *conn1)
+            .await
+            .unwrap();
+        let (cache_size_2,): (i64,) = sqlx::query_as("PRAGMA cache_size")
+            .fetch_one(&mut *conn2)
+            .await
+            .unwrap();
+
+        assert_eq!(cache_size_1, -(64 * 1024) as i64);
+        assert_eq!(cache_size_2, -(64 * 1024) as i64);
+
+        drop(conn2);
+        drop(conn1);
         store.close().await.unwrap();
     }
 
