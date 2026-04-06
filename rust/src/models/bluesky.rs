@@ -25,8 +25,11 @@ pub struct BlueskyProfile {
     pub follows_count: Option<u64>,
     #[serde(default, rename = "postsCount")]
     pub posts_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub indexed_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<Label>>,
 }
 

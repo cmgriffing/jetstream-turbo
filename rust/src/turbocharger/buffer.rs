@@ -50,17 +50,17 @@ impl MessageBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::jetstream::CommitData;
+    use crate::models::jetstream::{CommitData, MessageKind, OperationType};
 
     fn create_test_message(seq: u64) -> JetstreamMessage {
         JetstreamMessage {
             did: "did:plc:test".to_string(),
             seq: Some(seq),
             time_us: Some(1640995200000000),
-            kind: "commit".to_string(),
+            kind: MessageKind::Commit,
             commit: Some(CommitData {
                 rev: Some("test-rev".to_string()),
-                operation_type: "create".to_string(),
+                operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some(format!("test-rkey-{}", seq)),
                 record: Some(serde_json::json!({"text": format!("Test message {}", seq)})),

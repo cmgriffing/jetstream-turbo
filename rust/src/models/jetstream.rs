@@ -1,31 +1,51 @@
 use crate::utils::serde_utils::string_utils::is_valid_at_uri;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageKind {
+    Commit,
+    Identity,
+    Account,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OperationType {
+    Create,
+    Update,
+    Delete,
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct JetstreamMessage {
     pub did: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_us: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
-    pub kind: String,
-    #[serde(default)]
+    pub kind: MessageKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<CommitData>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CommitData {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rev: Option<String>,
     #[serde(rename = "operation")]
-    pub operation_type: String,
-    #[serde(default)]
+    pub operation_type: OperationType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rkey: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
 }
 
@@ -56,7 +76,7 @@ impl JetstreamMessage {
 
     pub fn is_create_operation(&self) -> bool {
         if let Some(commit) = &self.commit {
-            return commit.operation_type == "create";
+            return commit.operation_type == OperationType::Create;
         }
         false
     }

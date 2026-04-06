@@ -2,7 +2,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use jetstream_turbo_rs::hydration::TurboCache;
 use jetstream_turbo_rs::models::bluesky::{BlueskyPost, BlueskyProfile};
 use jetstream_turbo_rs::models::enriched::{EnrichedRecord, HydratedMetadata, ProcessingMetrics};
-use jetstream_turbo_rs::models::jetstream::{CommitData, JetstreamMessage};
+use jetstream_turbo_rs::models::jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType};
 use jetstream_turbo_rs::storage::{SQLitePragmaConfig, SQLiteStore};
 use serde_json::json;
 use std::sync::Arc;
@@ -47,10 +47,10 @@ fn create_test_message(i: usize) -> JetstreamMessage {
         did: format!("did:plc:test{}", i),
         time_us: Some(1640995200000000 + i as u64),
         seq: Some(i as u64),
-        kind: "commit".to_string(),
+        kind: MessageKind::Commit,
         commit: Some(CommitData {
             rev: Some(format!("3x{}", i)),
-            operation_type: "create".to_string(),
+            operation_type: OperationType::Create,
             collection: Some("app.bsky.feed.post".to_string()),
             rkey: Some(format!("{}", i)),
             record: Some(json!({

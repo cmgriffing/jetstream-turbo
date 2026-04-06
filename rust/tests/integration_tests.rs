@@ -3,7 +3,10 @@ mod tests {
     use jetstream_turbo_rs::client::{BlueskyAuthClient, JetstreamClient};
     use jetstream_turbo_rs::config::Settings;
     use jetstream_turbo_rs::hydration::TurboCache;
-    use jetstream_turbo_rs::models::{bluesky::BlueskyProfile, jetstream::JetstreamMessage};
+    use jetstream_turbo_rs::models::{
+        bluesky::BlueskyProfile,
+        jetstream::{JetstreamMessage, MessageKind, OperationType},
+    };
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -194,10 +197,10 @@ mod tests {
             did: "did:plc:user1".to_string(),
             seq: Some(1),
             time_us: Some(1704067200000000),
-            kind: "commit".to_string(),
+            kind: MessageKind::Commit,
             commit: Some(jetstream_turbo_rs::models::jetstream::CommitData {
                 rev: Some("test-rev".to_string()),
-                operation_type: "create".to_string(),
+                operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("1".to_string()),
                 record: Some(serde_json::json!({"text": "Hello world"})),

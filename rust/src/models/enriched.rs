@@ -229,7 +229,7 @@ impl HydratedMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::jetstream::CommitData;
+    use crate::models::jetstream::{CommitData, MessageKind, OperationType};
     use serde_json::json;
 
     #[test]
@@ -238,10 +238,10 @@ mod tests {
             did: "did:plc:test".to_string(),
             time_us: Some(1640995200000000),
             seq: Some(12345),
-            kind: "commit".to_string(),
+            kind: MessageKind::Commit,
             commit: Some(CommitData {
                 rev: Some("test-rev".to_string()),
-                operation_type: "create".to_string(),
+                operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("test123".to_string()),
                 record: Some(json!({"text": "Hello world"})),
@@ -260,10 +260,10 @@ mod tests {
             did: "did:plc:test".to_string(),
             time_us: Some(1640995200000000),
             seq: Some(12345),
-            kind: "commit".to_string(),
+            kind: MessageKind::Commit,
             commit: Some(CommitData {
                 rev: Some("test-rev".to_string()),
-                operation_type: "create".to_string(),
+                operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("test123".to_string()),
                 record: Some(json!({"text": "Hello"})),
@@ -284,10 +284,10 @@ mod tests {
             did: "did:plc:test".to_string(),
             time_us: Some(1640995200000000),
             seq: Some(12345),
-            kind: "commit".to_string(),
+            kind: MessageKind::Commit,
             commit: Some(CommitData {
                 rev: Some("test-rev".to_string()),
-                operation_type: "create".to_string(),
+                operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("test123".to_string()),
                 record: Some(json!({"text": "Hello world"})),
