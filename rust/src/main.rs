@@ -7,8 +7,12 @@ use jetstream_turbo_rs::turbocharger::ProductionTurboCharger as TurboCharger;
 use std::any::Any;
 use std::collections::HashMap;
 use std::env;
+use std::path::PathBuf;
 use std::time::Duration;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
+use tracing_subscriber::{filter::filter_fn, layer::SubscriberExt, util::SubscriberInitExt, Layer};
+
+const BATCH_REPORT_LOG_TARGET: &str = "jetstream_turbo.batch_report";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -65,7 +69,7 @@ async fn main() -> Result<()> {
     });
 
     // Initialize tracing
-    init_tracing(&log_level)?;
+    let _log_guards = init_tracing(&log_level)?;
 
     // Load configuration
     let settings = Settings::from_env()?;
@@ -256,16 +260,129 @@ fn panic_payload_to_string(payload: &(dyn Any + Send)) -> String {
     }
 }
 
-fn init_tracing(log_level: &str) -> Result<()> {
+fn init_tracing(log_level: &str) -> Result<Vec<WorkerGuard>> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
 
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer().json())
-        .init();
+    let stdout_layer = tracing_subscriber::fmt::layer().json();
+    let main_file_filter = filter_fn(|metadata| metadata.target() != BATCH_REPORT_LOG_TARGET);
+    let batch_file_filter = filter_fn(|metadata| metadata.target() == BATCH_REPORT_LOG_TARGET);
 
-    Ok(())
+    let main_file_logging = create_file_log_writer(None);
+    let batch_file_logging = create_file_log_writer(Some("batches"));
+
+    match (main_file_logging, batch_file_logging) {
+        (
+            Some((main_file_writer, main_guard, main_log_path)),
+            Some((batch_file_writer, batch_guard, batch_log_path)),
+        ) => {
+            let file_layer = tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(main_file_writer)
+                .with_filter(main_file_filter);
+            let batch_file_layer = tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(batch_file_writer)
+                .with_filter(batch_file_filter);
+
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(stdout_layer)
+                .with(file_layer)
+                .with(batch_file_layer)
+                .init();
+
+            tracing::info!(log_path = %main_log_path.display(), "File logging enabled");
+            tracing::info!(batch_log_path = %batch_log_path.display(), "Batch file logging enabled");
+            Ok(vec![main_guard, batch_guard])
+        }
+        (Some((file_writer, guard, log_path)), None) => {
+            let file_layer = tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(file_writer)
+                .with_filter(main_file_filter);
+
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(stdout_layer)
+                .with(file_layer)
+                .init();
+
+            tracing::info!(log_path = %log_path.display(), "File logging enabled");
+            Ok(vec![guard])
+        }
+        (None, Some((batch_file_writer, batch_guard, batch_log_path))) => {
+            let batch_file_layer = tracing_subscriber::fmt::layer()
+                .json()
+                .with_writer(batch_file_writer)
+                .with_filter(batch_file_filter);
+
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(stdout_layer)
+                .with(batch_file_layer)
+                .init();
+
+            tracing::info!(batch_log_path = %batch_log_path.display(), "Batch file logging enabled");
+            Ok(vec![batch_guard])
+        }
+        (None, None) => {
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(stdout_layer)
+                .init();
+
+            Ok(Vec::new())
+        }
+    }
+}
+
+fn create_file_log_writer(suffix: Option<&str>) -> Option<(NonBlocking, WorkerGuard, PathBuf)> {
+    let log_path = default_log_path(suffix)?;
+    let parent = log_path.parent()?;
+    let file_name = log_path.file_name()?.to_str()?;
+
+    if std::fs::create_dir_all(parent).is_err() {
+        return None;
+    }
+
+    let appender = tracing_appender::rolling::never(parent, file_name);
+    let (writer, guard) = tracing_appender::non_blocking(appender);
+    Some((writer, guard, log_path))
+}
+
+fn default_log_path(suffix: Option<&str>) -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let executable_dir = executable.parent()?;
+    let executable_name = executable.file_stem()?.to_str()?;
+    let file_name = match suffix {
+        Some(suffix) => format!("{executable_name}-{suffix}.log"),
+        None => format!("{executable_name}.log"),
+    };
+    Some(executable_dir.join(file_name))
+}
+
+#[cfg(test)]
+mod logging_tests {
+    use super::default_log_path;
+
+    #[test]
+    fn default_log_path_uses_executable_directory() {
+        let log_path = default_log_path(None).expect("log path should resolve");
+        assert_eq!(
+            log_path.extension().and_then(|ext| ext.to_str()),
+            Some("log")
+        );
+    }
+
+    #[test]
+    fn batch_log_path_uses_suffix() {
+        let log_path = default_log_path(Some("batches")).expect("log path should resolve");
+        assert!(log_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.contains("-batches.log")));
+    }
 }
 
 #[cfg(test)]

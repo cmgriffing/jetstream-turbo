@@ -17,6 +17,51 @@ pub trait MessageSource {
 }
 
 const DEFAULT_CHANNEL_CAPACITY: usize = 10_000;
+const DROP_LOG_INTERVAL: Duration = Duration::from_secs(30);
+
+#[derive(Debug)]
+struct DropLogState {
+    dropped_since_last_log: u64,
+    dropped_total: u64,
+    in_backpressure: bool,
+}
+
+impl DropLogState {
+    fn new() -> Self {
+        Self {
+            dropped_since_last_log: 0,
+            dropped_total: 0,
+            in_backpressure: false,
+        }
+    }
+
+    fn record_drop(&mut self) {
+        self.dropped_since_last_log += 1;
+        self.dropped_total += 1;
+        self.in_backpressure = true;
+    }
+
+    fn take_snapshot(&mut self) -> Option<(u64, u64)> {
+        if self.dropped_since_last_log == 0 {
+            return None;
+        }
+
+        let dropped_since_last_log = self.dropped_since_last_log;
+        let dropped_total = self.dropped_total;
+        self.dropped_since_last_log = 0;
+
+        Some((dropped_since_last_log, dropped_total))
+    }
+
+    fn mark_recovered(&mut self) -> Option<u64> {
+        if !self.in_backpressure {
+            return None;
+        }
+
+        self.in_backpressure = false;
+        Some(self.dropped_total)
+    }
+}
 
 pub struct JetstreamClient {
     endpoints: Vec<String>,
@@ -66,6 +111,10 @@ impl MessageSource for JetstreamClient {
         tokio::spawn(async move {
             let mut current_endpoint = 0;
             let mut reconnect_attempts = 0;
+            let mut drop_log_state = DropLogState::new();
+            let mut drop_log_interval = tokio::time::interval(DROP_LOG_INTERVAL);
+
+            drop_log_interval.tick().await;
 
             loop {
                 let endpoint = &endpoints[current_endpoint];
@@ -82,15 +131,44 @@ impl MessageSource for JetstreamClient {
                         let (_, mut read) = ws_stream.split();
 
                         // Process messages
-                        while let Some(msg_result) = read.next().await {
-                            match msg_result {
+                        loop {
+                            tokio::select! {
+                                _ = drop_log_interval.tick() => {
+                                    if let Some((dropped_since_last_log, dropped_total)) =
+                                        drop_log_state.take_snapshot()
+                                    {
+                                        warn!(
+                                            dropped_since_last_log,
+                                            dropped_total,
+                                            channel_capacity = tx.max_capacity(),
+                                            endpoint,
+                                            "Jetstream input channel saturated; dropping messages"
+                                        );
+                                    }
+                                }
+                                msg_result = read.next() => {
+                                    let Some(msg_result) = msg_result else {
+                                        break;
+                                    };
+
+                                    match msg_result {
                                 Ok(Message::Text(text)) => {
                                     trace!("Received message: {}", text);
                                     match parse_message(&text) {
                                         Ok(message) => match tx.try_send(Ok(message)) {
-                                            Ok(()) => {}
+                                            Ok(()) => {
+                                                if let Some(dropped_total) =
+                                                    drop_log_state.mark_recovered()
+                                                {
+                                                    info!(
+                                                        dropped_total,
+                                                        endpoint,
+                                                        "Jetstream input channel recovered"
+                                                    );
+                                                }
+                                            }
                                             Err(mpsc::error::TrySendError::Full(_)) => {
-                                                warn!("Channel full, dropping message");
+                                                drop_log_state.record_drop();
                                             }
                                             Err(mpsc::error::TrySendError::Closed(_)) => {
                                                 info!("Receiver dropped, stopping stream");
@@ -127,6 +205,8 @@ impl MessageSource for JetstreamClient {
                                 Err(e) => {
                                     error!("WebSocket error: {}", e);
                                     break;
+                                }
+                            }
                                 }
                             }
                         }
@@ -265,5 +345,24 @@ mod tests {
         let result = client.parse_message(empty_did);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), TurboError::InvalidMessage(_)));
+    }
+
+    #[test]
+    fn test_drop_log_state_tracks_drops_and_recovery() {
+        let mut state = DropLogState::new();
+
+        assert_eq!(state.take_snapshot(), None);
+        assert_eq!(state.mark_recovered(), None);
+
+        state.record_drop();
+        state.record_drop();
+        assert_eq!(state.take_snapshot(), Some((2, 2)));
+        assert_eq!(state.take_snapshot(), None);
+        assert_eq!(state.mark_recovered(), Some(2));
+        assert_eq!(state.mark_recovered(), None);
+
+        state.record_drop();
+        assert_eq!(state.take_snapshot(), Some((1, 3)));
+        assert_eq!(state.mark_recovered(), Some(3));
     }
 }

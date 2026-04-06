@@ -22,7 +22,14 @@ use tokio::time::{interval, sleep};
 use tracing::{error, info, trace};
 
 const BATCH_SIZE: usize = 25;
-const MAX_WAIT_TIME_MS: u64 = 200;
+const BATCH_REPORT_LOG_TARGET: &str = "jetstream_turbo.batch_report";
+// The hydrator can consume up to one profile batch and one post batch per flush.
+// At 200ms, the time-based path can generate 5 flushes/sec, which maps to 10 API
+// requests/sec in the worst case and fully consumes the shared Bluesky limit.
+// 250ms keeps the timer path below that ceiling and gives partial batches a bit
+// longer to fill without changing the API-imposed batch size of 25.
+const MAX_WAIT_TIME_MS: u64 = 250;
+const BATCH_REPORT_INTERVAL_SECS: u64 = 5 * 60;
 const MEMORY_PEAK_WINDOW_SECS: u64 = 24 * 60 * 60;
 
 pub struct TurboCharger<M, P, Po, S, E> {
@@ -53,8 +60,11 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
         );
 
         // Initialize Jetstream client
-        let jetstream_client = JetstreamClient::with_defaults(settings.jetstream_hosts.clone())
-            .with_channel_capacity(settings.channel_capacity);
+        let jetstream_client = JetstreamClient::new(
+            settings.jetstream_hosts.clone(),
+            settings.wanted_collections.clone(),
+        )
+        .with_channel_capacity(settings.channel_capacity);
 
         // Authenticate directly with Bluesky
         let auth_client = Arc::new(BlueskyAuthClient::new(
@@ -153,6 +163,7 @@ where
         let message_stream = self.message_source.stream_messages().await?;
 
         let mut last_stats = std::time::Instant::now();
+        let mut batch_reporter = BatchReporter::new(BATCH_SIZE);
         let mut buffer: Vec<JetstreamMessage> = Vec::with_capacity(BATCH_SIZE);
         let mut flush_interval = interval(Duration::from_millis(MAX_WAIT_TIME_MS));
         let mut batch_buffer: Vec<JetstreamMessage> = Vec::with_capacity(BATCH_SIZE);
@@ -170,6 +181,7 @@ where
                             }
 
                             if buffer.len() >= BATCH_SIZE {
+                                batch_reporter.record(BatchFlushReason::Full, buffer.len());
                                 // Reuse batch_buffer to avoid allocation
                                 batch_buffer.clear();
                                 batch_buffer.extend(buffer.drain(..));
@@ -188,6 +200,12 @@ where
                 }
                 _ = flush_interval.tick() => {
                     if !buffer.is_empty() {
+                        let flush_reason = if buffer.len() >= BATCH_SIZE {
+                            BatchFlushReason::Full
+                        } else {
+                            BatchFlushReason::Timer
+                        };
+                        batch_reporter.record(flush_reason, buffer.len());
                         // Reuse batch_buffer to avoid allocation
                         batch_buffer.clear();
                         batch_buffer.extend(buffer.drain(..));
@@ -214,14 +232,18 @@ where
                     user_hit_rate * 100.0,
                     post_hit_rate * 100.0
                 );
+                batch_reporter.maybe_log();
 
                 last_stats = std::time::Instant::now();
             }
         }
 
         if !buffer.is_empty() {
+            batch_reporter.record(BatchFlushReason::Shutdown, buffer.len());
             self.process_batch(buffer).await?;
         }
+
+        batch_reporter.log_if_window_has_data();
 
         self.drain_batch_tasks(&mut batch_tasks).await?;
 
@@ -772,6 +794,167 @@ fn derive_health(redis_connected: bool, sqlite_available: bool, session_count: u
     redis_connected && sqlite_available && session_count > 0
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchFlushReason {
+    Full,
+    Timer,
+    Shutdown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BatchFlushSnapshot {
+    total_batches: u64,
+    total_messages: u64,
+    average_batch_size: f64,
+    average_fill_percent: f64,
+    full_batches: u64,
+    timer_batches: u64,
+    shutdown_batches: u64,
+    partial_batches: u64,
+    min_batch_size: usize,
+    max_batch_size: usize,
+}
+
+#[derive(Debug, Default)]
+struct BatchFlushCounters {
+    total_batches: u64,
+    total_messages: u64,
+    full_batches: u64,
+    timer_batches: u64,
+    shutdown_batches: u64,
+    partial_batches: u64,
+    min_batch_size: Option<usize>,
+    max_batch_size: usize,
+}
+
+impl BatchFlushCounters {
+    fn record(&mut self, batch_size_limit: usize, reason: BatchFlushReason, batch_len: usize) {
+        self.total_batches += 1;
+        self.total_messages += batch_len as u64;
+        self.min_batch_size = Some(
+            self.min_batch_size
+                .map(|current| current.min(batch_len))
+                .unwrap_or(batch_len),
+        );
+        self.max_batch_size = self.max_batch_size.max(batch_len);
+
+        if batch_len < batch_size_limit {
+            self.partial_batches += 1;
+        }
+
+        match reason {
+            BatchFlushReason::Full => self.full_batches += 1,
+            BatchFlushReason::Timer => self.timer_batches += 1,
+            BatchFlushReason::Shutdown => self.shutdown_batches += 1,
+        }
+    }
+
+    fn snapshot(&self, batch_size_limit: usize) -> Option<BatchFlushSnapshot> {
+        if self.total_batches == 0 {
+            return None;
+        }
+
+        let average_batch_size = self.total_messages as f64 / self.total_batches as f64;
+        let average_fill_percent = (average_batch_size / batch_size_limit as f64) * 100.0;
+
+        Some(BatchFlushSnapshot {
+            total_batches: self.total_batches,
+            total_messages: self.total_messages,
+            average_batch_size,
+            average_fill_percent,
+            full_batches: self.full_batches,
+            timer_batches: self.timer_batches,
+            shutdown_batches: self.shutdown_batches,
+            partial_batches: self.partial_batches,
+            min_batch_size: self.min_batch_size.unwrap_or(0),
+            max_batch_size: self.max_batch_size,
+        })
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[derive(Debug)]
+struct BatchReporter {
+    batch_size_limit: usize,
+    window_started_at: std::time::Instant,
+    last_reported_at: std::time::Instant,
+    lifetime: BatchFlushCounters,
+    window: BatchFlushCounters,
+}
+
+impl BatchReporter {
+    fn new(batch_size_limit: usize) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            batch_size_limit,
+            window_started_at: now,
+            last_reported_at: now,
+            lifetime: BatchFlushCounters::default(),
+            window: BatchFlushCounters::default(),
+        }
+    }
+
+    fn record(&mut self, reason: BatchFlushReason, batch_len: usize) {
+        self.lifetime
+            .record(self.batch_size_limit, reason, batch_len);
+        self.window.record(self.batch_size_limit, reason, batch_len);
+    }
+
+    fn maybe_log(&mut self) {
+        if self.last_reported_at.elapsed() < Duration::from_secs(BATCH_REPORT_INTERVAL_SECS) {
+            return;
+        }
+
+        self.log_if_window_has_data();
+    }
+
+    fn log_if_window_has_data(&mut self) {
+        let Some(window) = self.window.snapshot(self.batch_size_limit) else {
+            self.last_reported_at = std::time::Instant::now();
+            self.window_started_at = self.last_reported_at;
+            return;
+        };
+
+        let lifetime = self
+            .lifetime
+            .snapshot(self.batch_size_limit)
+            .expect("lifetime counters must exist when window counters exist");
+        let window_elapsed = self.window_started_at.elapsed().as_secs();
+
+        info!(
+            target: BATCH_REPORT_LOG_TARGET,
+            report_window_seconds = window_elapsed,
+            batch_size_limit = self.batch_size_limit,
+            window_batches = window.total_batches,
+            window_messages = window.total_messages,
+            window_avg_batch_size = format_args!("{:.2}", window.average_batch_size),
+            window_avg_fill_percent = format_args!("{:.1}", window.average_fill_percent),
+            window_full_batches = window.full_batches,
+            window_timer_batches = window.timer_batches,
+            window_shutdown_batches = window.shutdown_batches,
+            window_partial_batches = window.partial_batches,
+            window_min_batch_size = window.min_batch_size,
+            window_max_batch_size = window.max_batch_size,
+            lifetime_batches = lifetime.total_batches,
+            lifetime_messages = lifetime.total_messages,
+            lifetime_avg_batch_size = format_args!("{:.2}", lifetime.average_batch_size),
+            lifetime_avg_fill_percent = format_args!("{:.1}", lifetime.average_fill_percent),
+            lifetime_full_batches = lifetime.full_batches,
+            lifetime_timer_batches = lifetime.timer_batches,
+            lifetime_shutdown_batches = lifetime.shutdown_batches,
+            lifetime_partial_batches = lifetime.partial_batches,
+            "Jetstream batch flush report"
+        );
+
+        self.window.reset();
+        self.last_reported_at = std::time::Instant::now();
+        self.window_started_at = self.last_reported_at;
+    }
+}
+
 fn collect_process_memory_diagnostics() -> ProcessMemoryDiagnostics {
     let pid = std::process::id();
 
@@ -1066,5 +1249,38 @@ VmRSS:\t  1024 kB\n";
 
         let result = ProductionTurboCharger::resolve_batch_task_result(Err(join_error));
         assert!(matches!(result, Err(TurboError::TaskJoin(_))));
+    }
+
+    #[test]
+    fn batch_flush_counters_capture_mix_of_full_and_partial_batches() {
+        let mut counters = BatchFlushCounters::default();
+
+        counters.record(BATCH_SIZE, BatchFlushReason::Full, BATCH_SIZE);
+        counters.record(BATCH_SIZE, BatchFlushReason::Timer, 12);
+        counters.record(BATCH_SIZE, BatchFlushReason::Shutdown, 3);
+
+        let snapshot = counters
+            .snapshot(BATCH_SIZE)
+            .expect("snapshot should exist");
+        assert_eq!(snapshot.total_batches, 3);
+        assert_eq!(snapshot.total_messages, 40);
+        assert_eq!(snapshot.full_batches, 1);
+        assert_eq!(snapshot.timer_batches, 1);
+        assert_eq!(snapshot.shutdown_batches, 1);
+        assert_eq!(snapshot.partial_batches, 2);
+        assert_eq!(snapshot.min_batch_size, 3);
+        assert_eq!(snapshot.max_batch_size, 25);
+        assert!((snapshot.average_batch_size - 13.33).abs() < 0.01);
+        assert!((snapshot.average_fill_percent - 53.33).abs() < 0.01);
+    }
+
+    #[test]
+    fn batch_flush_counters_reset_clears_window_data() {
+        let mut counters = BatchFlushCounters::default();
+        counters.record(BATCH_SIZE, BatchFlushReason::Timer, 7);
+
+        assert!(counters.snapshot(BATCH_SIZE).is_some());
+        counters.reset();
+        assert!(counters.snapshot(BATCH_SIZE).is_none());
     }
 }
