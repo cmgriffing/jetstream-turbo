@@ -26,7 +26,42 @@ Reduce the execution time of serializing a `JetstreamMessage` to JSON using serd
 3. Serialization output must remain semantically identical (same JSON structure and values) to ensure compatibility.
 
 ## What's Been Tried
-(Will be updated as experiments progress)
+
+### Baseline (commit a0ba963)
+- Initial baseline median: **199.84 ns** (after manual `Serialize` impls for enums were already present).
+
+### Experiment 1: Revert enums to derived Serialize
+- **Change**: Removed manual `Serialize` impls for `MessageKind` and `OperationType`, falling back to derived.
+- **Result**: 204.09 ns (worse). Discarded.
+- **Conclusion**: The manual impls are faster for these simple enums.
+
+### Experiment 2: Try `#[repr(u8)]` with `#[inline]` changes
+- **Change**: Added `#[repr(u8)]` to enums and changed `#[inline(always)]` to `#[inline]`.
+- **Result**: 201.51 ns (slightly worse, within noise). Discarded.
+
+### Experiment 3: Combine `#[repr(u8)]` with array lookup
+- **Change**: Added `#[repr(u8)]` and `Copy`; used static array lookup instead of match.
+- **Result**: 202.27 ns (worse). Discarded.
+
+### Experiment 4: Keep manual impl with `#[repr(u8)]` only (commit 14330ff)
+- **Change**: Kept manual `Serialize` with match, added `#[repr(u8)]` to enums.
+- **Result**: **197.44 ns** — **1.2% improvement** over session baseline (199.84 ns).
+- **Conclusion**: Smaller enum size improves cache locality during serialization.
+
+### Experiment 5: Additionally add `Copy` derive to enums (commit dc36348)
+- **Change**: Added `Copy` to the enums (still with `#[repr(u8)]` and manual `Serialize`).
+- **Result**: **196.81 ns** — additional **0.3% improvement**.
+- **Conclusion**: Marking enums as `Copy` enables marginal further gains.
+
+### Experiment 6: Final verification (commit 7741842)
+- **Result**: **196.90 ns** — consistent with previous best.
+
+### Summary of Improvements
+- Combined improvement: **~1.5%** from session baseline (199.84 ns → 196.90 ns).
+- Compared to historical baseline from `benches/baselines/serde_json_serialize_message.json` (205.65 ns), the current state is **~4.3% faster**, fully recovering the reported regression and then some.
+- The most effective change: `#[repr(u8)]` on the enums.
+- Further significant gains would require invasive changes (e.g., custom serializer for the `record` field, removing Option wrappers) which are likely out of scope or risk breaking compatibility.
+
 
 ## Initial Observations
 Baseline serialization time is around 200 ns. The data structure includes several `Option` fields (with `skip_serializing_if`) and custom enum serialization. Opportunities may include:
