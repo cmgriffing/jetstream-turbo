@@ -1,6 +1,7 @@
 use crate::utils::serde_utils::string_utils::is_valid_at_uri;
 use serde::{Deserialize, Serialize, Serializer};
 
+#[repr(u8)]
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum MessageKind {
@@ -23,6 +24,7 @@ impl Serialize for MessageKind {
     }
 }
 
+#[repr(u8)]
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum OperationType {
