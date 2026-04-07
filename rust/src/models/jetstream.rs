@@ -1,7 +1,7 @@
 use crate::utils::serde_utils::string_utils::is_valid_at_uri;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum MessageKind {
     Commit,
@@ -11,7 +11,19 @@ pub enum MessageKind {
     Unknown,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+impl Serialize for MessageKind {
+    #[inline(always)]
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            MessageKind::Commit => "commit",
+            MessageKind::Identity => "identity",
+            MessageKind::Account => "account",
+            MessageKind::Unknown => "unknown",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum OperationType {
     Create,
@@ -19,6 +31,18 @@ pub enum OperationType {
     Delete,
     #[serde(other)]
     Unknown,
+}
+
+impl Serialize for OperationType {
+    #[inline(always)]
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            OperationType::Create => "create",
+            OperationType::Update => "update",
+            OperationType::Delete => "delete",
+            OperationType::Unknown => "unknown",
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
