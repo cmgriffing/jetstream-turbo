@@ -42,9 +42,6 @@ pub enum TurboError {
     #[error("JSON deserialization failed: {0}")]
     JsonDeserialization(#[from] simd_json::Error),
 
-    #[error("JSON serialization failed (simd-json): {0}")]
-    SimdJsonSerialization(#[from] simd_json::Error),
-
     // Cache errors
     #[error("Cache operation failed: {0}")]
     CacheOperation(String),
