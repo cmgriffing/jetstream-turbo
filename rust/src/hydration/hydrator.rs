@@ -74,7 +74,7 @@ where
 
         // Pre-fetch mentioned profiles from cache (before consuming message)
         let mut mentioned_profiles = Vec::new();
-        for &did in mentioned_dids_refs {
+        for did in mentioned_dids_refs {
             if let Some(profile) = self.cache.get_user_profile(did) {
                 mentioned_profiles.push(profile);
             }
