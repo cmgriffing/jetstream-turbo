@@ -1,27 +1,51 @@
 #!/bin/bash
 set -euo pipefail
 
-run_one_bench() {
+# Pipeline benchmark runner for autoresearch
+# Extracts timing metrics from cargo bench output (criterion)
+
+run_benchmark_median() {
     local bench_name=$1
     local output
-    output=$(cargo bench --bench hydration_benchmark "$bench_name" -- --noplot 2>&1)
-    local median_ns
-    median_ns=$(echo "$output" | grep "time:" | head -n1 | sed -n 's/.*\[\([0-9.]*\) ns \([0-9.]*\) ns \([0-9.]*\) ns\].*/\2/p')
-    if [[ -z "$median_ns" ]]; then
+    # Run only the specified benchmark(s) to save time
+    output=$(cargo bench --bench pipeline_benchmark "$bench_name" -- --noplot 2>&1)
+
+    # Parse median time in microseconds from criterion output.
+    # Expected pattern: after a line containing just the bench name, a line with "time:" and [min µs median µs max µs]
+    local median
+    median=$(echo "$output" | awk -v target="$bench_name" '
+        $0 == target { found=1; next }
+        found && /time:/ {
+            if (match($0, /\[([0-9.]+) µs ([0-9.]+) µs ([0-9.]+) µs\]/, arr)) {
+                print arr[2];
+                exit
+            }
+        }
+    ')
+
+    if [[ -z "$median" ]]; then
         echo "ERROR: Could not extract median timing for $bench_name" >&2
         echo "Full output:" >&2
         echo "$output" >&2
         return 1
     fi
-    echo "$median_ns"
+    echo "$median"
 }
 
-SERIALIZE_BENCH="serde_json_serialize_message"
-DESERIALIZE_BENCH="serde_json_deserialize_message"
+# Primary benchmark: full pipeline (hydrate + store + publish + broadcast) with batch size 25
+PIPELINE_BENCH="full_pipeline_batch_25"
+# Secondary: hydration only, same batch size
+HYDRATE_BENCH="batch_hydration_25_messages"
 
-serialize_ns=$(run_one_bench "$SERIALIZE_BENCH") || exit 1
-deserialize_ns=$(run_one_bench "$DESERIALIZE_BENCH") || exit 1
+pipeline_µs=$(run_benchmark_median "$PIPELINE_BENCH") || exit 1
+hydrate_µs=$(run_benchmark_median "$HYDRATE_BENCH") || exit 1
 
-# Output primary and secondary metrics. Primary must be first or explicitly matched by init_experiment's metric_name.
-echo "METRIC serialize_ns=$serialize_ns"
-echo "METRIC deserialize_ns=$deserialize_ns"
+# Secondary metrics
+batch_size=25
+# Cache hit rate is not directly reported by the benchmark; we could approximate or leave out for now.
+# We'll set a placeholder or skip. For now, omit; can compute later if we instrument the benchmark.
+
+# Output metrics. The primary metric must be first or named appropriately for init_experiment.
+echo "METRIC pipeline_µs=$pipeline_µs"
+echo "METRIC hydrate_µs=$hydrate_µs"
+echo "METRIC batch_size=$batch_size"

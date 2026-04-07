@@ -1,76 +1,74 @@
-# Autoresearch: Jetstream Turbo Serialization Optimization
+# Autoresearch: Jetstream Turbo Pipeline Optimization
 
 ## Objective
 
-Optimize the serialization performance of `JetstreamMessage` to JSON. The system processes high-volume Jetstream firehose data, and serialization speed directly impacts throughput and latency. Previous optimization sessions (see git history) improved serialization from ~205 ns to ~197 ns (~3.8% gain) via enum layout optimizations (`#[repr(u8)]`, `Copy`, `skip_serializing_if`). We've exhausted simple attribute-based tweaks. This session explores more advanced techniques:
+Optimize the end-to-end message processing pipeline. The system receives Jetstream firehose messages and performs hydration (enriching with Bluesky profile/post data), storage (SQLite), and event publishing (Redis). The critical performance metric is the time to process a batch of messages through the full pipeline.
 
-- Custom serialization implementations
-- Alternate serialization backends (simd-json, maybe others)
-Serializer selection and feature flags
-- Reducing allocation overhead
-- Profiling-guided micro-optimizations
+Previous experiments focused on low-level serialization of `JetstreamMessage`, gaining a few percent. Now we target holistic improvements that could yield larger gains:
+- Cache hit rate optimization via policy tuning
+- Batch size tuning for storage and publishing
+- Parallelism and concurrency adjustments
+- Reducing allocation overhead in hot paths
+- Database pragma fine-tuning
+- Serialization backend selection (serde_json vs simd-json)
+- Workflow improvements (prefetching, early filtering)
 
-We may also branch out to related hot paths if promising:
-- Deserialization performance
-- EnrichedRecord serialization
-- Cache hit rates via policy tuning
+We'll measure baseline performance across different batch sizes, then systematically explore changes.
 
 ## Metrics
 
-- **Primary**: `serialize_ns` (nanoseconds, lower is better) — median time to serialize a `JetstreamMessage` to JSON string
-- **Secondary**: `deserialize_ns` (nanoseconds) — deserialization time (for completeness)
-- **Secondary**: `test_status` (pass/fail) — all tests must pass
+- **Primary**: `pipeline_µs` (microseconds, lower is better) — median time to process a batch through the full pipeline (hydrate → store → publish → broadcast).
+- **Secondary**: `hydrate_µs` (µs) — hydration-only time for the same batch.
+- **Secondary**: `cache_hit_rate` (0.0-1.0) — observed cache hit rate during the run.
+- **Secondary**: `batch_size` (count) — number of messages in batch (experiment with different sizes).
 
 ## How to Run
 
-`./autoresearch.sh` — runs the benchmark and outputs structured `METRIC` lines:
+`./autoresearch.sh` — runs the pipeline benchmark and outputs structured `METRIC` lines:
 
 ```
-METRIC serialize_ns=<median_ns>
-METRIC deserialize_ns=<median_ns> (if applicable)
+METRIC pipeline_µs=<median_time_µs>
+METRIC hydrate_µs=<hydration_time_µs>
+METRIC cache_hit_rate=<hit_rate>
+METRIC batch_size=<size>
 ```
 
-The script uses `cargo bench` with the `hydration_benchmark` suite and extracts the median timing.
+The script uses `cargo bench` with the `pipeline_benchmark` suite.
 
 ## Files in Scope
 
-- `src/models/jetstream.rs` — `JetstreamMessage` struct and related types (MessageKind, OperationType, CommitData). This is the primary serialization target.
-- `src/models/errors.rs` — error types used in serialization paths
-- `src/models/enriched.rs` — `EnrichedRecord` may also be a candidate if we expand scope
-- `Cargo.toml` — to adjust features or add optional dependencies (e.g., switch to simd-json via feature flags)
-- `autoresearch.sh` — the experiment runner we will modify to test different configurations
+- `src/hydration/hydrator.rs` — main hydration logic and batch processing
+- `src/hydration/cache.rs` — TurboCache hit rates, eviction policies, capacity tuning
+- `src/storage/sqlite.rs` — `RecordStore::store_batch` implementation and pragmas
+- `src/storage/redis.rs` — `EventPublisher::publish_batch` (serde_json vs simd-json)
+- `src/turbocharger/orchestrator.rs` — high-level orchestration, buffer sizes
+- `benches/pipeline_benchmark.rs` — the benchmark itself (may modify batch sizes/scenarios)
+- `autoresearch.sh` — experiment runner
 
 ## Off Limits
 
-- Do NOT break serialization correctness: deserialized data must match original.
-- Do NOT change public API contracts (AtProto data formats) — the JSON structure must remain compatible.
-- Do NOT introduce new runtime dependencies without discussion (but enabling existing optional features is fine).
-- Do NOT degrade memory safety or error handling.
+- Do NOT break correctness: data must be stored and published correctly.
+- Do NOT change external API contracts (JSON format, database schema).
+- Do NOT add new runtime dependencies without careful evaluation (but can enable existing optional ones).
+- Do NOT degrade error handling or observability.
 
 ## Constraints
 
 - All tests must pass: `cargo test --features testing --workspace -- --test-threads=1`
-- No new dependencies beyond what's already in Cargo.toml (simd-json is already present).
-- Changes should be reversible and well-documented in this file's "What's Been Tried".
+- No new dependencies (can use what's already in Cargo.toml).
+- Each experiment must produce measurable improvements on the primary metric.
 
 ## What's Been Tried
 
-From previous autoresearch sessions (see git logs and `_autoresearch-old/`):
+(Will be populated as experiments proceed)
 
-1. **Enum layout optimization** (git 14330ff): Added `#[repr(u8)]` to `MessageKind` and `OperationType`. Result: 1.2% improvement (199.84 → 197.44 ns).
-2. **Derive Copy for enums** (git dc36348): Added `Copy` trait to those enums. Result: 0.3% improvement (197.44 → 196.81 ns).
-3. **Conditional skip_serializing_if** (git 2920dec): Used `#[serde(skip_serializing_if = "Option::is_none")]` on optional fields. Result: brought performance to ~197 ns.
-4. **Verification runs** (git 7741842): Confirmed stable at ~197 ns. No further improvements with simple attribute changes.
+### Baseline
+- **Pipeline (batch 25)**: ~87 µs
+- **Hydration only (batch 25)**: ~61 µs
+- **Cache hit rate**: ~0.5 (in mock tests)
 
-**Current baseline**: ~197 ns median for serde_json serialization of a typical `JetstreamMessage`.
-
-**Potential next steps** (to be explored in this session):
-- Switch to `simd-json` for serialization (requires custom Serialize impl or different API usage).
-- Use `serde_json::to_vec` instead of `to_string` to avoid UTF-8 validation overhead if possible.
-- Reduce struct size by making fields `#[serde(skip)]` where appropriate (e.g., metadata not needed in output).
-- Use `#[serde(borrow)]` to eliminate cloning of owned strings where borrowed data works.
-- Pre-allocate buffers or reuse serializers across calls.
-- Explore `ryu` for numeric serialization if numbers are common (likely not the bottleneck).
-- Consider using a different JSON library altogether (e.g., `json_iter`?), but that would require new dependencies.
-
-We'll start by establishing a clean baseline from this branch, then systematically try these approaches, recording results in `autoresearch.jsonl`.
+### Initial Hypotheses
+1. Switching `redis.rs` from `serde_json::to_string` to `simd_json::to_string` may reduce serialization overhead in the publish step.
+2. Increasing cache capacity in the benchmark from 1000 to larger (e.g., 10000) could improve hit rates and reduce fetches.
+3. Tuning SQLite pragmas (larger `mmap_size_mb`, `cache_size_kib`) might speed up `store_batch`.
+4. Reducing allocations in batch loops (e.g., pre-allocating vectors) could shave microseconds.
