@@ -91,7 +91,6 @@ where
         // Update metrics
         enriched.metrics.hydration_time_ms = start_time.elapsed().as_millis() as u64;
 
-        trace!("Hydrated message for DID: {}", author_did_str);
         Ok(enriched)
     }
 
