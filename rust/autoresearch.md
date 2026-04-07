@@ -1,63 +1,41 @@
-# Autoresearch: SQLite Batch Store Optimization
+# Autoresearch: TurboCache Set Performance
 
 ## Objective
 
-Optimize the performance of `SQLiteStore::store_batch`. This component persists enriched records to SQLite and is a significant contributor to overall processing latency in the real system (not the mock pipeline). The current baseline time for a batch of 100 records is approximately 7.9 ms (79 µs per record). We aim to reduce this by exploring:
+Optimize the time to set a value in `TurboCache::set_user_profile`. The benchmark `cache_user_profile_set` measures the time to insert 1000 profiles. Current baseline: ~482,000 ns (0.482 µs per set). Potential improvements:
 
-- SQLite pragma tuning (cache_size, mmap_size, journal_size_limit, synchronous, journal_mode)
-- Statement preparation reuse (caching the INSERT statement)
-- Reducing per-row overhead in the batch loop
-- Alternative batching strategies (e.g., using `UNION ALL`?)
-- Minimizing allocations during serialization (already using simd-json for message/metadata)
+- Remove Time-To-Live (TTL) expiration checks: currently `time_to_live(300s)` adds overhead on each set (updating expiry). Disabling TTL may reduce per-set latency.
+- Adjust eviction listener: currently increments a counter on every eviction; maybe unnecessary overhead? Could be made optional.
+- Inline more methods or reduce metric updates.
 
-We will measure the median time for `store_batch` with a batch size of 100 records.
+We aim to reduce the median time for 1000 sets.
 
 ## Metrics
 
-- **Primary**: `store_batch_ms` (milliseconds, lower is better) — median time to store 100 records in a batch.
-- **Secondary**: `records_per_second` (derived) — throughput.
-- **Secondary**: `test_status` — all tests must pass.
+- **Primary**: `cache_set_ns` (nanoseconds, lower is better) — median time for 1000 set operations.
+- **Secondary**: `cache_get_ns` (for the same run? Might not be affected) — optional.
+- **Secondary**: `test_status`.
 
 ## How to Run
 
-`./autoresearch.sh` runs the `sqlite_batch_store` benchmark from `benches/hydration_benchmark.rs` and outputs:
-
-```
-METRIC store_batch_ms=<median_ms>
-```
-
-The script extracts the median time (originally in ns) and converts to ms.
+`./autoresearch.sh` runs the `cache_user_profile_set` benchmark and outputs `METRIC cache_set_ns=<median_ns>`.
 
 ## Files in Scope
 
-- `src/storage/sqlite.rs` — `SQLiteStore::store_batch` implementation, pragma configuration.
-- `benches/hydration_benchmark.rs` — the benchmark definition (may tweak batch size if needed)
-- `src/models/enriched.rs` — serialization of `EnrichedRecord` (uses simd-json)
+- `src/hydration/cache.rs` — `TurboCache` implementation, builder configuration.
+- `benches/hydration_benchmark.rs` — the benchmark.
 - `autoresearch.sh`
 
 ## Off Limits
 
-- Do NOT compromise data integrity or durability guarantees beyond acceptable trade-offs (any change to WAL mode or synchronous must be evaluated carefully; we may experiment with `synchronous=OFF` only if it's acceptable for the use case? The project's requirements likely need durability; we'll keep `synchronous=NORMAL` as default; changes to lower durability may be considered only if clearly beneficial and documented).
-- Do NOT break tests.
-- Do NOT introduce new dependencies.
+- Do NOT break correctness: cache must still respect capacity limits and evict least recently used items. Removing TTL is acceptable if it does not cause incorrect behavior beyond staleness policy; the original TTL was 300s, but capacity-limited eviction remains.
+- Do NOT remove metrics collection (though we could make it optional behind a feature flag? But keep for monitoring).
 
 ## Constraints
 
-- All tests must pass with `--features testing`.
-- Preserve existing behavior (correctness).
+- All tests must pass.
 - No new dependencies.
 
 ## What's Been Tried
 
-(Will be populated after experiments)
-
-Baseline: `store_batch` for 100 records: ~7,917,517 ns = 7.92 ms (median). (From `benches/baselines/sqlite_batch_store.json`.)
-
-Potential directions:
-1. Increase `cache_size_kib` further (currently 32*1024=32768 KiB = 32 GiB? That seems huge. Actually 32*1024 = 32768 KiB = 32 MiB. Could increase to 64 MiB? Probably not needed for tiny DB.
-2. Use `PRAGMA synchronous = OFF` (risky) — measure gain vs risk.
-3. Reuse prepared statement: store the query string as a member of `SQLiteStore` and reuse across batches, avoiding re-preparation. This may reduce overhead.
-4. Use `sqlx::query_as` with a pre-bound statement? Not sure.
-5. Reduce the number of columns stored? Can't.
-
-We'll start by establishing a fresh baseline from this branch, then experiment.
+(Will be filled)
