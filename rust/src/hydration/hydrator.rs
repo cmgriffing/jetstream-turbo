@@ -51,17 +51,12 @@ where
             tracing::Span::current().record("at_uri", uri);
         }
 
-        // Consume the message without cloning
-        let mut enriched = EnrichedRecord::new(message);
-
-        // Hydrate author profile if this message has an at-uri (i.e., is a post)
-        if at_uri.is_some() {
-            // Use borrowed DID for cache lookup to avoid allocation
-            let mut author_profile = self.cache.get_user_profile(author_did_str);
-
-            let hit = author_profile.is_some();
+        // Hydrate author profile (before consuming the message)
+        let author_profile = if at_uri.is_some() {
+            // Use borrowed DID for cache lookup
+            let mut profile = self.cache.get_user_profile(author_did_str);
+            let hit = profile.is_some();
             tracing::Span::current().record("cache_hit", hit);
-
             if !hit {
                 // Allocate owned DID only once for the fetch request and cache insertion
                 let author_did_owned = author_did_str.to_string();
@@ -69,15 +64,22 @@ where
                     .profile_fetcher
                     .bulk_fetch_profiles(&[author_did_owned.clone()])
                     .await?;
-
-                if let Some(profile) = profiles.into_iter().next().flatten() {
-                    let profile_arc = Arc::new(profile);
-                    author_profile = Some(Arc::clone(&profile_arc));
-                    self.cache
-                        .set_user_profile(author_did_owned.clone(), profile_arc);
+                if let Some(p) = profiles.into_iter().next().flatten() {
+                    let arc = Arc::new(p);
+                    profile = Some(Arc::clone(&arc));
+                    self.cache.set_user_profile(author_did_owned, arc);
                 }
             }
+            profile
+        } else {
+            None
+        };
 
+        // Now consume the original message
+        let mut enriched = EnrichedRecord::new(message);
+
+        // Attach the hydrated author profile if available
+        if at_uri.is_some() {
             enriched.hydrated_metadata.author_profile = author_profile;
         }
 
