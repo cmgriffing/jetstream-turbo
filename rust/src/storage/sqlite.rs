@@ -135,8 +135,8 @@ impl SQLiteStore {
         pragma_config: SQLitePragmaConfig,
         db_path: &str,
     ) -> Result<(), sqlx::Error> {
-        // synchronous = NORMAL: Good performance with WAL mode, still safe
-        sqlx::query("PRAGMA synchronous = NORMAL")
+        // Use synchronous = OFF for maximum write speed (less durable)
+        sqlx::query("PRAGMA synchronous = OFF")
             .execute(&mut *conn)
             .await?;
 
