@@ -37,8 +37,8 @@ where
     pub async fn hydrate_message(&self, message: JetstreamMessage) -> TurboResult<EnrichedRecord> {
         let start_time = Instant::now();
 
-        // Extract needed fields as owned data before consuming the message
-        let author_did = message.extract_did().to_string();
+        // Extract needed fields as borrowed/owned data before consuming the message
+        let author_did_str = message.extract_did();
         let at_uri = message.extract_at_uri();
         let mentioned_dids = message
             .extract_mentioned_dids()
@@ -46,7 +46,7 @@ where
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
 
-        tracing::Span::current().record("did", &author_did);
+        tracing::Span::current().record("did", author_did_str);
         if let Some(ref uri) = at_uri {
             tracing::Span::current().record("at_uri", uri);
         }
@@ -56,22 +56,25 @@ where
 
         // Hydrate author profile if this message has an at-uri (i.e., is a post)
         if at_uri.is_some() {
-            let mut author_profile = self.cache.get_user_profile(author_did.as_str());
+            // Use borrowed DID for cache lookup to avoid allocation
+            let mut author_profile = self.cache.get_user_profile(author_did_str);
 
             let hit = author_profile.is_some();
             tracing::Span::current().record("cache_hit", hit);
 
             if !hit {
+                // Allocate owned DID only once for the fetch request and cache insertion
+                let author_did_owned = author_did_str.to_string();
                 let profiles = self
                     .profile_fetcher
-                    .bulk_fetch_profiles(&[author_did.to_string()])
+                    .bulk_fetch_profiles(&[author_did_owned.clone()])
                     .await?;
 
                 if let Some(profile) = profiles.into_iter().next().flatten() {
                     let profile_arc = Arc::new(profile);
                     author_profile = Some(Arc::clone(&profile_arc));
                     self.cache
-                        .set_user_profile(author_did.to_string(), profile_arc);
+                        .set_user_profile(author_did_owned.clone(), profile_arc);
                 }
             }
 
