@@ -1,74 +1,63 @@
-# Autoresearch: Jetstream Turbo Pipeline Optimization
+# Autoresearch: SQLite Batch Store Optimization
 
 ## Objective
 
-Optimize the end-to-end message processing pipeline. The system receives Jetstream firehose messages and performs hydration (enriching with Bluesky profile/post data), storage (SQLite), and event publishing (Redis). The critical performance metric is the time to process a batch of messages through the full pipeline.
+Optimize the performance of `SQLiteStore::store_batch`. This component persists enriched records to SQLite and is a significant contributor to overall processing latency in the real system (not the mock pipeline). The current baseline time for a batch of 100 records is approximately 7.9 ms (79 µs per record). We aim to reduce this by exploring:
 
-Previous experiments focused on low-level serialization of `JetstreamMessage`, gaining a few percent. Now we target holistic improvements that could yield larger gains:
-- Cache hit rate optimization via policy tuning
-- Batch size tuning for storage and publishing
-- Parallelism and concurrency adjustments
-- Reducing allocation overhead in hot paths
-- Database pragma fine-tuning
-- Serialization backend selection (serde_json vs simd-json)
-- Workflow improvements (prefetching, early filtering)
+- SQLite pragma tuning (cache_size, mmap_size, journal_size_limit, synchronous, journal_mode)
+- Statement preparation reuse (caching the INSERT statement)
+- Reducing per-row overhead in the batch loop
+- Alternative batching strategies (e.g., using `UNION ALL`?)
+- Minimizing allocations during serialization (already using simd-json for message/metadata)
 
-We'll measure baseline performance across different batch sizes, then systematically explore changes.
+We will measure the median time for `store_batch` with a batch size of 100 records.
 
 ## Metrics
 
-- **Primary**: `pipeline_µs` (microseconds, lower is better) — median time to process a batch through the full pipeline (hydrate → store → publish → broadcast).
-- **Secondary**: `hydrate_µs` (µs) — hydration-only time for the same batch.
-- **Secondary**: `cache_hit_rate` (0.0-1.0) — observed cache hit rate during the run.
-- **Secondary**: `batch_size` (count) — number of messages in batch (experiment with different sizes).
+- **Primary**: `store_batch_ms` (milliseconds, lower is better) — median time to store 100 records in a batch.
+- **Secondary**: `records_per_second` (derived) — throughput.
+- **Secondary**: `test_status` — all tests must pass.
 
 ## How to Run
 
-`./autoresearch.sh` — runs the pipeline benchmark and outputs structured `METRIC` lines:
+`./autoresearch.sh` runs the `sqlite_batch_store` benchmark from `benches/hydration_benchmark.rs` and outputs:
 
 ```
-METRIC pipeline_µs=<median_time_µs>
-METRIC hydrate_µs=<hydration_time_µs>
-METRIC cache_hit_rate=<hit_rate>
-METRIC batch_size=<size>
+METRIC store_batch_ms=<median_ms>
 ```
 
-The script uses `cargo bench` with the `pipeline_benchmark` suite.
+The script extracts the median time (originally in ns) and converts to ms.
 
 ## Files in Scope
 
-- `src/hydration/hydrator.rs` — main hydration logic and batch processing
-- `src/hydration/cache.rs` — TurboCache hit rates, eviction policies, capacity tuning
-- `src/storage/sqlite.rs` — `RecordStore::store_batch` implementation and pragmas
-- `src/storage/redis.rs` — `EventPublisher::publish_batch` (serde_json vs simd-json)
-- `src/turbocharger/orchestrator.rs` — high-level orchestration, buffer sizes
-- `benches/pipeline_benchmark.rs` — the benchmark itself (may modify batch sizes/scenarios)
-- `autoresearch.sh` — experiment runner
+- `src/storage/sqlite.rs` — `SQLiteStore::store_batch` implementation, pragma configuration.
+- `benches/hydration_benchmark.rs` — the benchmark definition (may tweak batch size if needed)
+- `src/models/enriched.rs` — serialization of `EnrichedRecord` (uses simd-json)
+- `autoresearch.sh`
 
 ## Off Limits
 
-- Do NOT break correctness: data must be stored and published correctly.
-- Do NOT change external API contracts (JSON format, database schema).
-- Do NOT add new runtime dependencies without careful evaluation (but can enable existing optional ones).
-- Do NOT degrade error handling or observability.
+- Do NOT compromise data integrity or durability guarantees beyond acceptable trade-offs (any change to WAL mode or synchronous must be evaluated carefully; we may experiment with `synchronous=OFF` only if it's acceptable for the use case? The project's requirements likely need durability; we'll keep `synchronous=NORMAL` as default; changes to lower durability may be considered only if clearly beneficial and documented).
+- Do NOT break tests.
+- Do NOT introduce new dependencies.
 
 ## Constraints
 
-- All tests must pass: `cargo test --features testing --workspace -- --test-threads=1`
-- No new dependencies (can use what's already in Cargo.toml).
-- Each experiment must produce measurable improvements on the primary metric.
+- All tests must pass with `--features testing`.
+- Preserve existing behavior (correctness).
+- No new dependencies.
 
 ## What's Been Tried
 
-(Will be populated as experiments proceed)
+(Will be populated after experiments)
 
-### Baseline
-- **Pipeline (batch 25)**: ~87 µs
-- **Hydration only (batch 25)**: ~61 µs
-- **Cache hit rate**: ~0.5 (in mock tests)
+Baseline: `store_batch` for 100 records: ~7,917,517 ns = 7.92 ms (median). (From `benches/baselines/sqlite_batch_store.json`.)
 
-### Initial Hypotheses
-1. Switching `redis.rs` from `serde_json::to_string` to `simd_json::to_string` may reduce serialization overhead in the publish step.
-2. Increasing cache capacity in the benchmark from 1000 to larger (e.g., 10000) could improve hit rates and reduce fetches.
-3. Tuning SQLite pragmas (larger `mmap_size_mb`, `cache_size_kib`) might speed up `store_batch`.
-4. Reducing allocations in batch loops (e.g., pre-allocating vectors) could shave microseconds.
+Potential directions:
+1. Increase `cache_size_kib` further (currently 32*1024=32768 KiB = 32 GiB? That seems huge. Actually 32*1024 = 32768 KiB = 32 MiB. Could increase to 64 MiB? Probably not needed for tiny DB.
+2. Use `PRAGMA synchronous = OFF` (risky) — measure gain vs risk.
+3. Reuse prepared statement: store the query string as a member of `SQLiteStore` and reuse across batches, avoiding re-preparation. This may reduce overhead.
+4. Use `sqlx::query_as` with a pre-bound statement? Not sure.
+5. Reduce the number of columns stored? Can't.
+
+We'll start by establishing a fresh baseline from this branch, then experiment.
