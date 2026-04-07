@@ -1,6 +1,6 @@
 use crate::models::{
     bluesky::BlueskyProfile,
-    jetstream::{CommitData, JetstreamMessage},
+    jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType},
 };
 use std::sync::Arc;
 
@@ -14,10 +14,10 @@ pub fn create_post_message(index: usize) -> JetstreamMessage {
         did,
         time_us: Some(1770949213790196 + (index as u64 * 1000)),
         seq: Some(100000 + index as u64),
-        kind: "commit".to_string(),
+        kind: MessageKind::Commit,
         commit: Some(CommitData {
             rev: Some(format!("3mepgzgimkv{:04}", index)),
-            operation_type: "create".to_string(),
+            operation_type: OperationType::Create,
             collection: Some("app.bsky.feed.post".to_string()),
             rkey: Some(rkey),
             record: Some(serde_json::json!({
@@ -41,10 +41,10 @@ pub fn create_reply_message(index: usize, parent_did: &str, parent_rkey: &str) -
         did,
         time_us: Some(1770949213800000 + (index as u64 * 1000)),
         seq: Some(200000 + index as u64),
-        kind: "commit".to_string(),
+        kind: MessageKind::Commit,
         commit: Some(CommitData {
             rev: Some(format!("3replrev{:06}", index)),
-            operation_type: "create".to_string(),
+            operation_type: OperationType::Create,
             collection: Some("app.bsky.feed.post".to_string()),
             rkey: Some(rkey),
             record: Some(serde_json::json!({

@@ -30,7 +30,7 @@ rustls = { version = "0.23", features = ["aws_lc_rs"] }
 openssl = { version = "0.10", features = ["vendored"] }
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 simd-json = "0.14"
 
@@ -59,6 +59,7 @@ sqlx = { version = "0.8", features = [
 not_redis = "0.5.0"
 
 # Caching and utilities
+ahash = "0.8"
 lru = "0.12"
 moka = { version = "0.12", features = ["sync", "future"] }
 dashmap = "6.1"

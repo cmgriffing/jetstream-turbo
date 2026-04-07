@@ -33,7 +33,7 @@ where
         }
 
         // Check which profiles are missing from cache
-        let cached_flags = self.cache.check_user_profiles_cached(dids).await;
+        let cached_flags = self.cache.check_user_profiles_cached(dids);
         let missing_dids: Vec<String> = dids
             .iter()
             .zip(cached_flags)
@@ -53,9 +53,7 @@ where
 
             for (did, maybe_profile) in chunk.iter().zip(profiles) {
                 if let Some(profile) = maybe_profile {
-                    self.cache
-                        .set_user_profile(did.clone(), Arc::new(profile))
-                        .await;
+                    self.cache.set_user_profile(did.clone(), Arc::new(profile));
                     fetched_count += 1;
                 }
             }
@@ -71,7 +69,7 @@ where
         }
 
         // Check which posts are missing from cache
-        let cached_flags = self.cache.check_posts_cached(uris).await;
+        let cached_flags = self.cache.check_posts_cached(uris);
         let missing_uris: Vec<String> = uris
             .iter()
             .zip(cached_flags)
@@ -91,7 +89,7 @@ where
 
             for (uri, maybe_post) in chunk.iter().zip(posts) {
                 if let Some(post) = maybe_post {
-                    self.cache.set_post(uri.clone(), Arc::new(post)).await;
+                    self.cache.set_post(uri.clone(), Arc::new(post));
                     fetched_count += 1;
                 }
             }

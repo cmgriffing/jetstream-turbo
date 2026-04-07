@@ -198,10 +198,10 @@ mod tests {
                 did: "did:plc:test".to_string(),
                 seq: Some(12345),
                 time_us: Some(1640995200000000),
-                kind: "commit".to_string(),
+                kind: crate::models::jetstream::MessageKind::Commit,
                 commit: Some(crate::models::jetstream::CommitData {
                     rev: Some("test-rev".to_string()),
-                    operation_type: "create".to_string(),
+                    operation_type: crate::models::jetstream::OperationType::Create,
                     collection: Some("app.bsky.feed.post".to_string()),
                     rkey: Some("test".to_string()),
                     record: Some(serde_json::json!({"text": "Hello world"})),

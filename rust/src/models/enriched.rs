@@ -1,6 +1,6 @@
 use crate::models::{bluesky::BlueskyProfile, jetstream::JetstreamMessage};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use std::sync::Arc;
 
 fn serialize_arc_str<S>(value: &Arc<str>, serializer: S) -> Result<S::Ok, S::Error>
@@ -10,19 +10,12 @@ where
     serializer.serialize_str(value)
 }
 
-fn deserialize_arc_str<'de, D>(deserializer: D) -> Result<Arc<str>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s: String = Deserialize::deserialize(deserializer)?;
-    Ok(Arc::from(s))
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrichedRecord {
     /// Original jetstream message
     pub message: JetstreamMessage,
     /// Hydrated metadata including profiles and referenced content
+    #[serde(default)]
     pub hydrated_metadata: HydratedMetadata,
     /// Processing timestamp
     pub processed_at: DateTime<Utc>,
@@ -31,20 +24,28 @@ pub struct EnrichedRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct HydratedMetadata {
     /// Author profile information
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub author_profile: Option<Arc<BlueskyProfile>>,
     /// Profiles of mentioned users
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mentioned_profiles: Vec<Arc<BlueskyProfile>>,
     /// Referenced posts (replies, quotes)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub referenced_posts: Vec<ReferencedPost>,
     /// Extracted hashtags
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hashtags: Vec<String>,
     /// Extracted URLs
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub urls: Vec<String>,
     /// Extracted mentions
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mentions: Vec<Mention>,
     /// Content language detection
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub detected_language: Option<String>,
 }
 
@@ -53,10 +54,7 @@ pub struct ReferencedPost {
     pub uri: String,
     pub cid: String,
     pub text: String,
-    #[serde(
-        serialize_with = "serialize_arc_str",
-        deserialize_with = "deserialize_arc_str"
-    )]
+    #[serde(serialize_with = "serialize_arc_str")]
     pub author_did: Arc<str>,
     pub author_handle: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -67,10 +65,7 @@ pub struct ReferencedPost {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mention {
-    #[serde(
-        serialize_with = "serialize_arc_str",
-        deserialize_with = "deserialize_arc_str"
-    )]
+    #[serde(serialize_with = "serialize_arc_str")]
     pub did: Arc<str>,
     pub handle: Option<String>,
     pub display_name: Option<String>,
@@ -78,7 +73,7 @@ pub struct Mention {
     pub end_byte: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProcessingMetrics {
     /// Time taken to hydrate this record
     pub hydration_time_ms: u64,
@@ -92,6 +87,7 @@ pub struct ProcessingMetrics {
 }
 
 impl EnrichedRecord {
+    #[inline(always)]
     pub fn new(message: JetstreamMessage) -> Self {
         Self {
             message,
@@ -115,14 +111,17 @@ impl EnrichedRecord {
         }
     }
 
+    #[inline(always)]
     pub fn get_at_uri(&self) -> Option<String> {
         self.message.extract_at_uri()
     }
 
+    #[inline(always)]
     pub fn get_did(&self) -> &str {
         self.message.extract_did()
     }
 
+    #[inline(always)]
     pub fn get_text(&self) -> Option<&str> {
         self.message
             .commit
@@ -131,6 +130,7 @@ impl EnrichedRecord {
             .and_then(|r| r.get("text").and_then(|v| v.as_str()))
     }
 
+    #[inline(always)]
     pub fn calculate_cache_hit_rate(&mut self) {
         let total = self.metrics.cache_hits + self.metrics.cache_misses;
         self.metrics.cache_hit_rate = if total > 0 {
@@ -146,6 +146,16 @@ impl HydratedMetadata {
         if !self.mentioned_profiles.iter().any(|p| p.did == profile.did) {
             self.mentioned_profiles.push(profile);
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.author_profile.is_none()
+            && self.mentioned_profiles.is_empty()
+            && self.referenced_posts.is_empty()
+            && self.hashtags.is_empty()
+            && self.urls.is_empty()
+            && self.mentions.is_empty()
+            && self.detected_language.is_none()
     }
 
     pub fn add_referenced_post(&mut self, post: ReferencedPost) {
@@ -219,7 +229,7 @@ impl HydratedMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::jetstream::CommitData;
+    use crate::models::jetstream::{CommitData, MessageKind, OperationType};
     use serde_json::json;
 
     #[test]
@@ -228,10 +238,10 @@ mod tests {
             did: "did:plc:test".to_string(),
             time_us: Some(1640995200000000),
             seq: Some(12345),
-            kind: "commit".to_string(),
+            kind: MessageKind::Commit,
             commit: Some(CommitData {
                 rev: Some("test-rev".to_string()),
-                operation_type: "create".to_string(),
+                operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("test123".to_string()),
                 record: Some(json!({"text": "Hello world"})),
@@ -250,10 +260,10 @@ mod tests {
             did: "did:plc:test".to_string(),
             time_us: Some(1640995200000000),
             seq: Some(12345),
-            kind: "commit".to_string(),
+            kind: MessageKind::Commit,
             commit: Some(CommitData {
                 rev: Some("test-rev".to_string()),
-                operation_type: "create".to_string(),
+                operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("test123".to_string()),
                 record: Some(json!({"text": "Hello"})),
@@ -266,5 +276,65 @@ mod tests {
         enriched.calculate_cache_hit_rate();
 
         assert_eq!(enriched.metrics.cache_hit_rate, 0.8);
+    }
+
+    #[test]
+    fn test_empty_hydrated_metadata_serializes_compactly() {
+        let message = JetstreamMessage {
+            did: "did:plc:test".to_string(),
+            time_us: Some(1640995200000000),
+            seq: Some(12345),
+            kind: MessageKind::Commit,
+            commit: Some(CommitData {
+                rev: Some("test-rev".to_string()),
+                operation_type: OperationType::Create,
+                collection: Some("app.bsky.feed.post".to_string()),
+                rkey: Some("test123".to_string()),
+                record: Some(json!({"text": "Hello world"})),
+                cid: Some("bafyrei".to_string()),
+            }),
+        };
+
+        let enriched = EnrichedRecord::new(message);
+        let json = serde_json::to_string(&enriched).unwrap();
+
+        assert!(json.contains("\"hydrated_metadata\":{}"));
+        assert!(!json.contains("\"mentioned_profiles\""));
+        assert!(!json.contains("\"referenced_posts\""));
+        assert!(!json.contains("\"hashtags\""));
+        assert!(!json.contains("\"urls\""));
+        assert!(!json.contains("\"mentions\""));
+    }
+
+    #[test]
+    fn test_hydrated_metadata_defaults_when_fields_are_missing() {
+        let enriched: EnrichedRecord = serde_json::from_value(json!({
+            "message": {
+                "did": "did:plc:test",
+                "time_us": 1640995200000000_u64,
+                "seq": 12345_u64,
+                "kind": "commit",
+                "commit": {
+                    "rev": "test-rev",
+                    "operation": "create",
+                    "collection": "app.bsky.feed.post",
+                    "rkey": "test123",
+                    "record": {"text": "Hello world"},
+                    "cid": "bafyrei"
+                }
+            },
+            "hydrated_metadata": {},
+            "processed_at": "2024-01-01T00:00:00Z",
+            "metrics": {
+                "hydration_time_ms": 0,
+                "api_calls_count": 0,
+                "cache_hit_rate": 0.0,
+                "cache_hits": 0,
+                "cache_misses": 0
+            }
+        }))
+        .unwrap();
+
+        assert!(enriched.hydrated_metadata.is_empty());
     }
 }

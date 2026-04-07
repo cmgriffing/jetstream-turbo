@@ -1,51 +1,108 @@
 use crate::utils::serde_utils::string_utils::is_valid_at_uri;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
+
+#[repr(u8)]
+#[derive(Debug, Copy, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageKind {
+    Commit,
+    Identity,
+    Account,
+    #[serde(other)]
+    Unknown,
+}
+
+impl Serialize for MessageKind {
+    #[inline(always)]
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            MessageKind::Commit => "commit",
+            MessageKind::Identity => "identity",
+            MessageKind::Account => "account",
+            MessageKind::Unknown => "unknown",
+        })
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Copy, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OperationType {
+    Create,
+    Update,
+    Delete,
+    #[serde(other)]
+    Unknown,
+}
+
+impl Serialize for OperationType {
+    #[inline(always)]
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            OperationType::Create => "create",
+            OperationType::Update => "update",
+            OperationType::Delete => "delete",
+            OperationType::Unknown => "unknown",
+        })
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct JetstreamMessage {
     pub did: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_us: Option<u64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
-    pub kind: String,
-    #[serde(default)]
+    pub kind: MessageKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<CommitData>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CommitData {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rev: Option<String>,
     #[serde(rename = "operation")]
-    pub operation_type: String,
-    #[serde(default)]
+    pub operation_type: OperationType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rkey: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
 }
 
 impl JetstreamMessage {
+    #[inline(always)]
     pub fn extract_at_uri(&self) -> Option<String> {
         if let Some(commit) = &self.commit {
             if let (Some(collection), Some(rkey)) = (&commit.collection, &commit.rkey) {
-                return Some(format!("at://{}/{}/{}", self.did, collection, rkey));
+                let mut uri = String::with_capacity(
+                    "at://".len() + self.did.len() + collection.len() + rkey.len() + 2,
+                );
+                uri.push_str("at://");
+                uri.push_str(&self.did);
+                uri.push('/');
+                uri.push_str(collection);
+                uri.push('/');
+                uri.push_str(rkey);
+                return Some(uri);
             }
         }
         None
     }
 
+    #[inline(always)]
     pub fn extract_did(&self) -> &str {
         &self.did
     }
 
     pub fn is_create_operation(&self) -> bool {
         if let Some(commit) = &self.commit {
-            return commit.operation_type == "create";
+            return commit.operation_type == OperationType::Create;
         }
         false
     }

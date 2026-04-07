@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use std::sync::Arc;
 
 fn serialize_did<S>(did: &Arc<str>, serializer: S) -> Result<S::Ok, S::Error>
@@ -9,17 +9,9 @@ where
     serializer.serialize_str(did)
 }
 
-fn deserialize_did<'de, D>(deserializer: D) -> Result<Arc<str>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s: String = Deserialize::deserialize(deserializer)?;
-    Ok(Arc::from(s))
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlueskyProfile {
-    #[serde(serialize_with = "serialize_did", deserialize_with = "deserialize_did")]
+    #[serde(serialize_with = "serialize_did")]
     pub did: Arc<str>,
     pub handle: String,
     #[serde(default, rename = "displayName")]
@@ -33,8 +25,11 @@ pub struct BlueskyProfile {
     pub follows_count: Option<u64>,
     #[serde(default, rename = "postsCount")]
     pub posts_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub indexed_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<Label>>,
 }
 
@@ -142,7 +137,7 @@ pub struct Label {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ActorProfile {
-    #[serde(serialize_with = "serialize_did", deserialize_with = "deserialize_did")]
+    #[serde(serialize_with = "serialize_did")]
     pub did: Arc<str>,
     pub handle: String,
     pub display_name: Option<String>,
@@ -171,7 +166,6 @@ pub struct ActorDefs {
 // API Request/Response Types
 #[derive(Debug, Clone, Deserialize)]
 pub struct GetProfileResponse {
-    #[serde(deserialize_with = "deserialize_did")]
     pub did: Arc<str>,
     pub handle: String,
     pub display_name: Option<String>,
