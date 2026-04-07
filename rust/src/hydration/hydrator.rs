@@ -40,11 +40,7 @@ where
         // Extract needed fields as borrowed/owned data before consuming the message
         let author_did_str = message.extract_did();
         let at_uri = message.extract_at_uri();
-        let mentioned_dids = message
-            .extract_mentioned_dids()
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
+        let mentioned_dids_refs = message.extract_mentioned_dids();
 
         tracing::Span::current().record("did", author_did_str);
         if let Some(ref uri) = at_uri {
@@ -75,6 +71,14 @@ where
             None
         };
 
+        // Pre-fetch mentioned profiles from cache (before consuming message)
+        let mut mentioned_profiles = Vec::new();
+        for &did in mentioned_dids_refs {
+            if let Some(profile) = self.cache.get_user_profile(did) {
+                mentioned_profiles.push(profile);
+            }
+        }
+
         // Now consume the original message
         let mut enriched = EnrichedRecord::new(message);
 
@@ -83,11 +87,9 @@ where
             enriched.hydrated_metadata.author_profile = author_profile;
         }
 
-        // Process mentions
-        for did in &mentioned_dids {
-            if let Some(profile) = self.cache.get_user_profile(did) {
-                enriched.hydrated_metadata.add_mentioned_profile(profile);
-            }
+        // Add pre-fetched mentioned profiles
+        for profile in mentioned_profiles {
+            enriched.hydrated_metadata.add_mentioned_profile(profile);
         }
 
         // Update metrics
