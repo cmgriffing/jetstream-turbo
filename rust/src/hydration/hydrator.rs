@@ -1,6 +1,7 @@
 use crate::client::{PostFetcher, ProfileFetcher};
 use crate::hydration::TurboCache;
 use crate::models::{enriched::EnrichedRecord, jetstream::JetstreamMessage, TurboResult};
+use futures::future::join_all;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, trace};
@@ -206,19 +207,12 @@ where
     }
 
     async fn hydrate_messages(&self, messages: Vec<JetstreamMessage>) -> Vec<EnrichedRecord> {
-        // Process messages sequentially. Since each hydration involves only cache lookups (no I/O)
-        // in typical mock/benchmark scenarios, sequential processing avoids the overhead
-        // of spawning concurrent tasks and can be faster for small batches.
-        let mut results = Vec::with_capacity(messages.len());
-        for message in messages {
-            match self.hydrate_message(message).await {
-                Ok(enriched) => results.push(enriched),
-                Err(e) => {
-                    trace!("Failed to hydrate message: {}", e);
-                }
-            }
-        }
-        results
+        // Process messages concurrently using join_all. This allows the runtime to
+        // execute multiple hydration tasks in parallel, utilizing multiple CPU cores.
+        // Errors are logged and filtered out.
+        let futures = messages.into_iter().map(|msg| self.hydrate_message(msg));
+        let results = join_all(futures).await;
+        results.into_iter().filter_map(|r| r.ok()).collect()
     }
 
     pub fn get_cache(&self) -> &TurboCache {
