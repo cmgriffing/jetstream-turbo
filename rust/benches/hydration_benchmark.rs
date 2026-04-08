@@ -5,6 +5,7 @@ use jetstream_turbo_rs::models::enriched::{EnrichedRecord, HydratedMetadata, Pro
 use jetstream_turbo_rs::models::jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType};
 use jetstream_turbo_rs::storage::{SQLitePragmaConfig, SQLiteStore};
 use serde_json::json;
+use simd_json;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -272,7 +273,7 @@ fn bench_serialization(c: &mut Criterion) {
             },
         };
         b.iter(|| {
-            let _json = serde_json::to_string(&record).unwrap();
+            let _json = simd_json::to_string(&record).unwrap();
         });
     });
 }
