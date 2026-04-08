@@ -76,13 +76,7 @@ impl TurboCache {
     }
 
     pub fn get_user_profile(&self, did: &str) -> Option<Arc<BlueskyProfile>> {
-        if let Some(profile) = self.user_cache.get(did) {
-            self.metrics.user_hits.fetch_add(1, Ordering::Relaxed);
-            return Some(profile);
-        }
-
-        self.metrics.user_misses.fetch_add(1, Ordering::Relaxed);
-        None
+        self.user_cache.get(did)
     }
 
     pub fn get_user_profiles(&self, dids: &[String]) -> Vec<Option<Arc<BlueskyProfile>>> {
