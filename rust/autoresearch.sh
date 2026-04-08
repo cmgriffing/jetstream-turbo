@@ -1,12 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
-bench_name="cache_user_profile_set"
+bench_name="serde_json_serialize_enriched_record"
 
 output=$(cargo bench --bench hydration_benchmark "$bench_name" -- --noplot 2>&1)
 
-# Extract the second number (median) from the time line, which looks like:
-# "time:   [XXXXX ns YYYYY ns ZZZZZ ns]"
+# Extract median ns
 median_ns=$(echo "$output" | grep "time:" | head -n1 | grep -oE '[0-9]+(\.[0-9]+)?' | sed -n '2p')
 
 if [[ -z "$median_ns" ]]; then
@@ -16,4 +15,4 @@ if [[ -z "$median_ns" ]]; then
     exit 1
 fi
 
-echo "METRIC cache_set_ns=$median_ns"
+echo "METRIC enriched_serialize_ns=$median_ns"
