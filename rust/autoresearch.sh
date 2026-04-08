@@ -1,11 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
-bench_name="serde_json_serialize_enriched_record"
+bench_name="cache_user_profile_get"
 
 output=$(cargo bench --bench hydration_benchmark "$bench_name" -- --noplot 2>&1)
 
-# Extract median ns
+# Extract median ns: look for line containing "time:" and a bracket with numbers.
 median_ns=$(echo "$output" | grep -E "time:.*\[" | head -n1 | grep -oE '[0-9]+(\.[0-9]+)?' | sed -n '2p')
 
 if [[ -z "$median_ns" ]]; then
@@ -15,4 +15,4 @@ if [[ -z "$median_ns" ]]; then
     exit 1
 fi
 
-echo "METRIC enriched_serialize_ns=$median_ns"
+echo "METRIC cache_get_ns=$median_ns"

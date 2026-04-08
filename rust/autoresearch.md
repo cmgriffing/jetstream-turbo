@@ -1,30 +1,38 @@
-# Autoresearch: EnrichedRecord Serialization
+# Autoresearch: TurboCache Get Performance
 
 ## Objective
 
-Reduce the time to serialize an `EnrichedRecord` to JSON. The current `serde_json_serialize_enriched_record` benchmark reports ~604 ns median. We will try replacing `serde_json::to_string` with `simd_json::to_string` for the full `EnrichedRecord`, measuring any improvement.
+Optimize the time to retrieve a value from `TurboCache::get_user_profile`. The benchmark `cache_user_profile_get` measures median time for 1000 get operations after warm cache. Current baseline: ~81,700 ns total (~81 ns per get). Potential improvements:
+
+- Use a faster hash function (switch from `ahash` to `fxhash` or `twister`).
+- Reduce metric counter increments (they are atomic; maybe batch or skip if not needed).
+- Use ` get` from moka directly with less overhead.
 
 ## Metrics
 
-- **Primary**: `enriched_serialize_ns` (nanoseconds, lower is better).
+- **Primary**: `cache_get_ns` (nanoseconds, lower is better) — total time for 1000 get ops.
 - **Secondary**: `test_status`.
 
 ## How to Run
 
-`./autoresearch.sh` runs the `serde_json_serialize_enriched_record` benchmark (the benchmark name stays the same even if we switch the implementation). Output: `METRIC enriched_serialize_ns=<median_ns>`.
+`./autoresearch.sh` runs `cache_user_profile_get` benchmark and outputs `METRIC cache_get_ns=<median_ns>`.
 
 ## Files in Scope
 
-- `src/storage/redis.rs` — where `EnrichedRecord` is serialized for publishing.
-- `src/models/enriched.rs` — the `EnrichedRecord` struct (ensure `simd_json` compatibility).
-- `src/models/errors.rs` — error mapping.
+- `src/hydration/cache.rs` — `TurboCache::get_user_profile` and builder.
+- `Cargo.toml` — maybe change hasher dependency.
 - `autoresearch.sh`
 
 ## Off Limits
 
-- None beyond correctness and tests passing.
+- Do NOT break correctness (cache must return correct values).
+- Do NOT remove metrics collection for production observability (but could make optional via feature flag; we'll keep for now).
 
 ## Constraints
 
-- Tests must pass.
-- Serialized JSON format must remain identical.
+- All tests must pass.
+- No new dependencies (can switch to existing optional hashers if present, but likely we have only `ahash`; we could try `std::collections::hash_map::DefaultHasler`? Not better).
+
+## What's Been Tried
+
+(Will be populated)
