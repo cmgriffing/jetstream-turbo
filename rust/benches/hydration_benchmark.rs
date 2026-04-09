@@ -2,7 +2,9 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use jetstream_turbo_rs::hydration::TurboCache;
 use jetstream_turbo_rs::models::bluesky::{BlueskyPost, BlueskyProfile};
 use jetstream_turbo_rs::models::enriched::{EnrichedRecord, HydratedMetadata, ProcessingMetrics};
-use jetstream_turbo_rs::models::jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType};
+use jetstream_turbo_rs::models::jetstream::{
+    CommitData, JetstreamMessage, MessageKind, OperationType,
+};
 use jetstream_turbo_rs::storage::{SQLitePragmaConfig, SQLiteStore};
 use serde_json::json;
 use simd_json;

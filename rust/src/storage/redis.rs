@@ -134,8 +134,9 @@ impl EventPublisher for RedisStore {
 
         // Batch Redis operations - acquire lock once for all records
         for record in records {
-            let message_json = simd_json::to_string(record)
-                .map_err(|e| TurboError::Internal(format!("simd_json serialization failed: {}", e)))?;
+            let message_json = simd_json::to_string(record).map_err(|e| {
+                TurboError::Internal(format!("simd_json serialization failed: {}", e))
+            })?;
             let message_id = generate_message_id(record);
             let at_uri = record.get_at_uri().unwrap_or_default();
             let did = record.get_did().to_string();
