@@ -76,7 +76,16 @@ impl TurboCache {
     }
 
     pub fn get_user_profile(&self, did: &str) -> Option<Arc<BlueskyProfile>> {
-        self.user_cache.get(did)
+        match self.user_cache.get(did) {
+            Some(profile) => {
+                self.metrics.user_hits.fetch_add(1, Ordering::Relaxed);
+                Some(profile)
+            }
+            None => {
+                self.metrics.user_misses.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
     }
 
     pub fn get_user_profiles(&self, dids: &[String]) -> Vec<Option<Arc<BlueskyProfile>>> {
@@ -251,7 +260,7 @@ mod tests {
             labels: None,
         };
 
-        cache.set_user_profile("did:plc:test".to_string(), Arc::new(profile.clone()));
+        cache.set_user_profile("did:plc:test".to_string(), Arc::new(profile));
 
         let result = cache.get_user_profile("did:plc:test");
         assert!(result.is_some());
@@ -336,7 +345,7 @@ mod tests {
         cache.get_user_profile("did:plc:test1");
 
         let (user_hit_rate, post_hit_rate) = cache.get_hit_rates();
-        assert_eq!(user_hit_rate, 1.0 / 3.0);
+        assert!((user_hit_rate - 1.0/3.0).abs() < 1e-6);
         assert_eq!(post_hit_rate, 0.0);
     }
 }

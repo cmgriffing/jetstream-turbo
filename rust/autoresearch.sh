@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-bench_name="cache_user_profile_get"
+bench_name="enriched_record_extract_uris"
 
 output=$(cargo bench --bench hydration_benchmark "$bench_name" -- --noplot 2>&1)
 
@@ -15,4 +15,4 @@ if [[ -z "$median_ns" ]]; then
     exit 1
 fi
 
-echo "METRIC cache_get_ns=$median_ns"
+echo "METRIC total_ns=$median_ns"
