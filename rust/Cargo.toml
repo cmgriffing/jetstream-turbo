@@ -60,11 +60,13 @@ not_redis = "0.5.0"
 
 # Caching and utilities
 ahash = "0.8"
+fxhash = "0.2"
 lru = "0.12"
 moka = { version = "0.12", features = ["sync", "future"] }
 dashmap = "6.1"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+
 
 # Metrics
 metrics = "0.24"
