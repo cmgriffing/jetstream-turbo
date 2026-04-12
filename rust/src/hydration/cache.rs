@@ -90,6 +90,7 @@ impl TurboCache {
     pub fn get_user_profiles(&self, dids: &[String]) -> Vec<Option<Arc<BlueskyProfile>>> {
         let mut profiles = Vec::with_capacity(dids.len());
         let mut hits = 0_u64;
+        let mut misses = 0_u64;
 
         for did in dids {
             match self.user_cache.get(did) {
@@ -97,19 +98,18 @@ impl TurboCache {
                     hits += 1;
                     profiles.push(Some(profile));
                 }
-                None => profiles.push(None),
+                None => {
+                    misses += 1;
+                    profiles.push(None);
+                }
             }
         }
 
-        let total = dids.len() as u64;
         if hits > 0 {
             self.metrics.user_hits.fetch_add(hits, Ordering::Relaxed);
         }
-        let misses = total.saturating_sub(hits);
         if misses > 0 {
-            self.metrics
-                .user_misses
-                .fetch_add(misses, Ordering::Relaxed);
+            self.metrics.user_misses.fetch_add(misses, Ordering::Relaxed);
         }
 
         profiles
