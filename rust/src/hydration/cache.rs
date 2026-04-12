@@ -1,15 +1,14 @@
 use crate::models::bluesky::{BlueskyPost, BlueskyProfile};
-use ahash::RandomState;
 use moka::sync::Cache as MokaCache;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tracing::{instrument, trace};
 
 #[derive(Clone)]
 pub struct TurboCache {
-    user_cache: MokaCache<String, Arc<BlueskyProfile>, RandomState>,
-    post_cache: MokaCache<String, Arc<BlueskyPost>, RandomState>,
+    user_cache: MokaCache<String, Arc<BlueskyProfile>, ahash::RandomState>,
+    post_cache: MokaCache<String, Arc<BlueskyPost>, ahash::RandomState>,
     user_capacity: usize,
     post_capacity: usize,
     metrics: Arc<CacheMetrics>,
@@ -48,7 +47,7 @@ impl TurboCache {
             .eviction_listener(move |_k, _v, _cause| {
                 user_metrics.cache_evictions.fetch_add(1, Ordering::Relaxed);
             })
-            .build_with_hasher(RandomState::default());
+            .build_with_hasher(ahash::RandomState::default());
 
         let post_metrics = Arc::clone(&metrics);
         let post_cache = MokaCache::builder()
@@ -56,7 +55,7 @@ impl TurboCache {
             .eviction_listener(move |_k, _v, _cause| {
                 post_metrics.cache_evictions.fetch_add(1, Ordering::Relaxed);
             })
-            .build_with_hasher(RandomState::default());
+            .build_with_hasher(ahash::RandomState::default());
 
         Self {
             user_cache,
