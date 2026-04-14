@@ -1,1 +1,2 @@
 {"type":"config","name":"Optimize cache_post_get benchmark","metricName":"cache_get_ns","metricUnit":"ns","bestDirection":"lower"}
+{"run":1,"commit":"1ec15fc","metric":69.367,"metrics":{},"status":"keep","description":"Baseline cache_post_get benchmark","timestamp":1776209090014,"segment":0,"confidence":null,"iterationTokens":395,"asi":{"hypothesis":"Establish baseline performance","baseline":true}}

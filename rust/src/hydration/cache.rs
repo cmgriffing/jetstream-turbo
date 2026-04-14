@@ -1,14 +1,17 @@
 use crate::models::bluesky::{BlueskyPost, BlueskyProfile};
 use moka::sync::Cache as MokaCache;
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tracing::{instrument, trace};
 
+type FxBuildHasher = BuildHasherDefault<fxhash::FxHasher>;
+
 #[derive(Clone)]
 pub struct TurboCache {
-    user_cache: MokaCache<String, Arc<BlueskyProfile>, ahash::RandomState>,
-    post_cache: MokaCache<String, Arc<BlueskyPost>, ahash::RandomState>,
+    user_cache: MokaCache<String, Arc<BlueskyProfile>, FxBuildHasher>,
+    post_cache: MokaCache<String, Arc<BlueskyPost>, FxBuildHasher>,
     user_capacity: usize,
     post_capacity: usize,
     metrics: Arc<CacheMetrics>,
@@ -47,7 +50,7 @@ impl TurboCache {
             .eviction_listener(move |_k, _v, _cause| {
                 user_metrics.cache_evictions.fetch_add(1, Ordering::Relaxed);
             })
-            .build_with_hasher(ahash::RandomState::default());
+            .build_with_hasher(BuildHasherDefault::<fxhash::FxHasher>::default());
 
         let post_metrics = Arc::clone(&metrics);
         let post_cache = MokaCache::builder()
@@ -55,7 +58,7 @@ impl TurboCache {
             .eviction_listener(move |_k, _v, _cause| {
                 post_metrics.cache_evictions.fetch_add(1, Ordering::Relaxed);
             })
-            .build_with_hasher(ahash::RandomState::default());
+            .build_with_hasher(BuildHasherDefault::<fxhash::FxHasher>::default());
 
         Self {
             user_cache,
