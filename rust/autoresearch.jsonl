@@ -1,0 +1,1 @@
+{"type":"config","name":"Optimize cache_post_get benchmark","metricName":"cache_get_ns","metricUnit":"ns","bestDirection":"lower"}
