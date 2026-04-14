@@ -3,7 +3,6 @@ use moka::sync::Cache as MokaCache;
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 use tracing::{instrument, trace};
 
 type FxBuildHasher = BuildHasherDefault<fxhash::FxHasher>;
