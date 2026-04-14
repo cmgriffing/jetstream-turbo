@@ -47,6 +47,7 @@ impl TurboCache {
         let user_metrics = Arc::clone(&metrics);
         let user_cache = MokaCache::builder()
             .max_capacity(user_cache_size as u64)
+            .initial_capacity((user_cache_size / 2).max(1024))
             .eviction_listener(move |_k, _v, _cause| {
                 user_metrics.cache_evictions.fetch_add(1, Ordering::Relaxed);
             })
@@ -55,6 +56,7 @@ impl TurboCache {
         let post_metrics = Arc::clone(&metrics);
         let post_cache = MokaCache::builder()
             .max_capacity(post_cache_size as u64)
+            .initial_capacity((post_cache_size / 2).max(1024))
             .eviction_listener(move |_k, _v, _cause| {
                 post_metrics.cache_evictions.fetch_add(1, Ordering::Relaxed);
             })

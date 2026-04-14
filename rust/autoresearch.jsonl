@@ -1,2 +1,3 @@
 {"type":"config","name":"Optimize cache_post_get benchmark","metricName":"cache_get_ns","metricUnit":"ns","bestDirection":"lower"}
 {"run":1,"commit":"1ec15fc","metric":69.367,"metrics":{},"status":"keep","description":"Baseline cache_post_get benchmark","timestamp":1776209090014,"segment":0,"confidence":null,"iterationTokens":395,"asi":{"hypothesis":"Establish baseline performance","baseline":true}}
+{"run":2,"commit":"382c61e","metric":67.449,"metrics":{"improvement_pct":2.8},"status":"keep","description":"Switch from ahash to fxhash - faster hash function","timestamp":1776209211978,"segment":0,"confidence":null,"iterationTokens":2136,"asi":{"hypothesis":"fxhash is faster than ahash for cache lookups","baseline":false,"hash_algorithm":"fxhash"}}
