@@ -52,7 +52,8 @@
   - Experiment with moka's `try_get_with` for potential caching of hash computation
 
 ## General Notes
-- `simd-json` is faster for deserialization (used in Jetstream parsing) and **also faster for BlueskyProfile serialization**.
+- `simd-json` is faster for BlueskyProfile **serialization** (~25% improvement)
+- `simd-json` is **slower** for BlueskyProfile **deserialization** (~2.5x slower: 616ns vs 250ns) - likely due to Arc<str> handling overhead
 - Cache `get` operations are already very fast (~65 ns optimized). `set` is slower (~482 ns) but only on misses.
 - Tests must pass; any change must maintain correctness.
 
