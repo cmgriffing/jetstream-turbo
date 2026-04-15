@@ -245,7 +245,6 @@ fn bench_serialization(c: &mut Criterion) {
         });
     });
 
-    // Benchmark minimal profile to understand serialization overhead
     c.bench_function("serde_json_serialize_profile_minimal", |b| {
         let profile = BlueskyProfile {
             did: "did:plc:test".into(),
