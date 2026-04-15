@@ -2,14 +2,17 @@
 
 ## serde_json_serialize_profile Benchmark (2026-04-15)
 - **Baseline**: 235ns (serde_json)
-- **Best**: 176ns (simd-json) — **25% improvement**
+- **Current**: 182ns (simd-json + skip_serializing_if) — **22% improvement**
 - **Changes**:
   - Switched `serde_json_serialize_profile` benchmark to use simd-json
+  - Added `skip_serializing_if = "Option::is_none"` to optional String and numeric fields
   - Verified byte-for-byte output equivalence between serde_json and simd-json
-  - simd-json was already used in redis.rs and sqlite.rs for serialization
-- **Notes**:
-  - Previous belief that simd-json was slower for serialization was incorrect for BlueskyProfile
-  - simd-json produces identical output with ~25% better performance
+- **Production Benefits**:
+  - Full profiles: ~182ns (22% improvement)
+  - Minimal profiles (many None fields): ~66ns (50% improvement vs previous 128ns)
+- **Files Changed**:
+  - `benches/hydration_benchmark.rs`: Benchmark uses simd-json
+  - `src/models/bluesky.rs`: BlueskyProfile has skip_serializing_if on optional fields
 
 ## Pipeline Benchmark (full_pipeline_batch_25)
 - **Baseline**: 87.24 µs
