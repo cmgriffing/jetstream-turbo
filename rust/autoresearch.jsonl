@@ -1,1 +1,2 @@
 {"type":"config","name":"Optimize serde_json_serialize_profile benchmark","metricName":"total_ns","metricUnit":"ns","bestDirection":"lower"}
+{"run":1,"commit":"8523222","metric":235,"metrics":{},"status":"keep","description":"Baseline measurement for serde_json_serialize_profile benchmark","timestamp":1776224408836,"segment":0,"confidence":null,"iterationTokens":null,"asi":{"hypothesis":"Establish baseline","benchmark_details":"Serializing BlueskyProfile with serde_json","baseline_ns":235}}
