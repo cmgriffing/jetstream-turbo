@@ -43,7 +43,10 @@ impl TurboCache {
     pub fn new(user_cache_size: usize, post_cache_size: usize) -> Self {
         let metrics = Arc::new(CacheMetrics::default());
 
+        // Create metrics clones once to avoid repeated Arc clones in eviction listener
         let user_metrics = Arc::clone(&metrics);
+        let post_metrics = Arc::clone(&metrics);
+
         let user_cache = MokaCache::builder()
             .max_capacity(user_cache_size as u64)
             .initial_capacity((user_cache_size / 2).max(1024))
@@ -52,7 +55,6 @@ impl TurboCache {
             })
             .build_with_hasher(BuildHasherDefault::<fxhash::FxHasher>::default());
 
-        let post_metrics = Arc::clone(&metrics);
         let post_cache = MokaCache::builder()
             .max_capacity(post_cache_size as u64)
             .initial_capacity((post_cache_size / 2).max(1024))
@@ -125,13 +127,16 @@ impl TurboCache {
     }
 
     pub fn get_post(&self, uri: &str) -> Option<Arc<BlueskyPost>> {
-        if let Some(post) = self.post_cache.get(uri) {
-            self.metrics.post_hits.fetch_add(1, Ordering::Relaxed);
-            return Some(post);
+        match self.post_cache.get(uri) {
+            Some(post) => {
+                self.metrics.post_hits.fetch_add(1, Ordering::Relaxed);
+                Some(post)
+            }
+            None => {
+                self.metrics.post_misses.fetch_add(1, Ordering::Relaxed);
+                None
+            }
         }
-
-        self.metrics.post_misses.fetch_add(1, Ordering::Relaxed);
-        None
     }
 
     pub fn get_posts(&self, uris: &[String]) -> Vec<Option<Arc<BlueskyPost>>> {

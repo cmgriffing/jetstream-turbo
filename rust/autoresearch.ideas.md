@@ -20,9 +20,26 @@
   - Reduce `store_batch` loop overhead: already using max chunk size (83 rows).
   - Increase `mmap_size` or `cache_size` further: unlikely to help for small batches.
 
+## Cache Get Optimization (cache_post_get)
+- **Baseline**: 69.37ns
+- **Best**: 64.36ns (~7% improvement)
+- **Changes**:
+  - Switched from `ahash` to `fxhash` hasher
+  - Added `initial_capacity` for pre-allocation
+- **Tried but didn't work**:
+  - Inline hints on hot path functions: slight regression
+  - Removing eviction listener: ~5% faster but loses observability
+  - Custom inline-optimized FxHasher: 2% slower than standard fxhash
+  - Different initial_capacity values: `(size/2).max(1024)` was optimal
+  - Dashmap instead of moka: 53% faster but loses eviction tracking
+- **Remaining ideas**:
+  - Add metrics as optional feature to allow faster hot path
+  - Try using `RwLock` instead of the default synchronization in moka
+  - Experiment with moka's `try_get_with` for potential caching of hash computation
+
 ## General Notes
 - `simd-json` is faster for deserialization (used in Jetstream parsing), but not for serialization of `EnrichedRecord` (regression observed).
-- Cache `get` operations are already very fast (~81 ns). `set` is slower (~482 ns) but only on misses.
+- Cache `get` operations are already very fast (~65 ns optimized). `set` is slower (~482 ns) but only on misses.
 - Tests must pass; any change must maintain correctness.
 
 ## Next Steps (if continuing)
@@ -30,3 +47,4 @@
 - Explore reducing `message_metadata` serialization cost (maybe skip empty fields).
 - Investigate if `turbocharger` orchestration can batch records larger than current max to reduce transaction overhead.
 - Consider whether `synchronous = OFF` could be configurable for deployments that can tolerate some loss.
+- Consider adding metrics as a compile-time feature flag for production observability toggle.
