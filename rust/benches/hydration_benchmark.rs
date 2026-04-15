@@ -245,6 +245,28 @@ fn bench_serialization(c: &mut Criterion) {
         });
     });
 
+    // Benchmark minimal profile to understand serialization overhead
+    c.bench_function("serde_json_serialize_profile_minimal", |b| {
+        let profile = BlueskyProfile {
+            did: "did:plc:test".into(),
+            handle: "user.bsky.social".to_string(),
+            display_name: None,
+            description: None,
+            avatar: None,
+            banner: None,
+            followers_count: None,
+            follows_count: None,
+            posts_count: None,
+            indexed_at: None,
+            created_at: None,
+            labels: None,
+        };
+        
+        b.iter(|| {
+            let _json = simd_json::to_string(&profile).unwrap();
+        });
+    });
+
     c.bench_function("serde_json_deserialize_profile", |b| {
         let json_str = serde_json::to_string(&create_test_profile(0)).unwrap();
         b.iter(|| {
