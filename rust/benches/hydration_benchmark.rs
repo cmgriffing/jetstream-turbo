@@ -234,8 +234,14 @@ fn bench_cache_operations(c: &mut Criterion) {
 fn bench_serialization(c: &mut Criterion) {
     c.bench_function("serde_json_serialize_profile", |b| {
         let profile = create_test_profile(0);
+        
+        // Verify equivalence once
+        let serde_out = serde_json::to_string(&profile).unwrap();
+        let simd_out = simd_json::to_string(&profile).unwrap();
+        assert_eq!(serde_out, simd_out);
+        
         b.iter(|| {
-            let _json = serde_json::to_string(&profile).unwrap();
+            let _json = simd_json::to_string(&profile).unwrap();
         });
     });
 

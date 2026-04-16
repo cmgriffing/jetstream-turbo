@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-bench_name="cache_post_get"
+bench_name="serde_json_serialize_profile"
 
 output=$(cargo bench --bench hydration_benchmark "$bench_name" -- --noplot 2>&1)
 
