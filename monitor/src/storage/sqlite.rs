@@ -13,6 +13,10 @@ pub struct HourlyStat {
     pub stream_a_count: i64,
     pub stream_b_count: i64,
     pub delta: i64,
+    #[sqlx(default)]
+    pub baseline_1_count: i64,
+    #[sqlx(default)]
+    pub baseline_2_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -32,6 +36,18 @@ pub struct HourlyUptime {
     pub stream_b_delivery_latency_ms: f64,
     pub stream_a_mttr_ms: i64,
     pub stream_b_mttr_ms: i64,
+    #[sqlx(default)]
+    pub baseline_1_seconds: i64,
+    #[sqlx(default)]
+    pub baseline_2_seconds: i64,
+    #[sqlx(default)]
+    pub baseline_1_downtime_seconds: i64,
+    #[sqlx(default)]
+    pub baseline_2_downtime_seconds: i64,
+    #[sqlx(default)]
+    pub baseline_1_messages: i64,
+    #[sqlx(default)]
+    pub baseline_2_messages: i64,
     #[serde(skip_serializing)]
     pub metrics_contract_version: i64,
 }
@@ -74,12 +90,28 @@ impl Storage {
                 stream_a_count INTEGER NOT NULL DEFAULT 0,
                 stream_b_count INTEGER NOT NULL DEFAULT 0,
                 delta INTEGER NOT NULL DEFAULT 0,
+                baseline_1_count INTEGER NOT NULL DEFAULT 0,
+                baseline_2_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             "#,
         )
         .execute(&pool)
         .await?;
+
+        sqlx::query(
+            "ALTER TABLE hourly_stats ADD COLUMN baseline_1_count INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "ALTER TABLE hourly_stats ADD COLUMN baseline_2_count INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await
+        .ok();
 
         sqlx::query(
             r#"
@@ -99,6 +131,12 @@ impl Storage {
                 stream_b_delivery_latency_ms REAL NOT NULL DEFAULT 0.0,
                 stream_a_mttr_ms INTEGER NOT NULL DEFAULT 0,
                 stream_b_mttr_ms INTEGER NOT NULL DEFAULT 0,
+                baseline_1_seconds INTEGER NOT NULL DEFAULT 0,
+                baseline_2_seconds INTEGER NOT NULL DEFAULT 0,
+                baseline_1_downtime_seconds INTEGER NOT NULL DEFAULT 0,
+                baseline_2_downtime_seconds INTEGER NOT NULL DEFAULT 0,
+                baseline_1_messages INTEGER NOT NULL DEFAULT 0,
+                baseline_2_messages INTEGER NOT NULL DEFAULT 0,
                 metrics_contract_version INTEGER NOT NULL DEFAULT 1,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
@@ -205,6 +243,48 @@ impl Storage {
             .ok();
 
         sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN baseline_1_seconds INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN baseline_2_seconds INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN baseline_1_downtime_seconds INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN baseline_2_downtime_seconds INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN baseline_1_messages INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN baseline_2_messages INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS lifetime_totals (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -225,24 +305,33 @@ impl Storage {
         hour: DateTime<chrono::Utc>,
         stream_a: u64,
         stream_b: u64,
+        baseline_1: u64,
+        baseline_2: u64,
     ) -> Result<()> {
         let hour_str = hour.format("%Y-%m-%d %H:00:00").to_string();
         let delta = stream_a as i64 - stream_b as i64;
 
         sqlx::query(
             r#"
-            INSERT INTO hourly_stats (hour, stream_a_count, stream_b_count, delta)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO hourly_stats (
+                hour, stream_a_count, stream_b_count, delta,
+                baseline_1_count, baseline_2_count
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(hour) DO UPDATE SET
                 stream_a_count = excluded.stream_a_count,
                 stream_b_count = excluded.stream_b_count,
-                delta = excluded.delta
+                delta = excluded.delta,
+                baseline_1_count = excluded.baseline_1_count,
+                baseline_2_count = excluded.baseline_2_count
             "#,
         )
         .bind(&hour_str)
         .bind(stream_a as i64)
         .bind(stream_b as i64)
         .bind(delta)
+        .bind(baseline_1 as i64)
+        .bind(baseline_2 as i64)
         .execute(&self.pool)
         .await?;
 
@@ -254,7 +343,8 @@ impl Storage {
 
         let rows = sqlx::query_as::<_, HourlyStat>(
             r#"
-            SELECT hour, stream_a_count, stream_b_count, delta
+            SELECT hour, stream_a_count, stream_b_count, delta,
+                   baseline_1_count, baseline_2_count
             FROM hourly_stats
             WHERE hour >= ?
             ORDER BY hour ASC
@@ -284,6 +374,12 @@ impl Storage {
         stream_b_delivery_latency_ms: f64,
         stream_a_mttr_ms: u64,
         stream_b_mttr_ms: u64,
+        baseline_1_seconds: u64,
+        baseline_2_seconds: u64,
+        baseline_1_downtime_seconds: u64,
+        baseline_2_downtime_seconds: u64,
+        baseline_1_messages: u64,
+        baseline_2_messages: u64,
         metrics_contract_version: i64,
     ) -> Result<()> {
         let hour_str = hour.format("%Y-%m-%d %H:00:00").to_string();
@@ -298,9 +394,12 @@ impl Storage {
                 stream_a_messages, stream_b_messages,
                 stream_a_delivery_latency_ms, stream_b_delivery_latency_ms,
                 stream_a_mttr_ms, stream_b_mttr_ms,
+                baseline_1_seconds, baseline_2_seconds,
+                baseline_1_downtime_seconds, baseline_2_downtime_seconds,
+                baseline_1_messages, baseline_2_messages,
                 metrics_contract_version
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(hour) DO UPDATE SET
                 stream_a_seconds = excluded.stream_a_seconds,
                 stream_b_seconds = excluded.stream_b_seconds,
@@ -316,6 +415,12 @@ impl Storage {
                 stream_b_delivery_latency_ms = excluded.stream_b_delivery_latency_ms,
                 stream_a_mttr_ms = excluded.stream_a_mttr_ms,
                 stream_b_mttr_ms = excluded.stream_b_mttr_ms,
+                baseline_1_seconds = excluded.baseline_1_seconds,
+                baseline_2_seconds = excluded.baseline_2_seconds,
+                baseline_1_downtime_seconds = excluded.baseline_1_downtime_seconds,
+                baseline_2_downtime_seconds = excluded.baseline_2_downtime_seconds,
+                baseline_1_messages = excluded.baseline_1_messages,
+                baseline_2_messages = excluded.baseline_2_messages,
                 metrics_contract_version = excluded.metrics_contract_version,
                 updated_at = CURRENT_TIMESTAMP
             "#,
@@ -335,6 +440,12 @@ impl Storage {
         .bind(stream_b_delivery_latency_ms)
         .bind(stream_a_mttr_ms as i64)
         .bind(stream_b_mttr_ms as i64)
+        .bind(baseline_1_seconds as i64)
+        .bind(baseline_2_seconds as i64)
+        .bind(baseline_1_downtime_seconds as i64)
+        .bind(baseline_2_downtime_seconds as i64)
+        .bind(baseline_1_messages as i64)
+        .bind(baseline_2_messages as i64)
         .bind(metrics_contract_version)
         .execute(&self.pool)
         .await?;
@@ -354,6 +465,9 @@ impl Storage {
                    stream_a_messages, stream_b_messages,
                    stream_a_delivery_latency_ms, stream_b_delivery_latency_ms,
                    stream_a_mttr_ms, stream_b_mttr_ms,
+                   baseline_1_seconds, baseline_2_seconds,
+                   baseline_1_downtime_seconds, baseline_2_downtime_seconds,
+                   baseline_1_messages, baseline_2_messages,
                    metrics_contract_version
             FROM hourly_uptime
             WHERE hour < ?
@@ -374,6 +488,9 @@ impl Storage {
                    stream_a_messages, stream_b_messages,
                    stream_a_delivery_latency_ms, stream_b_delivery_latency_ms,
                    stream_a_mttr_ms, stream_b_mttr_ms,
+                   baseline_1_seconds, baseline_2_seconds,
+                   baseline_1_downtime_seconds, baseline_2_downtime_seconds,
+                   baseline_1_messages, baseline_2_messages,
                    metrics_contract_version
             FROM hourly_uptime
             WHERE hour >= ?
@@ -564,6 +681,12 @@ mod tests {
                 8.2,
                 20,
                 25,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
                 INTERVAL_UPTIME_CONTRACT_VERSION,
             )
             .await?;
@@ -585,6 +708,12 @@ mod tests {
                 5.5,
                 15,
                 16,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
                 INTERVAL_UPTIME_CONTRACT_VERSION,
             )
             .await?;

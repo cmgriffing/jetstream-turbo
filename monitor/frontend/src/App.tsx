@@ -120,6 +120,8 @@ function App() {
   const transportConnected = connectionStatus === "connected";
   const streamAName = stats.stream_a_name || "Stream A";
   const streamBName = stats.stream_b_name || "Stream B";
+  const baseline1Name = stats.baseline_1_name || "Baseline 1";
+  const baseline2Name = stats.baseline_2_name || "Baseline 2";
   const windowLabel = formatWindowLabel(historyHours);
 
   useEffect(() => {
@@ -204,6 +206,26 @@ function App() {
                   uptimeAllTime={stats.uptime_b_all_time}
                   connected={stats.connected_b || false}
                 />
+                <StreamCard
+                  streamId="baseline-1"
+                  name={stats.baseline_1_name || "BASELINE_1"}
+                  count={stats.baseline_1 || 0}
+                  countingStartedAt={stats.counting_started_at}
+                  rate={stats.rate_baseline_1 || 0}
+                  streak={stats.current_streak_baseline_1}
+                  uptimeAllTime={stats.uptime_baseline_1_all_time}
+                  connected={stats.connected_baseline_1 || false}
+                />
+                <StreamCard
+                  streamId="baseline-2"
+                  name={stats.baseline_2_name || "BASELINE_2"}
+                  count={stats.baseline_2 || 0}
+                  countingStartedAt={stats.counting_started_at}
+                  rate={stats.rate_baseline_2 || 0}
+                  streak={stats.current_streak_baseline_2}
+                  uptimeAllTime={stats.uptime_baseline_2_all_time}
+                  connected={stats.connected_baseline_2 || false}
+                />
               </div>
             </div>
           </section>
@@ -248,6 +270,8 @@ function App() {
               data={hourlyData}
               streamAName={streamAName}
               streamBName={streamBName}
+              baseline1Name={baseline1Name}
+              baseline2Name={baseline2Name}
               renderState={historyRenderState}
               intervalSeconds={intervalSeconds}
               windowLabel={windowLabel}
@@ -272,6 +296,8 @@ function App() {
               data={hourlyData}
               streamAName={streamAName}
               streamBName={streamBName}
+              baseline1Name={baseline1Name}
+              baseline2Name={baseline2Name}
               renderState={historyRenderState}
               windowLabel={windowLabel}
             />
@@ -302,6 +328,8 @@ function App() {
               renderState={historyRenderState}
               streamAName={streamAName}
               streamBName={streamBName}
+              baseline1Name={baseline1Name}
+              baseline2Name={baseline2Name}
               windowLabel={windowLabel}
             />
           </section>
