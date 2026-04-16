@@ -23,6 +23,8 @@ interface MetricsTableProps {
   renderState: TableRenderState;
   streamAName: string;
   streamBName: string;
+  baseline1Name?: string;
+  baseline2Name?: string;
   windowLabel: string;
 }
 
@@ -82,6 +84,44 @@ function getStateOverlayMessage(state: TableRenderState): string {
   }
 }
 
+interface StreamAccumulator {
+  uptimeSeconds: number;
+  downtimeSeconds: number;
+  messages: number;
+}
+
+interface StreamStatsSummary {
+  uptimePercent: number;
+  uptimeSeconds: number;
+  downtimeSeconds: number;
+  observedSeconds: number;
+  messages: number;
+  rate: number;
+  coverage: number;
+}
+
+function summarizeStream(
+  accumulator: StreamAccumulator,
+  fallbackObservedSeconds: number,
+  requestedWindow: number,
+): StreamStatsSummary {
+  const observedSeconds = accumulator.uptimeSeconds + accumulator.downtimeSeconds;
+  const effectiveObserved = observedSeconds > 0 ? observedSeconds : fallbackObservedSeconds;
+  return {
+    uptimePercent:
+      effectiveObserved > 0
+        ? clampPercent((accumulator.uptimeSeconds / effectiveObserved) * 100.0)
+        : 0,
+    uptimeSeconds: accumulator.uptimeSeconds,
+    downtimeSeconds: accumulator.downtimeSeconds,
+    observedSeconds: effectiveObserved,
+    messages: accumulator.messages,
+    rate: effectiveObserved > 0 ? accumulator.messages / effectiveObserved : 0,
+    coverage:
+      requestedWindow > 0 ? clampPercent((effectiveObserved / requestedWindow) * 100) : 0,
+  };
+}
+
 function calculateStats(
   data: HourlyUptime[],
   requestedWindowSeconds: number,
@@ -90,29 +130,28 @@ function calculateStats(
 ) {
   if (data.length === 0) return null;
 
-  let uptimeASeconds = 0;
-  let uptimeBSeconds = 0;
-  let downtimeASeconds = 0;
-  let downtimeBSeconds = 0;
+  const a: StreamAccumulator = { uptimeSeconds: 0, downtimeSeconds: 0, messages: 0 };
+  const b: StreamAccumulator = { uptimeSeconds: 0, downtimeSeconds: 0, messages: 0 };
+  const baseline1: StreamAccumulator = { uptimeSeconds: 0, downtimeSeconds: 0, messages: 0 };
+  const baseline2: StreamAccumulator = { uptimeSeconds: 0, downtimeSeconds: 0, messages: 0 };
   let disconnectsA = 0;
   let disconnectsB = 0;
-  let messagesA = 0;
-  let messagesB = 0;
 
   data.forEach((row) => {
-    const rowUptimeA = toNonNegative(row.stream_a_seconds);
-    const rowUptimeB = toNonNegative(row.stream_b_seconds);
-    const rowDowntimeA = toNonNegative(row.stream_a_downtime_seconds);
-    const rowDowntimeB = toNonNegative(row.stream_b_downtime_seconds);
-
-    uptimeASeconds += rowUptimeA;
-    uptimeBSeconds += rowUptimeB;
-    downtimeASeconds += rowDowntimeA;
-    downtimeBSeconds += rowDowntimeB;
+    a.uptimeSeconds += toNonNegative(row.stream_a_seconds);
+    a.downtimeSeconds += toNonNegative(row.stream_a_downtime_seconds);
+    a.messages += toNonNegative(row.stream_a_messages);
+    b.uptimeSeconds += toNonNegative(row.stream_b_seconds);
+    b.downtimeSeconds += toNonNegative(row.stream_b_downtime_seconds);
+    b.messages += toNonNegative(row.stream_b_messages);
+    baseline1.uptimeSeconds += toNonNegative(row.baseline_1_seconds);
+    baseline1.downtimeSeconds += toNonNegative(row.baseline_1_downtime_seconds);
+    baseline1.messages += toNonNegative(row.baseline_1_messages);
+    baseline2.uptimeSeconds += toNonNegative(row.baseline_2_seconds);
+    baseline2.downtimeSeconds += toNonNegative(row.baseline_2_downtime_seconds);
+    baseline2.messages += toNonNegative(row.baseline_2_messages);
     disconnectsA += toNonNegative(row.stream_a_disconnects);
     disconnectsB += toNonNegative(row.stream_b_disconnects);
-    messagesA += toNonNegative(row.stream_a_messages);
-    messagesB += toNonNegative(row.stream_b_messages);
   });
 
   const fallbackObservedSeconds = Math.max(
@@ -120,38 +159,16 @@ function calculateStats(
     spanSeconds,
     data.length * Math.max(1, intervalSeconds),
   );
-
-  const observedASeconds = uptimeASeconds + downtimeASeconds;
-  const observedBSeconds = uptimeBSeconds + downtimeBSeconds;
-  const effectiveObservedA = observedASeconds > 0 ? observedASeconds : fallbackObservedSeconds;
-  const effectiveObservedB = observedBSeconds > 0 ? observedBSeconds : fallbackObservedSeconds;
   const requestedWindow = Math.max(0, requestedWindowSeconds);
 
-  const uptimeA = effectiveObservedA > 0
-    ? clampPercent((uptimeASeconds / effectiveObservedA) * 100.0)
-    : 0;
-  const uptimeB = effectiveObservedB > 0
-    ? clampPercent((uptimeBSeconds / effectiveObservedB) * 100.0)
-    : 0;
-
   return {
-    uptimeA,
-    uptimeB,
-    uptimeASeconds,
-    uptimeBSeconds,
-    downtimeASeconds,
-    downtimeBSeconds,
-    observedASeconds: effectiveObservedA,
-    observedBSeconds: effectiveObservedB,
-    requestedWindow,
+    a: summarizeStream(a, fallbackObservedSeconds, requestedWindow),
+    b: summarizeStream(b, fallbackObservedSeconds, requestedWindow),
+    baseline1: summarizeStream(baseline1, fallbackObservedSeconds, requestedWindow),
+    baseline2: summarizeStream(baseline2, fallbackObservedSeconds, requestedWindow),
     disconnectsA,
     disconnectsB,
-    messagesA,
-    messagesB,
-    rateA: effectiveObservedA > 0 ? messagesA / effectiveObservedA : 0,
-    rateB: effectiveObservedB > 0 ? messagesB / effectiveObservedB : 0,
-    coverageA: requestedWindow > 0 ? clampPercent((effectiveObservedA / requestedWindow) * 100) : 0,
-    coverageB: requestedWindow > 0 ? clampPercent((effectiveObservedB / requestedWindow) * 100) : 0,
+    requestedWindow,
   };
 }
 
@@ -165,6 +182,8 @@ export function MetricsTable({
   renderState,
   streamAName,
   streamBName,
+  baseline1Name = "Baseline 1",
+  baseline2Name = "Baseline 2",
   windowLabel,
 }: MetricsTableProps) {
   const stats = calculateStats(data, requestedWindowSeconds, spanSeconds, intervalSeconds);
@@ -208,12 +227,18 @@ export function MetricsTable({
         <Table className="monitor-metrics-table">
           <TableHeader>
             <TableRow className="monitor-metrics-head-row hover:bg-transparent">
-              <TableHead className="monitor-table-head w-2/5 whitespace-normal">Metric</TableHead>
-              <TableHead className="monitor-table-head w-3/10 text-right whitespace-normal break-words">
+              <TableHead className="monitor-table-head whitespace-normal">Metric</TableHead>
+              <TableHead className="monitor-table-head text-right whitespace-normal break-words">
                 {streamAName}
               </TableHead>
-              <TableHead className="monitor-table-head w-3/10 text-right whitespace-normal break-words">
+              <TableHead className="monitor-table-head text-right whitespace-normal break-words">
                 {streamBName}
+              </TableHead>
+              <TableHead className="monitor-table-head text-right whitespace-normal break-words">
+                {baseline1Name}
+              </TableHead>
+              <TableHead className="monitor-table-head text-right whitespace-normal break-words">
+                {baseline2Name}
               </TableHead>
             </TableRow>
           </TableHeader>
@@ -225,38 +250,66 @@ export function MetricsTable({
               <TableCell
                 className={cn(
                   "monitor-table-value monitor-table-value--numeric text-right whitespace-normal",
-                  getUptimeToneClass(stats.uptimeA),
+                  getUptimeToneClass(stats.a.uptimePercent),
                 )}
               >
-                {formatUptimePercent(stats.uptimeA, { minimumFractionDigits: 2 })}%
+                {formatUptimePercent(stats.a.uptimePercent, { minimumFractionDigits: 2 })}%
               </TableCell>
               <TableCell
                 className={cn(
                   "monitor-table-value monitor-table-value--numeric text-right whitespace-normal",
-                  getUptimeToneClass(stats.uptimeB),
+                  getUptimeToneClass(stats.b.uptimePercent),
                 )}
               >
-                {formatUptimePercent(stats.uptimeB, { minimumFractionDigits: 2 })}%
+                {formatUptimePercent(stats.b.uptimePercent, { minimumFractionDigits: 2 })}%
+              </TableCell>
+              <TableCell
+                className={cn(
+                  "monitor-table-value monitor-table-value--numeric text-right whitespace-normal",
+                  getUptimeToneClass(stats.baseline1.uptimePercent),
+                )}
+              >
+                {formatUptimePercent(stats.baseline1.uptimePercent, { minimumFractionDigits: 2 })}%
+              </TableCell>
+              <TableCell
+                className={cn(
+                  "monitor-table-value monitor-table-value--numeric text-right whitespace-normal",
+                  getUptimeToneClass(stats.baseline2.uptimePercent),
+                )}
+              >
+                {formatUptimePercent(stats.baseline2.uptimePercent, { minimumFractionDigits: 2 })}%
               </TableCell>
             </TableRow>
 
             <TableRow className="monitor-metrics-row">
               <TableCell className="monitor-table-label whitespace-normal">Observed Up</TableCell>
               <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
-                {formatDurationLong(stats.uptimeASeconds)}
+                {formatDurationLong(stats.a.uptimeSeconds)}
               </TableCell>
               <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
-                {formatDurationLong(stats.uptimeBSeconds)}
+                {formatDurationLong(stats.b.uptimeSeconds)}
+              </TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                {formatDurationLong(stats.baseline1.uptimeSeconds)}
+              </TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                {formatDurationLong(stats.baseline2.uptimeSeconds)}
               </TableCell>
             </TableRow>
 
             <TableRow className="monitor-metrics-row">
               <TableCell className="monitor-table-label whitespace-normal">Observed Down</TableCell>
               <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
-                {formatDurationLong(stats.downtimeASeconds)}
+                {formatDurationLong(stats.a.downtimeSeconds)}
               </TableCell>
               <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
-                {formatDurationLong(stats.downtimeBSeconds)}
+                {formatDurationLong(stats.b.downtimeSeconds)}
+              </TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                {formatDurationLong(stats.baseline1.downtimeSeconds)}
+              </TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                {formatDurationLong(stats.baseline2.downtimeSeconds)}
               </TableCell>
             </TableRow>
 
@@ -265,21 +318,35 @@ export function MetricsTable({
                 Coverage of {windowLabel} window
               </TableCell>
               <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
-                {stats.coverageA.toFixed(1)}%
+                {stats.a.coverage.toFixed(1)}%
               </TableCell>
               <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
-                {stats.coverageB.toFixed(1)}%
+                {stats.b.coverage.toFixed(1)}%
+              </TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                {stats.baseline1.coverage.toFixed(1)}%
+              </TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                {stats.baseline2.coverage.toFixed(1)}%
               </TableCell>
             </TableRow>
 
             <TableRow className="monitor-metrics-row">
               <TableCell className="monitor-table-label whitespace-normal">Rate</TableCell>
               <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
-                {stats.rateA.toFixed(2)}
+                {stats.a.rate.toFixed(2)}
                 <span className="monitor-table-unit">/s</span>
               </TableCell>
               <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
-                {stats.rateB.toFixed(2)}
+                {stats.b.rate.toFixed(2)}
+                <span className="monitor-table-unit">/s</span>
+              </TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                {stats.baseline1.rate.toFixed(2)}
+                <span className="monitor-table-unit">/s</span>
+              </TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                {stats.baseline2.rate.toFixed(2)}
                 <span className="monitor-table-unit">/s</span>
               </TableCell>
             </TableRow>
@@ -292,15 +359,27 @@ export function MetricsTable({
               <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
                 {stats.disconnectsB}
               </TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                <span className="monitor-stream-metric-value--empty">--</span>
+              </TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                <span className="monitor-stream-metric-value--empty">--</span>
+              </TableCell>
             </TableRow>
 
             <TableRow className="monitor-metrics-row">
               <TableCell className="monitor-table-label whitespace-normal">Messages</TableCell>
               <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
-                {stats.messagesA.toLocaleString()}
+                {stats.a.messages.toLocaleString()}
               </TableCell>
               <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
-                {stats.messagesB.toLocaleString()}
+                {stats.b.messages.toLocaleString()}
+              </TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                {stats.baseline1.messages.toLocaleString()}
+              </TableCell>
+              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                {stats.baseline2.messages.toLocaleString()}
               </TableCell>
             </TableRow>
           </TableBody>

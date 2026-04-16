@@ -12,6 +12,8 @@ use tracing::{debug, error, info, warn};
 pub enum StreamId {
     A,
     B,
+    Baseline1,
+    Baseline2,
 }
 
 #[derive(Deserialize)]

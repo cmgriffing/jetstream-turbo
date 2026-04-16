@@ -21,6 +21,18 @@ export interface StreamStats {
   connected_b?: boolean
   stream_a_name?: string
   stream_b_name?: string
+  baseline_1_name?: string
+  baseline_2_name?: string
+  baseline_1?: number
+  baseline_2?: number
+  rate_baseline_1?: number
+  rate_baseline_2?: number
+  connected_baseline_1?: boolean
+  connected_baseline_2?: boolean
+  uptime_baseline_1_all_time?: number
+  uptime_baseline_2_all_time?: number
+  current_streak_baseline_1?: number
+  current_streak_baseline_2?: number
 }
 
 interface UptimeHistoryResponse {
@@ -93,6 +105,12 @@ function normalizeUptimeRow(value: unknown): HourlyUptime | null {
     stream_b_disconnects: pickNumber(row, ['stream_b_disconnects', 'disconnects_b']),
     stream_a_messages: pickNumber(row, ['stream_a_messages', 'messages_a']),
     stream_b_messages: pickNumber(row, ['stream_b_messages', 'messages_b']),
+    baseline_1_seconds: pickNumber(row, ['baseline_1_seconds']),
+    baseline_2_seconds: pickNumber(row, ['baseline_2_seconds']),
+    baseline_1_downtime_seconds: pickNumber(row, ['baseline_1_downtime_seconds']),
+    baseline_2_downtime_seconds: pickNumber(row, ['baseline_2_downtime_seconds']),
+    baseline_1_messages: pickNumber(row, ['baseline_1_messages']),
+    baseline_2_messages: pickNumber(row, ['baseline_2_messages']),
   }
 }
 
@@ -300,4 +318,10 @@ export interface HourlyUptime {
   stream_b_disconnects: number
   stream_a_messages: number
   stream_b_messages: number
+  baseline_1_seconds: number
+  baseline_2_seconds: number
+  baseline_1_downtime_seconds: number
+  baseline_2_downtime_seconds: number
+  baseline_1_messages: number
+  baseline_2_messages: number
 }

@@ -14,6 +14,10 @@ use std::sync::Arc;
 const HOURLY_INTERVAL_SECONDS: u64 = 3600;
 const HOURLY_INTERVAL_SECONDS_I64: i64 = 3600;
 const HOURLY_UPTIME_CONTRACT_VERSION: i64 = 2;
+const BASELINE_1_URL: &str = "wss://jetstream1.us-west.bsky.network/subscribe";
+const BASELINE_2_URL: &str = "wss://jetstream2.us-west.bsky.network/subscribe";
+const BASELINE_1_NAME: &str = "Baseline 1 (jetstream1.us-west)";
+const BASELINE_2_NAME: &str = "Baseline 2 (jetstream2.us-west)";
 
 #[derive(Debug, Clone, Copy)]
 struct HourlyIntervalMetrics {
@@ -31,6 +35,12 @@ struct HourlyIntervalMetrics {
     delivery_latency_b_ms: f64,
     mttr_a_ms: u64,
     mttr_b_ms: u64,
+    baseline_1_uptime_seconds: u64,
+    baseline_2_uptime_seconds: u64,
+    baseline_1_downtime_seconds: u64,
+    baseline_2_downtime_seconds: u64,
+    baseline_1_messages: u64,
+    baseline_2_messages: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -104,6 +114,30 @@ fn build_interval_metrics(
             current.recovery_count_b,
             previous.recovery_count_b,
         ),
+        baseline_1_uptime_seconds: delta_counter(
+            current.baseline_1_uptime_seconds,
+            previous.baseline_1_uptime_seconds,
+        ),
+        baseline_2_uptime_seconds: delta_counter(
+            current.baseline_2_uptime_seconds,
+            previous.baseline_2_uptime_seconds,
+        ),
+        baseline_1_downtime_seconds: delta_counter(
+            current.baseline_1_downtime_seconds,
+            previous.baseline_1_downtime_seconds,
+        ),
+        baseline_2_downtime_seconds: delta_counter(
+            current.baseline_2_downtime_seconds,
+            previous.baseline_2_downtime_seconds,
+        ),
+        baseline_1_messages: delta_counter(
+            current.baseline_1_total_messages,
+            previous.baseline_1_total_messages,
+        ),
+        baseline_2_messages: delta_counter(
+            current.baseline_2_total_messages,
+            previous.baseline_2_total_messages,
+        ),
     }
 }
 
@@ -176,11 +210,15 @@ async fn main() -> Result<()> {
     let aggregator = StatsAggregator::new(
         settings.stream_a_name.clone(),
         settings.stream_b_name.clone(),
+        BASELINE_1_NAME.to_string(),
+        BASELINE_2_NAME.to_string(),
     );
     let broadcast_tx = Arc::new(aggregator.sender());
 
     let client_a = StreamClient::new(settings.stream_a_url.clone(), StreamId::A);
     let client_b = StreamClient::new(settings.stream_b_url.clone(), StreamId::B);
+    let client_baseline_1 = StreamClient::new(BASELINE_1_URL.to_string(), StreamId::Baseline1);
+    let client_baseline_2 = StreamClient::new(BASELINE_2_URL.to_string(), StreamId::Baseline2);
 
     let stats_for_stream = Arc::clone(&stats_internal);
     let uptime_for_status: Arc<std::sync::RwLock<UptimeTracker>> = Arc::clone(&uptime_tracker);
@@ -188,6 +226,8 @@ async fn main() -> Result<()> {
         use futures::StreamExt;
         let (mut stream_a, mut status_a) = client_a.stream_with_status();
         let (mut stream_b, mut status_b) = client_b.stream_with_status();
+        let (mut stream_b1, mut status_b1) = client_baseline_1.stream_with_status();
+        let (mut stream_b2, mut status_b2) = client_baseline_2.stream_with_status();
 
         loop {
             tokio::select! {
@@ -211,10 +251,28 @@ async fn main() -> Result<()> {
                         tracker.record_delivery_latency(StreamId::B, lat);
                     }
                 }
+                Some(msg) = stream_b1.next() => {
+                    uptime_for_status
+                        .write()
+                        .unwrap()
+                        .record_total_count(StreamId::Baseline1, msg.count);
+                }
+                Some(msg) = stream_b2.next() => {
+                    uptime_for_status
+                        .write()
+                        .unwrap()
+                        .record_total_count(StreamId::Baseline2, msg.count);
+                }
                 Some(status) = status_a.next() => {
                     uptime_for_status.write().unwrap().handle_connection_status(status);
                 }
                 Some(status) = status_b.next() => {
+                    uptime_for_status.write().unwrap().handle_connection_status(status);
+                }
+                Some(status) = status_b1.next() => {
+                    uptime_for_status.write().unwrap().handle_connection_status(status);
+                }
+                Some(status) = status_b2.next() => {
                     uptime_for_status.write().unwrap().handle_connection_status(status);
                 }
                 else => break,
@@ -243,12 +301,24 @@ async fn main() -> Result<()> {
             let current_hour = chrono::Utc::now().format("%Y-%m-%d %H").to_string();
 
             if current_hour != last_hour {
-                let (count_a, count_b) = {
+                let (count_a, count_b, baseline_1_count, baseline_2_count) = {
                     let internal = stats_for_storage.read().unwrap();
-                    (internal.total_a, internal.total_b)
+                    let up = uptime_for_storage.read().unwrap();
+                    (
+                        internal.total_a,
+                        internal.total_b,
+                        up.baseline_1.total_messages,
+                        up.baseline_2.total_messages,
+                    )
                 };
                 if let Err(e) = storage_arc
-                    .save_hourly(chrono::Utc::now(), count_a, count_b)
+                    .save_hourly(
+                        chrono::Utc::now(),
+                        count_a,
+                        count_b,
+                        baseline_1_count,
+                        baseline_2_count,
+                    )
                     .await
                 {
                     tracing::error!("Failed to save hourly stats: {}", e);
@@ -277,6 +347,12 @@ async fn main() -> Result<()> {
                         interval_metrics.delivery_latency_b_ms,
                         interval_metrics.mttr_a_ms,
                         interval_metrics.mttr_b_ms,
+                        interval_metrics.baseline_1_uptime_seconds,
+                        interval_metrics.baseline_2_uptime_seconds,
+                        interval_metrics.baseline_1_downtime_seconds,
+                        interval_metrics.baseline_2_downtime_seconds,
+                        interval_metrics.baseline_1_messages,
+                        interval_metrics.baseline_2_messages,
                         HOURLY_UPTIME_CONTRACT_VERSION,
                     )
                     .await

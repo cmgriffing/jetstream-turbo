@@ -36,6 +36,8 @@ interface ChartProps {
   data: HourlyUptime[];
   streamAName: string;
   streamBName: string;
+  baseline1Name?: string;
+  baseline2Name?: string;
   renderState?: ChartRenderState;
   windowLabel?: string;
 }
@@ -49,6 +51,9 @@ interface ChartPalette {
   streamABg: string;
   streamB: string;
   streamBBg: string;
+  baseline: string;
+  baselineBg: string;
+  baselineDashed: number[];
   grid: string;
   text: string;
   textLight: string;
@@ -82,6 +87,9 @@ function getChartPalette(): ChartPalette {
     streamABg: readCssVar("--monitor-glow-a", "rgba(67, 223, 143, 0.16)"),
     streamB: readCssVar("--monitor-accent-b", "#57b7ff"),
     streamBBg: readCssVar("--monitor-glow-b", "rgba(87, 183, 255, 0.16)"),
+    baseline: readCssVar("--monitor-accent-neutral", "#c9d3e8"),
+    baselineBg: readCssVar("--monitor-glow-baseline", "rgba(201, 211, 232, 0.1)"),
+    baselineDashed: [4, 3],
     grid: readCssVar("--monitor-border-strong", "#3f5f8f"),
     text: readCssVar("--monitor-text-faint", "#5f7598"),
     textLight: readCssVar("--monitor-text-dim", "#91a8cb"),
@@ -309,6 +317,8 @@ export function UptimeChart24h({
   data,
   streamAName,
   streamBName,
+  baseline1Name = "BASELINE_1",
+  baseline2Name = "BASELINE_2",
   renderState = "ready",
   windowLabel = "24H",
 }: ChartProps) {
@@ -332,16 +342,31 @@ export function UptimeChart24h({
       const observed = uptime + downtime;
       return observed > 0 ? clampPercent((uptime / observed) * 100) : 0;
     });
-    const uptimeDomain = getAdaptiveDomain([...uptimeA, ...uptimeB], {
-      defaultMin: 0,
-      defaultMax: 100,
-      minPadding: 0.25,
-      minSpan: 2,
-      paddingRatio: 0.12,
-      flatPaddingRatio: 0.03,
-      clampMin: 0,
-      clampMax: 100,
+    const uptimeBaseline1 = data.map((row) => {
+      const uptime = toNonNegative(row.baseline_1_seconds);
+      const downtime = toNonNegative(row.baseline_1_downtime_seconds);
+      const observed = uptime + downtime;
+      return observed > 0 ? clampPercent((uptime / observed) * 100) : 0;
     });
+    const uptimeBaseline2 = data.map((row) => {
+      const uptime = toNonNegative(row.baseline_2_seconds);
+      const downtime = toNonNegative(row.baseline_2_downtime_seconds);
+      const observed = uptime + downtime;
+      return observed > 0 ? clampPercent((uptime / observed) * 100) : 0;
+    });
+    const uptimeDomain = getAdaptiveDomain(
+      [...uptimeA, ...uptimeB, ...uptimeBaseline1, ...uptimeBaseline2],
+      {
+        defaultMin: 0,
+        defaultMax: 100,
+        minPadding: 0.25,
+        minSpan: 2,
+        paddingRatio: 0.12,
+        flatPaddingRatio: 0.03,
+        clampMin: 0,
+        clampMax: 100,
+      },
+    );
 
     return {
       chartData: {
@@ -362,6 +387,24 @@ export function UptimeChart24h({
             backgroundColor: palette.streamB,
             borderColor: palette.streamB,
             borderWidth: 0,
+            borderRadius: 0,
+            borderSkipped: false,
+          },
+          {
+            label: baseline1Name,
+            data: uptimeBaseline1,
+            backgroundColor: palette.baseline,
+            borderColor: palette.baseline,
+            borderWidth: 0,
+            borderRadius: 0,
+            borderSkipped: false,
+          },
+          {
+            label: baseline2Name,
+            data: uptimeBaseline2,
+            backgroundColor: palette.baselineBg,
+            borderColor: palette.baseline,
+            borderWidth: 1,
             borderRadius: 0,
             borderSkipped: false,
           },
@@ -413,7 +456,7 @@ export function UptimeChart24h({
         },
       },
     };
-  }, [data, hasData, palette, streamAName, streamBName]);
+  }, [data, hasData, palette, streamAName, streamBName, baseline1Name, baseline2Name]);
 
   if (!chartContent) {
     return <ChartStateEmpty title={title} state={renderState} heightClass="h-[288px]" />;
@@ -445,6 +488,8 @@ export function RateChart({
   data,
   streamAName,
   streamBName,
+  baseline1Name = "BASELINE_1",
+  baseline2Name = "BASELINE_2",
   renderState = "ready",
   windowLabel = "24H",
   intervalSeconds = 3600,
@@ -474,15 +519,34 @@ export function RateChart({
       const denominator = observed > 0 ? observed : safeIntervalSeconds;
       return messages / denominator;
     });
-    const rateDomain = getAdaptiveDomain([...rateA, ...rateB], {
-      defaultMin: 0,
-      defaultMax: 1,
-      minPadding: 0.05,
-      minSpan: 0.2,
-      paddingRatio: 0.12,
-      flatPaddingRatio: 0.2,
-      clampMin: 0,
+    const rateBaseline1 = data.map((row) => {
+      const messages = toNonNegative(row.baseline_1_messages);
+      const observed =
+        toNonNegative(row.baseline_1_seconds) +
+        toNonNegative(row.baseline_1_downtime_seconds);
+      const denominator = observed > 0 ? observed : safeIntervalSeconds;
+      return messages / denominator;
     });
+    const rateBaseline2 = data.map((row) => {
+      const messages = toNonNegative(row.baseline_2_messages);
+      const observed =
+        toNonNegative(row.baseline_2_seconds) +
+        toNonNegative(row.baseline_2_downtime_seconds);
+      const denominator = observed > 0 ? observed : safeIntervalSeconds;
+      return messages / denominator;
+    });
+    const rateDomain = getAdaptiveDomain(
+      [...rateA, ...rateB, ...rateBaseline1, ...rateBaseline2],
+      {
+        defaultMin: 0,
+        defaultMax: 1,
+        minPadding: 0.05,
+        minSpan: 0.2,
+        paddingRatio: 0.12,
+        flatPaddingRatio: 0.2,
+        clampMin: 0,
+      },
+    );
 
     return {
       chartData: {
@@ -508,6 +572,30 @@ export function RateChart({
             borderWidth: 2,
             pointRadius: 2,
             pointHoverRadius: 4,
+            pointHoverBorderWidth: 2,
+          },
+          {
+            label: baseline1Name,
+            data: rateBaseline1,
+            borderColor: palette.baseline,
+            backgroundColor: "transparent",
+            borderDash: palette.baselineDashed,
+            tension: 0.12,
+            borderWidth: 1.5,
+            pointRadius: 1,
+            pointHoverRadius: 3,
+            pointHoverBorderWidth: 2,
+          },
+          {
+            label: baseline2Name,
+            data: rateBaseline2,
+            borderColor: palette.baseline,
+            backgroundColor: "transparent",
+            borderDash: [2, 4],
+            tension: 0.12,
+            borderWidth: 1.5,
+            pointRadius: 1,
+            pointHoverRadius: 3,
             pointHoverBorderWidth: 2,
           },
         ],
@@ -563,7 +651,7 @@ export function RateChart({
         },
       },
     };
-  }, [data, hasData, intervalSeconds, palette, streamAName, streamBName]);
+  }, [data, hasData, intervalSeconds, palette, streamAName, streamBName, baseline1Name, baseline2Name]);
 
   if (!chartContent) {
     return <ChartStateEmpty title={title} state={renderState} heightClass="h-[236px]" />;

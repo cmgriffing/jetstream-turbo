@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
 import { formatUptimePercent } from "@/lib/uptime";
 
 interface StreamCardProps {
-  streamId: "a" | "b";
+  streamId: "a" | "b" | "baseline-1" | "baseline-2";
   name: string;
   count: number;
   countingStartedAt?: string;
@@ -52,7 +52,11 @@ export const StreamCard = memo(function StreamCard({
   connected,
 }: StreamCardProps) {
   const streamVariantClass =
-    streamId === "a" ? "monitor-stream-card--a" : "monitor-stream-card--b";
+    streamId === "a"
+      ? "monitor-stream-card--a"
+      : streamId === "b"
+        ? "monitor-stream-card--b"
+        : "monitor-stream-card--baseline";
 
   return (
     <article className={cn("monitor-stream-card", streamVariantClass)}>

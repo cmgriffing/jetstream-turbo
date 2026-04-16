@@ -42,21 +42,42 @@ pub struct StreamStats {
     pub mttr_b_ms: u64,
     pub current_streak_a: f64,
     pub current_streak_b: f64,
+    pub baseline_1_name: String,
+    pub baseline_2_name: String,
+    pub baseline_1: u64,
+    pub baseline_2: u64,
+    pub rate_baseline_1: f64,
+    pub rate_baseline_2: f64,
+    pub connected_baseline_1: bool,
+    pub connected_baseline_2: bool,
+    pub uptime_baseline_1_all_time: f64,
+    pub uptime_baseline_2_all_time: f64,
+    pub current_streak_baseline_1: f64,
+    pub current_streak_baseline_2: f64,
 }
 
 pub struct StatsAggregator {
     tx: broadcast::Sender<StreamStats>,
     stream_a_name: String,
     stream_b_name: String,
+    baseline_1_name: String,
+    baseline_2_name: String,
 }
 
 impl StatsAggregator {
-    pub fn new(stream_a_name: String, stream_b_name: String) -> Self {
+    pub fn new(
+        stream_a_name: String,
+        stream_b_name: String,
+        baseline_1_name: String,
+        baseline_2_name: String,
+    ) -> Self {
         let (tx, _) = broadcast::channel(16);
         Self {
             tx,
             stream_a_name,
             stream_b_name,
+            baseline_1_name,
+            baseline_2_name,
         }
     }
 
@@ -78,6 +99,8 @@ impl StatsAggregator {
         let uptime = Arc::clone(uptime);
         let stream_a_name = self.stream_a_name.clone();
         let stream_b_name = self.stream_b_name.clone();
+        let baseline_1_name = self.baseline_1_name.clone();
+        let baseline_2_name = self.baseline_2_name.clone();
         let counting_started_at = Utc::now();
 
         tokio::spawn(async move {
@@ -140,6 +163,35 @@ impl StatsAggregator {
                     )
                 };
 
+                let (
+                    baseline_1_total,
+                    baseline_2_total,
+                    rate_baseline_1,
+                    rate_baseline_2,
+                    connected_baseline_1,
+                    connected_baseline_2,
+                    uptime_baseline_1_all_time,
+                    uptime_baseline_2_all_time,
+                    streak_baseline_1,
+                    streak_baseline_2,
+                ) = {
+                    let up = uptime.read().unwrap();
+                    let (rate_b1, rate_b2) = up.get_baseline_rates();
+                    let (uptime_b1, uptime_b2) = up.get_baseline_uptime_percentages();
+                    (
+                        up.baseline_1.total_messages,
+                        up.baseline_2.total_messages,
+                        rate_b1,
+                        rate_b2,
+                        up.baseline_1.connected,
+                        up.baseline_2.connected,
+                        uptime_b1,
+                        uptime_b2,
+                        up.get_baseline_1_streak(),
+                        up.get_baseline_2_streak(),
+                    )
+                };
+
                 let stats_snapshot = StreamStats {
                     stream_a: internal.total_a,
                     stream_b: internal.total_b,
@@ -169,6 +221,18 @@ impl StatsAggregator {
                     mttr_b_ms: mttr_b,
                     current_streak_a: streak_a,
                     current_streak_b: streak_b,
+                    baseline_1_name: baseline_1_name.clone(),
+                    baseline_2_name: baseline_2_name.clone(),
+                    baseline_1: baseline_1_total,
+                    baseline_2: baseline_2_total,
+                    rate_baseline_1,
+                    rate_baseline_2,
+                    connected_baseline_1,
+                    connected_baseline_2,
+                    uptime_baseline_1_all_time,
+                    uptime_baseline_2_all_time,
+                    current_streak_baseline_1: streak_baseline_1,
+                    current_streak_baseline_2: streak_baseline_2,
                 };
 
                 let _ = tx.send(stats_snapshot);
@@ -188,6 +252,7 @@ impl StreamStatsInternal {
         match msg.stream_id {
             StreamId::A => self.total_a = msg.count,
             StreamId::B => self.total_b = msg.count,
+            StreamId::Baseline1 | StreamId::Baseline2 => {}
         }
     }
 
@@ -195,6 +260,19 @@ impl StreamStatsInternal {
         self.total_a = total_a;
         self.total_b = total_b;
     }
+}
+
+#[derive(Debug, Default)]
+pub struct BaselineStream {
+    pub connected: bool,
+    pub connected_at: Option<Instant>,
+    pub session_start: Option<Instant>,
+    pub disconnected_at: Option<Instant>,
+    pub session_start_disconnected: Option<Instant>,
+    pub connected_seconds: u64,
+    pub disconnected_seconds: u64,
+    pub total_messages: u64,
+    pub message_samples: VecDeque<(Instant, u64)>,
 }
 
 #[derive(Debug)]
@@ -232,6 +310,8 @@ pub struct UptimeTracker {
     total_recovery_time_b_ms: u64,
     recovery_count_a: u64,
     recovery_count_b: u64,
+    pub baseline_1: BaselineStream,
+    pub baseline_2: BaselineStream,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -254,6 +334,12 @@ pub struct UptimeMetricsSnapshot {
     pub recovery_count_b: u64,
     pub delivery_latency_a_ms: f64,
     pub delivery_latency_b_ms: f64,
+    pub baseline_1_uptime_seconds: u64,
+    pub baseline_2_uptime_seconds: u64,
+    pub baseline_1_downtime_seconds: u64,
+    pub baseline_2_downtime_seconds: u64,
+    pub baseline_1_total_messages: u64,
+    pub baseline_2_total_messages: u64,
 }
 
 impl Default for UptimeTracker {
@@ -292,6 +378,8 @@ impl Default for UptimeTracker {
             total_recovery_time_b_ms: 0,
             recovery_count_a: 0,
             recovery_count_b: 0,
+            baseline_1: BaselineStream::default(),
+            baseline_2: BaselineStream::default(),
         }
     }
 }
@@ -375,6 +463,37 @@ impl UptimeTracker {
                     self.disconnect_count_b += 1;
                 }
             }
+            StreamId::Baseline1 => Self::apply_baseline_status(&mut self.baseline_1, status, now),
+            StreamId::Baseline2 => Self::apply_baseline_status(&mut self.baseline_2, status, now),
+        }
+    }
+
+    fn apply_baseline_status(
+        baseline: &mut BaselineStream,
+        status: ConnectionStatus,
+        now: Instant,
+    ) {
+        if status.connected {
+            if !baseline.connected {
+                if let Some(session_start) = baseline.session_start_disconnected.take() {
+                    let elapsed = now.duration_since(session_start).as_secs();
+                    baseline.disconnected_seconds =
+                        baseline.disconnected_seconds.saturating_add(elapsed);
+                }
+            }
+            baseline.session_start = Some(now);
+            baseline.connected = true;
+            baseline.connected_at = Some(now);
+            baseline.disconnected_at = None;
+        } else {
+            if let Some(session_start) = baseline.session_start.take() {
+                let elapsed = now.duration_since(session_start).as_secs();
+                baseline.connected_seconds =
+                    baseline.connected_seconds.saturating_add(elapsed);
+            }
+            baseline.connected = false;
+            baseline.disconnected_at = Some(now);
+            baseline.session_start_disconnected = Some(now);
         }
     }
 
@@ -382,6 +501,8 @@ impl UptimeTracker {
         match stream_id {
             StreamId::A => self.total_messages_a += 1,
             StreamId::B => self.total_messages_b += 1,
+            StreamId::Baseline1 => self.baseline_1.total_messages += 1,
+            StreamId::Baseline2 => self.baseline_2.total_messages += 1,
         }
     }
 
@@ -396,6 +517,14 @@ impl UptimeTracker {
             StreamId::B => {
                 self.total_messages_b = total_count;
                 Self::record_sample(&mut self.message_samples_b, now, total_count);
+            }
+            StreamId::Baseline1 => {
+                self.baseline_1.total_messages = total_count;
+                Self::record_sample(&mut self.baseline_1.message_samples, now, total_count);
+            }
+            StreamId::Baseline2 => {
+                self.baseline_2.total_messages = total_count;
+                Self::record_sample(&mut self.baseline_2.message_samples, now, total_count);
             }
         }
     }
@@ -423,6 +552,7 @@ impl UptimeTracker {
                     }
                 }
             }
+            StreamId::Baseline1 | StreamId::Baseline2 => {}
         }
     }
 
@@ -631,6 +761,7 @@ impl UptimeTracker {
     pub fn get_metrics_snapshot(&self) -> UptimeMetricsSnapshot {
         let (uptime_a_seconds, uptime_b_seconds) = self.get_all_time_uptime_seconds();
         let (downtime_a_seconds, downtime_b_seconds) = self.get_all_time_downtime_seconds();
+        let now = Instant::now();
 
         UptimeMetricsSnapshot {
             uptime_a_seconds,
@@ -651,6 +782,12 @@ impl UptimeTracker {
             recovery_count_b: self.recovery_count_b,
             delivery_latency_a_ms: self.get_delivery_latency_a_ms(),
             delivery_latency_b_ms: self.get_delivery_latency_b_ms(),
+            baseline_1_uptime_seconds: Self::baseline_uptime_seconds(&self.baseline_1, now),
+            baseline_2_uptime_seconds: Self::baseline_uptime_seconds(&self.baseline_2, now),
+            baseline_1_downtime_seconds: Self::baseline_downtime_seconds(&self.baseline_1, now),
+            baseline_2_downtime_seconds: Self::baseline_downtime_seconds(&self.baseline_2, now),
+            baseline_1_total_messages: self.baseline_1.total_messages,
+            baseline_2_total_messages: self.baseline_2.total_messages,
         }
     }
 
@@ -705,6 +842,65 @@ impl UptimeTracker {
         } else {
             0.0
         }
+    }
+
+    pub fn get_baseline_rates(&self) -> (f64, f64) {
+        let now = Instant::now();
+        (
+            Self::rolling_rate(&self.baseline_1.message_samples, now),
+            Self::rolling_rate(&self.baseline_2.message_samples, now),
+        )
+    }
+
+    fn baseline_uptime_seconds(baseline: &BaselineStream, now: Instant) -> u64 {
+        if baseline.connected {
+            let current = baseline
+                .connected_at
+                .map(|start| now.duration_since(start).as_secs())
+                .unwrap_or(0);
+            baseline.connected_seconds.saturating_add(current)
+        } else {
+            baseline.connected_seconds
+        }
+    }
+
+    fn baseline_downtime_seconds(baseline: &BaselineStream, now: Instant) -> u64 {
+        if baseline.connected {
+            baseline.disconnected_seconds
+        } else {
+            let current = baseline
+                .disconnected_at
+                .map(|d| now.duration_since(d).as_secs())
+                .unwrap_or(0);
+            baseline.disconnected_seconds.saturating_add(current)
+        }
+    }
+
+    pub fn get_baseline_uptime_percentages(&self) -> (f64, f64) {
+        let now = Instant::now();
+        let server_run_time = now.duration_since(self.server_start_time).as_secs();
+        if server_run_time == 0 {
+            return (0.0, 0.0);
+        }
+        let down_1 = Self::baseline_downtime_seconds(&self.baseline_1, now);
+        let down_2 = Self::baseline_downtime_seconds(&self.baseline_2, now);
+        let up_1 = 100.0 - ((down_1 as f64 / server_run_time as f64) * 100.0);
+        let up_2 = 100.0 - ((down_2 as f64 / server_run_time as f64) * 100.0);
+        (up_1.max(0.0).min(100.0), up_2.max(0.0).min(100.0))
+    }
+
+    pub fn get_baseline_1_streak(&self) -> f64 {
+        self.baseline_1
+            .connected_at
+            .map(|t| t.elapsed().as_secs() as f64)
+            .unwrap_or(0.0)
+    }
+
+    pub fn get_baseline_2_streak(&self) -> f64 {
+        self.baseline_2
+            .connected_at
+            .map(|t| t.elapsed().as_secs() as f64)
+            .unwrap_or(0.0)
     }
 
     pub fn get_detailed_stats(&self, period_seconds: u64) -> UptimeDetailedStats {
