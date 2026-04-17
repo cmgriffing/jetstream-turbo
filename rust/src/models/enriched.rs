@@ -87,7 +87,7 @@ pub struct ProcessingMetrics {
 }
 
 impl EnrichedRecord {
-    #[inline(always)]
+    #[inline]
     pub fn new(message: JetstreamMessage) -> Self {
         Self {
             message,
