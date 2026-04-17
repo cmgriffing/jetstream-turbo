@@ -1,5 +1,19 @@
 # Optimization Findings
 
+## serde_json_serialize_profile Benchmark (2026-04-15)
+- **Baseline**: 235ns (serde_json)
+- **Current**: 182ns (simd-json + skip_serializing_if) — **22% improvement**
+- **Changes**:
+  - Switched `serde_json_serialize_profile` benchmark to use simd-json
+  - Added `skip_serializing_if = "Option::is_none"` to optional String and numeric fields
+  - Verified byte-for-byte output equivalence between serde_json and simd-json
+- **Production Benefits**:
+  - Full profiles: ~182ns (22% improvement)
+  - Minimal profiles (many None fields): ~66ns (50% improvement vs previous 128ns)
+- **Files Changed**:
+  - `benches/hydration_benchmark.rs`: Benchmark uses simd-json
+  - `src/models/bluesky.rs`: BlueskyProfile has skip_serializing_if on optional fields
+
 ## Pipeline Benchmark (full_pipeline_batch_25)
 - **Baseline**: 87.24 µs
 - **Best**: 86.41 µs (0.9% improvement) via allocation reduction in `hydrate_message` (borrowing DID for cache get).
@@ -38,11 +52,13 @@
   - Experiment with moka's `try_get_with` for potential caching of hash computation
 
 ## General Notes
-- `simd-json` is faster for deserialization (used in Jetstream parsing), but not for serialization of `EnrichedRecord` (regression observed).
+- `simd-json` is faster for BlueskyProfile **serialization** (~25% improvement)
+- `simd-json` is **slower** for BlueskyProfile **deserialization** (~2.5x slower: 616ns vs 250ns) - likely due to Arc<str> handling overhead
 - Cache `get` operations are already very fast (~65 ns optimized). `set` is slower (~482 ns) but only on misses.
 - Tests must pass; any change must maintain correctness.
 
 ## Next Steps (if continuing)
+- Consider switching other serialization use cases from serde_json to simd-json where output equivalence is verified.
 - Try prepared statement caching in `SQLiteStore::store_batch`.
 - Explore reducing `message_metadata` serialization cost (maybe skip empty fields).
 - Investigate if `turbocharger` orchestration can batch records larger than current max to reduce transaction overhead.
