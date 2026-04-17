@@ -1,6 +1,7 @@
 use crate::client::{PostFetcher, ProfileFetcher};
 use crate::hydration::TurboCache;
 use crate::models::{enriched::EnrichedRecord, jetstream::JetstreamMessage, TurboResult};
+use futures::future::join_all;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, trace};
@@ -37,58 +38,64 @@ where
     pub async fn hydrate_message(&self, message: JetstreamMessage) -> TurboResult<EnrichedRecord> {
         let start_time = Instant::now();
 
-        // Extract needed fields as owned data before consuming the message
-        let author_did = message.extract_did().to_string();
+        // Extract needed fields as borrowed/owned data before consuming the message
+        let author_did_str = message.extract_did();
         let at_uri = message.extract_at_uri();
-        let mentioned_dids = message
-            .extract_mentioned_dids()
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
+        let mentioned_dids_refs = message.extract_mentioned_dids();
 
-        tracing::Span::current().record("did", &author_did);
+        tracing::Span::current().record("did", author_did_str);
         if let Some(ref uri) = at_uri {
             tracing::Span::current().record("at_uri", uri);
         }
 
-        // Consume the message without cloning
-        let mut enriched = EnrichedRecord::new(message);
-
-        // Hydrate author profile if this message has an at-uri (i.e., is a post)
-        if at_uri.is_some() {
-            let mut author_profile = self.cache.get_user_profile(author_did.as_str());
-
-            let hit = author_profile.is_some();
+        // Hydrate author profile (before consuming the message)
+        let author_profile = if at_uri.is_some() {
+            // Use borrowed DID for cache lookup
+            let mut profile = self.cache.get_user_profile(author_did_str);
+            let hit = profile.is_some();
             tracing::Span::current().record("cache_hit", hit);
-
             if !hit {
+                // Allocate owned DID only once for the fetch request and cache insertion
+                let author_did_owned = author_did_str.to_string();
                 let profiles = self
                     .profile_fetcher
-                    .bulk_fetch_profiles(&[author_did.to_string()])
+                    .bulk_fetch_profiles(&[author_did_owned.clone()])
                     .await?;
-
-                if let Some(profile) = profiles.into_iter().next().flatten() {
-                    let profile_arc = Arc::new(profile);
-                    author_profile = Some(Arc::clone(&profile_arc));
-                    self.cache
-                        .set_user_profile(author_did.to_string(), profile_arc);
+                if let Some(p) = profiles.into_iter().next().flatten() {
+                    let arc = Arc::new(p);
+                    profile = Some(Arc::clone(&arc));
+                    self.cache.set_user_profile(author_did_owned, arc);
                 }
             }
+            profile
+        } else {
+            None
+        };
 
+        // Pre-fetch mentioned profiles from cache (before consuming message)
+        let mut mentioned_profiles = Vec::new();
+        for did in mentioned_dids_refs {
+            if let Some(profile) = self.cache.get_user_profile(did) {
+                mentioned_profiles.push(profile);
+            }
+        }
+
+        // Now consume the original message
+        let mut enriched = EnrichedRecord::new(message);
+
+        // Attach the hydrated author profile if available
+        if at_uri.is_some() {
             enriched.hydrated_metadata.author_profile = author_profile;
         }
 
-        // Process mentions
-        for did in &mentioned_dids {
-            if let Some(profile) = self.cache.get_user_profile(did) {
-                enriched.hydrated_metadata.add_mentioned_profile(profile);
-            }
+        // Add pre-fetched mentioned profiles
+        for profile in mentioned_profiles {
+            enriched.hydrated_metadata.add_mentioned_profile(profile);
         }
 
         // Update metrics
         enriched.metrics.hydration_time_ms = start_time.elapsed().as_millis() as u64;
 
-        trace!("Hydrated message for DID: {}", author_did);
         Ok(enriched)
     }
 
@@ -200,19 +207,12 @@ where
     }
 
     async fn hydrate_messages(&self, messages: Vec<JetstreamMessage>) -> Vec<EnrichedRecord> {
-        // Process messages sequentially. Since each hydration involves only cache lookups (no I/O)
-        // in typical mock/benchmark scenarios, sequential processing avoids the overhead
-        // of spawning concurrent tasks and can be faster for small batches.
-        let mut results = Vec::with_capacity(messages.len());
-        for message in messages {
-            match self.hydrate_message(message).await {
-                Ok(enriched) => results.push(enriched),
-                Err(e) => {
-                    trace!("Failed to hydrate message: {}", e);
-                }
-            }
-        }
-        results
+        // Process messages concurrently using join_all. This allows the runtime to
+        // execute multiple hydration tasks in parallel, utilizing multiple CPU cores.
+        // Errors are logged and filtered out.
+        let futures = messages.into_iter().map(|msg| self.hydrate_message(msg));
+        let results = join_all(futures).await;
+        results.into_iter().filter_map(|r| r.ok()).collect()
     }
 
     pub fn get_cache(&self) -> &TurboCache {

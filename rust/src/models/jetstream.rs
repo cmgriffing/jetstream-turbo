@@ -59,7 +59,7 @@ pub struct JetstreamMessage {
     pub commit: Option<CommitData>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct CommitData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rev: Option<String>,
@@ -73,6 +73,33 @@ pub struct CommitData {
     pub record: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
+}
+
+impl Serialize for CommitData {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("CommitData", 6)?;
+        if let Some(ref rev) = self.rev {
+            state.serialize_field("rev", rev)?;
+        }
+        state.serialize_field("operation", &self.operation_type)?;
+        if let Some(ref collection) = self.collection {
+            state.serialize_field("collection", collection)?;
+        }
+        if let Some(ref rkey) = self.rkey {
+            state.serialize_field("rkey", rkey)?;
+        }
+        if let Some(ref record) = self.record {
+            state.serialize_field("record", record)?;
+        }
+        if let Some(ref cid) = self.cid {
+            state.serialize_field("cid", cid)?;
+        }
+        state.end()
+    }
 }
 
 impl JetstreamMessage {

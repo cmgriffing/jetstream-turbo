@@ -2,9 +2,12 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use jetstream_turbo_rs::hydration::TurboCache;
 use jetstream_turbo_rs::models::bluesky::{BlueskyPost, BlueskyProfile};
 use jetstream_turbo_rs::models::enriched::{EnrichedRecord, HydratedMetadata, ProcessingMetrics};
-use jetstream_turbo_rs::models::jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType};
+use jetstream_turbo_rs::models::jetstream::{
+    CommitData, JetstreamMessage, MessageKind, OperationType,
+};
 use jetstream_turbo_rs::storage::{SQLitePragmaConfig, SQLiteStore};
 use serde_json::json;
+use simd_json;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -231,8 +234,14 @@ fn bench_cache_operations(c: &mut Criterion) {
 fn bench_serialization(c: &mut Criterion) {
     c.bench_function("serde_json_serialize_profile", |b| {
         let profile = create_test_profile(0);
+        
+        // Verify equivalence once
+        let serde_out = serde_json::to_string(&profile).unwrap();
+        let simd_out = simd_json::to_string(&profile).unwrap();
+        assert_eq!(serde_out, simd_out);
+        
         b.iter(|| {
-            let _json = serde_json::to_string(&profile).unwrap();
+            let _json = simd_json::to_string(&profile).unwrap();
         });
     });
 
@@ -272,7 +281,7 @@ fn bench_serialization(c: &mut Criterion) {
             },
         };
         b.iter(|| {
-            let _json = serde_json::to_string(&record).unwrap();
+            let _json = simd_json::to_string(&record).unwrap();
         });
     });
 }

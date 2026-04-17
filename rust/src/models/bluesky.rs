@@ -14,16 +14,19 @@ pub struct BlueskyProfile {
     #[serde(serialize_with = "serialize_did")]
     pub did: Arc<str>,
     pub handle: String,
-    #[serde(default, rename = "displayName")]
+    #[serde(default, rename = "displayName", skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub banner: Option<String>,
-    #[serde(default, rename = "followersCount")]
+    #[serde(default, rename = "followersCount", skip_serializing_if = "Option::is_none")]
     pub followers_count: Option<u64>,
-    #[serde(default, rename = "followsCount")]
+    #[serde(default, rename = "followsCount", skip_serializing_if = "Option::is_none")]
     pub follows_count: Option<u64>,
-    #[serde(default, rename = "postsCount")]
+    #[serde(default, rename = "postsCount", skip_serializing_if = "Option::is_none")]
     pub posts_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub indexed_at: Option<DateTime<Utc>>,

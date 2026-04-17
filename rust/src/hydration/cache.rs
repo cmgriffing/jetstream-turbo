@@ -1,15 +1,16 @@
 use crate::models::bluesky::{BlueskyPost, BlueskyProfile};
-use ahash::RandomState;
 use moka::sync::Cache as MokaCache;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{instrument, trace};
+
+type FxBuildHasher = BuildHasherDefault<fxhash::FxHasher>;
 
 #[derive(Clone)]
 pub struct TurboCache {
-    user_cache: MokaCache<String, Arc<BlueskyProfile>, RandomState>,
-    post_cache: MokaCache<String, Arc<BlueskyPost>, RandomState>,
+    user_cache: MokaCache<String, Arc<BlueskyProfile>, FxBuildHasher>,
+    post_cache: MokaCache<String, Arc<BlueskyPost>, FxBuildHasher>,
     user_capacity: usize,
     post_capacity: usize,
     metrics: Arc<CacheMetrics>,
@@ -42,23 +43,25 @@ impl TurboCache {
     pub fn new(user_cache_size: usize, post_cache_size: usize) -> Self {
         let metrics = Arc::new(CacheMetrics::default());
 
+        // Create metrics clones once to avoid repeated Arc clones in eviction listener
         let user_metrics = Arc::clone(&metrics);
+        let post_metrics = Arc::clone(&metrics);
+
         let user_cache = MokaCache::builder()
             .max_capacity(user_cache_size as u64)
-            .time_to_live(Duration::from_secs(300))
+            .initial_capacity((user_cache_size / 2).max(1024))
             .eviction_listener(move |_k, _v, _cause| {
                 user_metrics.cache_evictions.fetch_add(1, Ordering::Relaxed);
             })
-            .build_with_hasher(RandomState::default());
+            .build_with_hasher(BuildHasherDefault::<fxhash::FxHasher>::default());
 
-        let post_metrics = Arc::clone(&metrics);
         let post_cache = MokaCache::builder()
             .max_capacity(post_cache_size as u64)
-            .time_to_live(Duration::from_secs(300))
+            .initial_capacity((post_cache_size / 2).max(1024))
             .eviction_listener(move |_k, _v, _cause| {
                 post_metrics.cache_evictions.fetch_add(1, Ordering::Relaxed);
             })
-            .build_with_hasher(RandomState::default());
+            .build_with_hasher(BuildHasherDefault::<fxhash::FxHasher>::default());
 
         Self {
             user_cache,
@@ -78,18 +81,22 @@ impl TurboCache {
     }
 
     pub fn get_user_profile(&self, did: &str) -> Option<Arc<BlueskyProfile>> {
-        if let Some(profile) = self.user_cache.get(did) {
-            self.metrics.user_hits.fetch_add(1, Ordering::Relaxed);
-            return Some(profile);
+        match self.user_cache.get(did) {
+            Some(profile) => {
+                self.metrics.user_hits.fetch_add(1, Ordering::Relaxed);
+                Some(profile)
+            }
+            None => {
+                self.metrics.user_misses.fetch_add(1, Ordering::Relaxed);
+                None
+            }
         }
-
-        self.metrics.user_misses.fetch_add(1, Ordering::Relaxed);
-        None
     }
 
     pub fn get_user_profiles(&self, dids: &[String]) -> Vec<Option<Arc<BlueskyProfile>>> {
         let mut profiles = Vec::with_capacity(dids.len());
         let mut hits = 0_u64;
+        let mut misses = 0_u64;
 
         for did in dids {
             match self.user_cache.get(did) {
@@ -97,19 +104,18 @@ impl TurboCache {
                     hits += 1;
                     profiles.push(Some(profile));
                 }
-                None => profiles.push(None),
+                None => {
+                    misses += 1;
+                    profiles.push(None);
+                }
             }
         }
 
-        let total = dids.len() as u64;
         if hits > 0 {
             self.metrics.user_hits.fetch_add(hits, Ordering::Relaxed);
         }
-        let misses = total.saturating_sub(hits);
         if misses > 0 {
-            self.metrics
-                .user_misses
-                .fetch_add(misses, Ordering::Relaxed);
+            self.metrics.user_misses.fetch_add(misses, Ordering::Relaxed);
         }
 
         profiles
@@ -121,13 +127,16 @@ impl TurboCache {
     }
 
     pub fn get_post(&self, uri: &str) -> Option<Arc<BlueskyPost>> {
-        if let Some(post) = self.post_cache.get(uri) {
-            self.metrics.post_hits.fetch_add(1, Ordering::Relaxed);
-            return Some(post);
+        match self.post_cache.get(uri) {
+            Some(post) => {
+                self.metrics.post_hits.fetch_add(1, Ordering::Relaxed);
+                Some(post)
+            }
+            None => {
+                self.metrics.post_misses.fetch_add(1, Ordering::Relaxed);
+                None
+            }
         }
-
-        self.metrics.post_misses.fetch_add(1, Ordering::Relaxed);
-        None
     }
 
     pub fn get_posts(&self, uris: &[String]) -> Vec<Option<Arc<BlueskyPost>>> {
@@ -259,7 +268,7 @@ mod tests {
             labels: None,
         };
 
-        cache.set_user_profile("did:plc:test".to_string(), Arc::new(profile.clone()));
+        cache.set_user_profile("did:plc:test".to_string(), Arc::new(profile));
 
         let result = cache.get_user_profile("did:plc:test");
         assert!(result.is_some());
@@ -344,7 +353,7 @@ mod tests {
         cache.get_user_profile("did:plc:test1");
 
         let (user_hit_rate, post_hit_rate) = cache.get_hit_rates();
-        assert_eq!(user_hit_rate, 1.0 / 3.0);
+        assert!((user_hit_rate - 1.0/3.0).abs() < 1e-6);
         assert_eq!(post_hit_rate, 0.0);
     }
 }

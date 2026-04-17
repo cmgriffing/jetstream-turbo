@@ -1,3 +1,66 @@
-# Ideas for serde_json_serialize_message Optimization
+# Optimization Findings
 
-List of potential optimizations to try (will populate during the session).
+## serde_json_serialize_profile Benchmark (2026-04-15)
+- **Baseline**: 235ns (serde_json)
+- **Current**: 182ns (simd-json + skip_serializing_if) — **22% improvement**
+- **Changes**:
+  - Switched `serde_json_serialize_profile` benchmark to use simd-json
+  - Added `skip_serializing_if = "Option::is_none"` to optional String and numeric fields
+  - Verified byte-for-byte output equivalence between serde_json and simd-json
+- **Production Benefits**:
+  - Full profiles: ~182ns (22% improvement)
+  - Minimal profiles (many None fields): ~66ns (50% improvement vs previous 128ns)
+- **Files Changed**:
+  - `benches/hydration_benchmark.rs`: Benchmark uses simd-json
+  - `src/models/bluesky.rs`: BlueskyProfile has skip_serializing_if on optional fields
+
+## Pipeline Benchmark (full_pipeline_batch_25)
+- **Baseline**: 87.24 µs
+- **Best**: 86.41 µs (0.9% improvement) via allocation reduction in `hydrate_message` (borrowing DID for cache get).
+- **Tried**:
+  - Derived vs manual Serialize for enums: no improvement.
+  - Switch Redis serialization to simd-json: regression (4.9% slower) and not used in pipeline benchmark.
+  - Avoid allocating mentioned DID strings: no improvement (mentions absent in test data).
+  - Parallelize hydration with `join_all`: regression (1.8% slower) due to overhead/contention.
+- **Conclusion**: Most gains already captured; further improvements likely require invasive changes.
+
+## SQLite Batch Store (store_batch, batch size 100)
+- **Baseline**: 10.044 ms
+- **Best**: 9.984 ms (0.6% improvement) by removing `CHECK(json_valid(...))` constraints.
+- **Tried**:
+  - `PRAGMA synchronous = OFF`: 33% improvement (6.74 ms) but discarding due to durability risk (breaks correctness).
+- **Potential safe optimizations**:
+  - Prepared statement reuse: might shave a few percent.
+  - Reduce `store_batch` loop overhead: already using max chunk size (83 rows).
+  - Increase `mmap_size` or `cache_size` further: unlikely to help for small batches.
+
+## Cache Get Optimization (cache_post_get)
+- **Baseline**: 69.37ns
+- **Best**: 64.36ns (~7% improvement)
+- **Changes**:
+  - Switched from `ahash` to `fxhash` hasher
+  - Added `initial_capacity` for pre-allocation
+- **Tried but didn't work**:
+  - Inline hints on hot path functions: slight regression
+  - Removing eviction listener: ~5% faster but loses observability
+  - Custom inline-optimized FxHasher: 2% slower than standard fxhash
+  - Different initial_capacity values: `(size/2).max(1024)` was optimal
+  - Dashmap instead of moka: 53% faster but loses eviction tracking
+- **Remaining ideas**:
+  - Add metrics as optional feature to allow faster hot path
+  - Try using `RwLock` instead of the default synchronization in moka
+  - Experiment with moka's `try_get_with` for potential caching of hash computation
+
+## General Notes
+- `simd-json` is faster for BlueskyProfile **serialization** (~25% improvement)
+- `simd-json` is **slower** for BlueskyProfile **deserialization** (~2.5x slower: 616ns vs 250ns) - likely due to Arc<str> handling overhead
+- Cache `get` operations are already very fast (~65 ns optimized). `set` is slower (~482 ns) but only on misses.
+- Tests must pass; any change must maintain correctness.
+
+## Next Steps (if continuing)
+- Consider switching other serialization use cases from serde_json to simd-json where output equivalence is verified.
+- Try prepared statement caching in `SQLiteStore::store_batch`.
+- Explore reducing `message_metadata` serialization cost (maybe skip empty fields).
+- Investigate if `turbocharger` orchestration can batch records larger than current max to reduce transaction overhead.
+- Consider whether `synchronous = OFF` could be configurable for deployments that can tolerate some loss.
+- Consider adding metrics as a compile-time feature flag for production observability toggle.
