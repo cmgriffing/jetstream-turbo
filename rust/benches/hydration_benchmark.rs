@@ -443,6 +443,14 @@ fn bench_enriched_record_creation(c: &mut Criterion) {
         });
     });
 
+    // Benchmark: SystemTime -> DateTime<Utc> conversion cost
+    c.bench_function("systemtime_to_chrono_benchmark", |b| {
+        b.iter(|| {
+            let sys_time = std::time::SystemTime::now();
+            let _dt: chrono::DateTime<chrono::Utc> = sys_time.into();
+        });
+    });
+
     c.bench_function("enriched_record_with_profile", |b| {
         let message = create_test_message(0);
         let profile = Arc::new(create_test_profile(0));
