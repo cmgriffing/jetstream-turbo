@@ -86,3 +86,23 @@
 - Investigate if `turbocharger` orchestration can batch records larger than current max to reduce transaction overhead.
 - Consider whether `synchronous = OFF` could be configurable for deployments that can tolerate some loss.
 - Consider adding metrics as a compile-time feature flag for production observability toggle.
+
+## Completed Optimizations
+
+### enriched_record_new (2026-04-17)
+- **Baseline**: ~175ns (original benchmark with message.clone())
+- **Final**: ~168-171ns (1-4% improvement)
+- **Changes**:
+  - Added `EnrichedRecord::with_profile_and_metrics()` builder method
+  - Removed unused helper methods from enriched.rs
+  - Added diagnostic benchmarks for measurement decomposition
+- **Tried but didn't work**:
+  - Inlining cache hit rate calculation (function call already optimized)
+  - Arc::clone() vs clone() (no difference)
+  - Various struct initialization tricks
+
+### Diagnostic Benchmarks Added
+- `enriched_record_minimal`: ~45ns (no JSON/commit)
+- `chrono_now_benchmark`: ~30.6ns
+- `std_time_now_benchmark`: ~13.6ns (faster but conversion neutralizes)
+- `enriched_record_extract_uris`: ~21.6ns (very fast getter methods)
