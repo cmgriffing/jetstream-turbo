@@ -456,6 +456,28 @@ fn bench_enriched_record_creation(c: &mut Criterion) {
         });
     });
 
+    // Version: no message clone in benchmark loop
+    c.bench_function("enriched_record_builder_no_clone", |b| {
+        b.iter(|| {
+            // Pre-compute constants outside the loop
+            let cache_hits: u32 = 5;
+            let cache_misses: u32 = 2;
+            let cache_hit_rate = if cache_hits + cache_misses > 0 {
+                cache_hits as f64 / (cache_hits + cache_misses) as f64
+            } else {
+                0.0
+            };
+            
+            let _record = EnrichedRecord::with_profile_and_metrics(
+                create_test_message(0),
+                Arc::new(create_test_profile(0)),
+                cache_hit_rate,
+                cache_hits,
+                cache_misses,
+            );
+        });
+    });
+
     c.bench_function("enriched_record_with_profile", |b| {
         let message = create_test_message(0);
         let profile = Arc::new(create_test_profile(0));
