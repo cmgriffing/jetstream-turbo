@@ -52,17 +52,25 @@
   - Experiment with moka's `try_get_with` for potential caching of hash computation
 
 ## enriched_record_new Benchmark
-- **Baseline**: ~169ns
-- **Current**: ~169ns (essentially unchanged)
-- **Analysis**: The benchmark measures `EnrichedRecord::new(message.clone())`. The dominant cost is `JetstreamMessage.clone()` which copies:
-  - `did: String` (~32 bytes on heap + pointer)
-  - `commit: Option<CommitData>` containing `record: Option<serde_json::Value>` - the JSON value clone is the main cost
-- **Tried but didn't work**:
-  - Explicit Default impl for ProcessingMetrics: no improvement
-  - Using `Default::default()` instead of explicit init: 1.3% regression
-  - Thread-local cached zero values: 5.3% regression (access overhead)
+- **Baseline**: ~168-170ns (stable)
+- **Current**: ~169ns (practical optimization limit reached)
+- **Bottleneck Decomposition** (via new diagnostic benchmarks):
+  - `JetstreamMessage::clone()`: **~124ns** (75% of total) - copies serde_json::Value
+  - `chrono::Utc::now()`: **~30ns** (18% of total) - timestamp generation
+  - `HydratedMetadata` init: **~4ns** (2%)
+  - `ProcessingMetrics` init: **~3ns** (2%)
+  - DID String clone: **~11ns** (7%)
+- **Tried optimizations**:
+  - Explicit Default impl: neutral
+  - `Default::default()`: 1.3% regression
+  - Thread-local cached zeros: 5.3% regression
   - `#[inline]` vs `#[inline(always)]`: neutral
-- **Conclusion**: The struct initialization is already optimized. Further improvements would require reducing the `message.clone()` cost, which is hard to optimize without changing the benchmark semantics.
+  - std::time::SystemTime instead of chrono: saves 17ns but conversion adds 30ns (net negative)
+- **New Diagnostic Benchmarks Added**:
+  - `enriched_record_minimal`: 45ns baseline (no JSON/commit in message)
+  - `chrono_now_benchmark`: 30.6ns
+  - `std_time_now_benchmark`: 13.56ns (faster but conversion neutralizes)
+- **Conclusion**: The dominant cost is message.clone() (~124ns for JSON Value). Struct initialization is already optimal.
 
 ## General Notes
 - `simd-json` is faster for BlueskyProfile **serialization** (~25% improvement)

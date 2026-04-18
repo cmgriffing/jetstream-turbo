@@ -407,6 +407,7 @@ fn bench_sqlite_operations(c: &mut Criterion) {
 
 fn bench_enriched_record_creation(c: &mut Criterion) {
     // Original benchmark: includes full message.clone() overhead
+    // This is the main benchmark - dominated by message.clone() (~124ns)
     c.bench_function("enriched_record_new", |b| {
         let message = create_test_message(0);
         b.iter(|| {
@@ -416,6 +417,7 @@ fn bench_enriched_record_creation(c: &mut Criterion) {
 
     // Benchmark: EnrichedRecord::new with minimal message (no JSON, no commit)
     // This isolates struct init + timestamp cost from message construction
+    // Baseline: ~45ns = struct init (4ns) + timestamp (30ns) + did clone (11ns)
     c.bench_function("enriched_record_minimal", |b| {
         let minimal_message = JetstreamMessage {
             did: "did:plc:test".to_string(),
@@ -426,28 +428,6 @@ fn bench_enriched_record_creation(c: &mut Criterion) {
         };
         b.iter(|| {
             let _record = EnrichedRecord::new(minimal_message.clone());
-        });
-    });
-
-    // Benchmark: measures timestamp-only cost (chrono::Utc::now())
-    c.bench_function("chrono_now_benchmark", |b| {
-        b.iter(|| {
-            let _ts = chrono::Utc::now();
-        });
-    });
-
-    // Benchmark: measures std::time::SystemTime::now() cost (for comparison)
-    c.bench_function("std_time_now_benchmark", |b| {
-        b.iter(|| {
-            let _ts = std::time::SystemTime::now();
-        });
-    });
-
-    // Benchmark: SystemTime -> DateTime<Utc> conversion cost
-    c.bench_function("systemtime_to_chrono_benchmark", |b| {
-        b.iter(|| {
-            let sys_time = std::time::SystemTime::now();
-            let _dt: chrono::DateTime<chrono::Utc> = sys_time.into();
         });
     });
 
