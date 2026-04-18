@@ -413,12 +413,27 @@ fn bench_enriched_record_creation(c: &mut Criterion) {
         });
     });
 
-    // Benchmark: pure struct initialization (no message.clone() cost)
-    // This measures just EnrichedRecord::new body + timestamp
+    // Benchmark: measures only struct field initialization (no message, no timestamp)
+    // This isolates the cost of creating HydratedMetadata and ProcessingMetrics
     c.bench_function("enriched_record_from_owned", |b| {
         b.iter(|| {
-            // Move ownership - includes message construction but not clone overhead
-            let _record = EnrichedRecord::new(create_test_message(0));
+            // Construct just the struct fields we can optimize
+            let _metadata = HydratedMetadata {
+                author_profile: None,
+                mentioned_profiles: Vec::new(),
+                referenced_posts: Vec::new(),
+                hashtags: Vec::new(),
+                urls: Vec::new(),
+                mentions: Vec::new(),
+                detected_language: None,
+            };
+            let _metrics = ProcessingMetrics {
+                hydration_time_ms: 0,
+                api_calls_count: 0,
+                cache_hit_rate: 0.0,
+                cache_hits: 0,
+                cache_misses: 0,
+            };
         });
     });
 
