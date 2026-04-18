@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-bench_name="enriched_record_minimal"
+bench_name="chrono_now_benchmark"
 
 output=$(cargo bench --bench hydration_benchmark "$bench_name" -- --noplot 2>&1)
 

@@ -406,7 +406,7 @@ fn bench_sqlite_operations(c: &mut Criterion) {
 }
 
 fn bench_enriched_record_creation(c: &mut Criterion) {
-    // Original benchmark: includes message.clone() overhead
+    // Original benchmark: includes full message.clone() overhead
     c.bench_function("enriched_record_new", |b| {
         let message = create_test_message(0);
         b.iter(|| {
@@ -415,7 +415,7 @@ fn bench_enriched_record_creation(c: &mut Criterion) {
     });
 
     // Benchmark: EnrichedRecord::new with minimal message (no JSON, no commit)
-    // This isolates the struct init + timestamp cost from message construction
+    // This isolates struct init + timestamp cost from message construction
     c.bench_function("enriched_record_minimal", |b| {
         let minimal_message = JetstreamMessage {
             did: "did:plc:test".to_string(),
@@ -426,6 +426,13 @@ fn bench_enriched_record_creation(c: &mut Criterion) {
         };
         b.iter(|| {
             let _record = EnrichedRecord::new(minimal_message.clone());
+        });
+    });
+
+    // Benchmark: measures timestamp-only cost (just chrono::Utc::now())
+    c.bench_function("chrono_now_benchmark", |b| {
+        b.iter(|| {
+            let _ts = chrono::Utc::now();
         });
     });
 
