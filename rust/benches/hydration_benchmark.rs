@@ -413,6 +413,15 @@ fn bench_enriched_record_creation(c: &mut Criterion) {
         });
     });
 
+    // Benchmark: pure struct initialization (no message.clone() cost)
+    // This measures just EnrichedRecord::new body + timestamp
+    c.bench_function("enriched_record_from_owned", |b| {
+        b.iter(|| {
+            // Move ownership - includes message construction but not clone overhead
+            let _record = EnrichedRecord::new(create_test_message(0));
+        });
+    });
+
     c.bench_function("enriched_record_with_profile", |b| {
         let message = create_test_message(0);
         let profile = Arc::new(create_test_profile(0));

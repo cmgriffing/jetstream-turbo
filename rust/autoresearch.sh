@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-bench_name="enriched_record_new"
+bench_name="enriched_record_from_owned"
 
 output=$(cargo bench --bench hydration_benchmark "$bench_name" -- --noplot 2>&1)
 
