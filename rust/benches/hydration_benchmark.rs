@@ -429,10 +429,17 @@ fn bench_enriched_record_creation(c: &mut Criterion) {
         });
     });
 
-    // Benchmark: measures timestamp-only cost (just chrono::Utc::now())
+    // Benchmark: measures timestamp-only cost (chrono::Utc::now())
     c.bench_function("chrono_now_benchmark", |b| {
         b.iter(|| {
             let _ts = chrono::Utc::now();
+        });
+    });
+
+    // Benchmark: measures std::time::SystemTime::now() cost (for comparison)
+    c.bench_function("std_time_now_benchmark", |b| {
+        b.iter(|| {
+            let _ts = std::time::SystemTime::now();
         });
     });
 
