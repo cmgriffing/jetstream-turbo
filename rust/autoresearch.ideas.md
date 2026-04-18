@@ -53,7 +53,7 @@
 
 ## enriched_record_new Benchmark
 - **Baseline**: ~168-170ns (stable)
-- **Current**: ~169ns (practical optimization limit reached)
+- **Current**: ~173ns for main benchmark (stable)
 - **Bottleneck Decomposition** (via new diagnostic benchmarks):
   - `JetstreamMessage::clone()`: **~124ns** (75% of total) - copies serde_json::Value
   - `chrono::Utc::now()`: **~30ns** (18% of total) - timestamp generation
@@ -66,11 +66,12 @@
   - Thread-local cached zeros: 5.3% regression
   - `#[inline]` vs `#[inline(always)]`: neutral
   - std::time::SystemTime instead of chrono: saves 17ns but conversion adds 30ns (net negative)
-- **New Diagnostic Benchmarks Added**:
-  - `enriched_record_minimal`: 45ns baseline (no JSON/commit in message)
-  - `chrono_now_benchmark`: 30.6ns
-  - `std_time_now_benchmark`: 13.56ns (faster but conversion neutralizes)
-- **Conclusion**: The dominant cost is message.clone() (~124ns for JSON Value). Struct initialization is already optimal.
+  - Inlining cache hit rate calculation: 1.3% regression (function call already optimized)
+  - `Arc::clone()` vs `clone()`: neutral
+  - Builder pattern `with_profile_and_metrics()`: **~1-2% improvement** ✓
+- **New Optimized Method Added**:
+  - `EnrichedRecord::with_profile_and_metrics()`: Reduces field assignments by avoiding post-construction updates
+- **Conclusion**: The dominant cost is message.clone() (~124ns for JSON Value). Added `with_profile_and_metrics()` builder for ~1-2% improvement on common pattern.
 
 ## General Notes
 - `simd-json` is faster for BlueskyProfile **serialization** (~25% improvement)
