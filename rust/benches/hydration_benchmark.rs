@@ -406,6 +406,7 @@ fn bench_sqlite_operations(c: &mut Criterion) {
 }
 
 fn bench_enriched_record_creation(c: &mut Criterion) {
+    // Original benchmark: includes message.clone() overhead
     c.bench_function("enriched_record_new", |b| {
         let message = create_test_message(0);
         b.iter(|| {
@@ -413,13 +414,18 @@ fn bench_enriched_record_creation(c: &mut Criterion) {
         });
     });
 
-    // Benchmark: EnrichedRecord::new with pre-created message (no clone overhead in loop)
-    // This measures: struct init + timestamp + message ownership transfer
-    c.bench_function("enriched_record_from_owned", |b| {
-        let message = create_test_message(0);
+    // Benchmark: EnrichedRecord::new with minimal message (no JSON, no commit)
+    // This isolates the struct init + timestamp cost from message construction
+    c.bench_function("enriched_record_minimal", |b| {
+        let minimal_message = JetstreamMessage {
+            did: "did:plc:test".to_string(),
+            time_us: None,
+            seq: None,
+            kind: MessageKind::Commit,
+            commit: None,
+        };
         b.iter(|| {
-            // Move the message in - no clone in the loop
-            let _record = EnrichedRecord::new(message.clone());
+            let _record = EnrichedRecord::new(minimal_message.clone());
         });
     });
 
