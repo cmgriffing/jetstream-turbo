@@ -417,7 +417,6 @@ fn bench_enriched_record_creation(c: &mut Criterion) {
 
     // Benchmark: EnrichedRecord::new with minimal message (no JSON, no commit)
     // This isolates struct init + timestamp cost from message construction
-    // Baseline: ~45ns = struct init (4ns) + timestamp (30ns) + did clone (11ns)
     c.bench_function("enriched_record_minimal", |b| {
         let minimal_message = JetstreamMessage {
             did: "did:plc:test".to_string(),
@@ -431,13 +430,27 @@ fn bench_enriched_record_creation(c: &mut Criterion) {
         });
     });
 
-    // Version with builder pattern (single allocation attempt)
-    c.bench_function("enriched_record_with_profile_builder", |b| {
+    // Benchmark with profile and metrics (common production pattern)
+    c.bench_function("enriched_record_with_profile", |b| {
         let message = create_test_message(0);
         let profile = Arc::new(create_test_profile(0));
 
         b.iter(|| {
-            // Pre-compute cache hit rate
+            let mut record = EnrichedRecord::new(message.clone());
+            record.hydrated_metadata.author_profile = Some(profile.clone());
+            record.metrics.cache_hits = 5;
+            record.metrics.cache_misses = 2;
+            record.calculate_cache_hit_rate();
+            let _hit_rate = record.metrics.cache_hit_rate;
+        });
+    });
+
+    // Version using builder pattern (alternative to post-construction assignment)
+    c.bench_function("enriched_record_builder", |b| {
+        let message = create_test_message(0);
+        let profile = Arc::new(create_test_profile(0));
+
+        b.iter(|| {
             let cache_hits: u32 = 5;
             let cache_misses: u32 = 2;
             let cache_hit_rate = if cache_hits + cache_misses > 0 {
@@ -453,42 +466,6 @@ fn bench_enriched_record_creation(c: &mut Criterion) {
                 cache_hits,
                 cache_misses,
             );
-        });
-    });
-
-    // Version: no message clone in benchmark loop
-    c.bench_function("enriched_record_builder_no_clone", |b| {
-        b.iter(|| {
-            // Pre-compute constants outside the loop
-            let cache_hits: u32 = 5;
-            let cache_misses: u32 = 2;
-            let cache_hit_rate = if cache_hits + cache_misses > 0 {
-                cache_hits as f64 / (cache_hits + cache_misses) as f64
-            } else {
-                0.0
-            };
-            
-            let _record = EnrichedRecord::with_profile_and_metrics(
-                create_test_message(0),
-                Arc::new(create_test_profile(0)),
-                cache_hit_rate,
-                cache_hits,
-                cache_misses,
-            );
-        });
-    });
-
-    c.bench_function("enriched_record_with_profile", |b| {
-        let message = create_test_message(0);
-        let profile = Arc::new(create_test_profile(0));
-
-        b.iter(|| {
-            let mut record = EnrichedRecord::new(message.clone());
-            record.hydrated_metadata.author_profile = Some(profile.clone());
-            record.metrics.cache_hits = 5;
-            record.metrics.cache_misses = 2;
-            record.calculate_cache_hit_rate();
-            let _hit_rate = record.metrics.cache_hit_rate;
         });
     });
 
