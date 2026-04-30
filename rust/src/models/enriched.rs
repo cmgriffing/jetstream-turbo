@@ -87,7 +87,7 @@ pub struct ProcessingMetrics {
 }
 
 impl EnrichedRecord {
-    #[inline(always)]
+    #[inline]
     pub fn new(message: JetstreamMessage) -> Self {
         Self {
             message,
@@ -107,6 +107,37 @@ impl EnrichedRecord {
                 cache_hit_rate: 0.0,
                 cache_hits: 0,
                 cache_misses: 0,
+            },
+        }
+    }
+
+    /// Create with profile and metrics pre-set (avoids multiple field assignments)
+    #[inline]
+    pub fn with_profile_and_metrics(
+        message: JetstreamMessage,
+        profile: Arc<BlueskyProfile>,
+        cache_hit_rate: f64,
+        cache_hits: u32,
+        cache_misses: u32,
+    ) -> Self {
+        Self {
+            message,
+            hydrated_metadata: HydratedMetadata {
+                author_profile: Some(profile),
+                mentioned_profiles: Vec::new(),
+                referenced_posts: Vec::new(),
+                hashtags: Vec::new(),
+                urls: Vec::new(),
+                mentions: Vec::new(),
+                detected_language: None,
+            },
+            processed_at: Utc::now(),
+            metrics: ProcessingMetrics {
+                hydration_time_ms: 0,
+                api_calls_count: 0,
+                cache_hit_rate,
+                cache_hits,
+                cache_misses,
             },
         }
     }
