@@ -9,7 +9,7 @@ use jetstream_monitor::{
     stream::{StreamClient, StreamId},
     websocket,
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 const HOURLY_INTERVAL_SECONDS: u64 = 3600;
 const HOURLY_INTERVAL_SECONDS_I64: i64 = 3600;
@@ -217,10 +217,16 @@ async fn main() -> Result<()> {
     );
     let broadcast_tx = Arc::new(aggregator.sender());
 
-    let client_a = StreamClient::new(settings.stream_a_url.clone(), StreamId::A);
-    let client_b = StreamClient::new(settings.stream_b_url.clone(), StreamId::B);
-    let client_baseline_1 = StreamClient::new(BASELINE_1_URL.to_string(), StreamId::Baseline1);
-    let client_baseline_2 = StreamClient::new(BASELINE_2_URL.to_string(), StreamId::Baseline2);
+    let stream_idle_timeout = Duration::from_secs(settings.stream_idle_timeout_seconds.max(1));
+
+    let client_a = StreamClient::new(settings.stream_a_url.clone(), StreamId::A)
+        .with_idle_timeout(stream_idle_timeout);
+    let client_b = StreamClient::new(settings.stream_b_url.clone(), StreamId::B)
+        .with_idle_timeout(stream_idle_timeout);
+    let client_baseline_1 = StreamClient::new(BASELINE_1_URL.to_string(), StreamId::Baseline1)
+        .with_idle_timeout(stream_idle_timeout);
+    let client_baseline_2 = StreamClient::new(BASELINE_2_URL.to_string(), StreamId::Baseline2)
+        .with_idle_timeout(stream_idle_timeout);
 
     let stats_for_stream = Arc::clone(&stats_internal);
     let uptime_for_status: Arc<std::sync::RwLock<UptimeTracker>> = Arc::clone(&uptime_tracker);

@@ -1,5 +1,5 @@
 use chrono::Utc;
-use futures::{Stream, StreamExt};
+use futures::{SinkExt, Stream, StreamExt};
 use serde::Deserialize;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -8,12 +8,64 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamId {
     A,
     B,
     Baseline1,
     Baseline2,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConnectionStatus, StreamClient, StreamId};
+    use futures::{SinkExt, StreamExt};
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+    async fn next_status(
+        statuses: &mut (impl futures::Stream<Item = ConnectionStatus> + Unpin),
+    ) -> ConnectionStatus {
+        tokio::time::timeout(Duration::from_secs(2), statuses.next())
+            .await
+            .expect("timed out waiting for status")
+            .expect("status stream ended")
+    }
+
+    #[tokio::test]
+    async fn stale_open_connection_is_marked_disconnected_after_idle_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test websocket listener");
+        let addr = listener.local_addr().expect("read listener address");
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept test client");
+            let mut websocket = accept_async(stream)
+                .await
+                .expect("accept websocket handshake");
+            websocket
+                .send(Message::Text(r#"{"time_us": 1}"#.into()))
+                .await
+                .expect("send first message");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let client = StreamClient::new(format!("ws://{}", addr), StreamId::A)
+            .with_idle_timeout(Duration::from_millis(50));
+        let (_messages, mut statuses) = client.stream_with_status();
+
+        let connected = next_status(&mut statuses).await;
+        assert_eq!(connected.stream_id, StreamId::A);
+        assert!(connected.connected);
+
+        let disconnected = next_status(&mut statuses).await;
+        assert_eq!(disconnected.stream_id, StreamId::A);
+        assert!(!disconnected.connected);
+    }
 }
 
 #[derive(Deserialize)]
@@ -47,6 +99,7 @@ pub struct StreamClient {
     url: String,
     stream_id: StreamId,
     reconnect_delay: Duration,
+    idle_timeout: Duration,
 }
 
 impl StreamClient {
@@ -55,7 +108,13 @@ impl StreamClient {
             url,
             stream_id,
             reconnect_delay: Duration::from_secs(5),
+            idle_timeout: DEFAULT_IDLE_TIMEOUT,
         }
+    }
+
+    pub fn with_idle_timeout(mut self, idle_timeout: Duration) -> Self {
+        self.idle_timeout = idle_timeout;
+        self
     }
 
     pub fn stream_counts(&self) -> impl Stream<Item = StreamMessage> {
@@ -63,6 +122,7 @@ impl StreamClient {
         let url = self.url.clone();
         let stream_id = self.stream_id;
         let reconnect_delay = self.reconnect_delay;
+        let idle_timeout = self.idle_timeout;
 
         tokio::spawn(async move {
             let mut cumulative_count: u64 = 0;
@@ -73,15 +133,19 @@ impl StreamClient {
                 match connect_async(&url).await {
                     Ok((ws_stream, _)) => {
                         info!(stream = ?stream_id, "Connected successfully");
-                        let (_, mut read) = ws_stream.split();
+                        let (mut write, mut read) = ws_stream.split();
                         let mut count: u64 = 0;
                         let mut last_send = Instant::now();
+                        let mut last_message = Instant::now();
                         let update_interval = Duration::from_millis(100);
                         let mut last_delivery_latency_us: Option<u64> = None;
 
-                        while let Some(msg_result) = read.next().await {
+                        while let Ok(Some(msg_result)) =
+                            tokio::time::timeout(idle_timeout, read.next()).await
+                        {
                             match msg_result {
                                 Ok(Message::Text(text)) => {
+                                    last_message = Instant::now();
                                     count += 1;
                                     last_delivery_latency_us = extract_delivery_latency_us(&text);
                                     if last_send.elapsed() >= update_interval {
@@ -103,11 +167,26 @@ impl StreamClient {
                                     info!(stream = ?stream_id, "Connection closed by server");
                                     break;
                                 }
+                                Ok(Message::Ping(payload)) => {
+                                    if let Err(e) = write.send(Message::Pong(payload)).await {
+                                        error!(stream = ?stream_id, "Failed to send WebSocket pong: {}", e);
+                                        break;
+                                    }
+                                    if last_message.elapsed() >= idle_timeout {
+                                        warn!(stream = ?stream_id, "No data messages received for {:?}; reconnecting", idle_timeout);
+                                        break;
+                                    }
+                                }
                                 Err(e) => {
                                     error!(stream = ?stream_id, "WebSocket error: {}", e);
                                     break;
                                 }
-                                _ => {}
+                                _ => {
+                                    if last_message.elapsed() >= idle_timeout {
+                                        warn!(stream = ?stream_id, "No data messages received for {:?}; reconnecting", idle_timeout);
+                                        break;
+                                    }
+                                }
                             }
                         }
 
@@ -148,6 +227,7 @@ impl StreamClient {
         let url = self.url.clone();
         let stream_id = self.stream_id;
         let reconnect_delay = self.reconnect_delay;
+        let idle_timeout = self.idle_timeout;
 
         tokio::spawn(async move {
             let mut cumulative_count: u64 = 0;
@@ -168,15 +248,19 @@ impl StreamClient {
                             connect_time_ms: Some(connect_time_ms),
                         });
 
-                        let (_, mut read) = ws_stream.split();
+                        let (mut write, mut read) = ws_stream.split();
                         let mut count: u64 = 0;
                         let mut last_send = Instant::now();
+                        let mut last_message = Instant::now();
                         let update_interval = Duration::from_millis(100);
                         let mut last_delivery_latency_us: Option<u64> = None;
 
-                        while let Some(msg_result) = read.next().await {
+                        while let Ok(Some(msg_result)) =
+                            tokio::time::timeout(idle_timeout, read.next()).await
+                        {
                             match msg_result {
                                 Ok(Message::Text(text)) => {
+                                    last_message = Instant::now();
                                     count += 1;
                                     last_delivery_latency_us = extract_delivery_latency_us(&text);
                                     if last_send.elapsed() >= update_interval {
@@ -198,11 +282,26 @@ impl StreamClient {
                                     info!(stream = ?stream_id, "Connection closed by server");
                                     break;
                                 }
+                                Ok(Message::Ping(payload)) => {
+                                    if let Err(e) = write.send(Message::Pong(payload)).await {
+                                        error!(stream = ?stream_id, "Failed to send WebSocket pong: {}", e);
+                                        break;
+                                    }
+                                    if last_message.elapsed() >= idle_timeout {
+                                        warn!(stream = ?stream_id, "No data messages received for {:?}; reconnecting", idle_timeout);
+                                        break;
+                                    }
+                                }
                                 Err(e) => {
                                     error!(stream = ?stream_id, "WebSocket error: {}", e);
                                     break;
                                 }
-                                _ => {}
+                                _ => {
+                                    if last_message.elapsed() >= idle_timeout {
+                                        warn!(stream = ?stream_id, "No data messages received for {:?}; reconnecting", idle_timeout);
+                                        break;
+                                    }
+                                }
                             }
                         }
 

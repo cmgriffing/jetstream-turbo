@@ -14,6 +14,8 @@ pub struct Settings {
     pub bind_address: String,
     #[serde(default = "default_database")]
     pub database_url: String,
+    #[serde(default = "default_stream_idle_timeout_seconds")]
+    pub stream_idle_timeout_seconds: u64,
 }
 
 fn default_stream_a_name() -> String {
@@ -32,6 +34,10 @@ fn default_database() -> String {
     "sqlite://monitor.db?mode=rwc".to_string()
 }
 
+fn default_stream_idle_timeout_seconds() -> u64 {
+    30
+}
+
 impl Settings {
     pub fn load() -> Result<Self> {
         dotenvy::dotenv().ok();
@@ -41,6 +47,10 @@ impl Settings {
             .set_default("database_url", default_database())?
             .set_default("stream_a_name", default_stream_a_name())?
             .set_default("stream_b_name", default_stream_b_name())?
+            .set_default(
+                "stream_idle_timeout_seconds",
+                default_stream_idle_timeout_seconds(),
+            )?
             .add_source(config::Environment::default())
             .build()?;
 
