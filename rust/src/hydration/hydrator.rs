@@ -5,6 +5,13 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, trace};
 
+struct MessageContext {
+    message: JetstreamMessage,
+    author_did: String,
+    is_post: bool,
+    mentioned_dids: Vec<String>,
+}
+
 pub struct Hydrator<P, Po> {
     cache: TurboCache,
     profile_fetcher: Arc<P>,
@@ -35,60 +42,66 @@ where
     }
 
     pub async fn hydrate_message(&self, message: JetstreamMessage) -> TurboResult<EnrichedRecord> {
-        let start_time = Instant::now();
-
-        // Extract needed fields as owned data before consuming the message
         let author_did = message.extract_did().to_string();
         let at_uri = message.extract_at_uri();
-        let mentioned_dids = message
+        let is_post = at_uri.is_some();
+        let mentioned_dids: Vec<String> = message
             .extract_mentioned_dids()
             .into_iter()
             .map(|s| s.to_string())
-            .collect::<Vec<_>>();
+            .collect();
+        self.hydrate_one(message, author_did, is_post, mentioned_dids, chrono::Utc::now())
+            .await
+    }
+
+    async fn hydrate_one(
+        &self,
+        message: JetstreamMessage,
+        author_did: String,
+        is_post: bool,
+        mentioned_dids: Vec<String>,
+        processed_at: chrono::DateTime<chrono::Utc>,
+    ) -> TurboResult<EnrichedRecord> {
+        let start_time = Instant::now();
 
         tracing::Span::current().record("did", &author_did);
-        if let Some(ref uri) = at_uri {
-            tracing::Span::current().record("at_uri", uri);
-        }
 
-        // Consume the message without cloning
-        let mut enriched = EnrichedRecord::new(message);
+        let mut enriched = EnrichedRecord::new_with_timestamp(message, processed_at);
 
-        // Hydrate author profile if this message has an at-uri (i.e., is a post)
-        if at_uri.is_some() {
-            let mut author_profile = self.cache.get_user_profile(author_did.as_str());
+        if is_post {
+            let at_uri = enriched.message.extract_at_uri();
+            if let Some(ref uri) = at_uri {
+                tracing::Span::current().record("at_uri", uri);
+            }
+            let mut author_profile = self.cache.get_user_profile(&author_did);
 
             let hit = author_profile.is_some();
             tracing::Span::current().record("cache_hit", hit);
 
             if !hit {
+                let author_did_owned = author_did.clone();
                 let profiles = self
                     .profile_fetcher
-                    .bulk_fetch_profiles(&[author_did.to_string()])
+                    .bulk_fetch_profiles(&[author_did_owned])
                     .await?;
 
                 if let Some(profile) = profiles.into_iter().next().flatten() {
                     let profile_arc = Arc::new(profile);
                     author_profile = Some(Arc::clone(&profile_arc));
-                    self.cache
-                        .set_user_profile(author_did.to_string(), profile_arc);
+                    self.cache.set_user_profile(author_did, profile_arc);
                 }
             }
 
             enriched.hydrated_metadata.author_profile = author_profile;
         }
 
-        // Process mentions
         for did in &mentioned_dids {
             if let Some(profile) = self.cache.get_user_profile(did) {
                 enriched.hydrated_metadata.add_mentioned_profile(profile);
             }
         }
 
-        // Update metrics
         enriched.metrics.hydration_time_ms = start_time.elapsed().as_millis() as u64;
-
-        trace!("Hydrated message for DID: {}", author_did);
         Ok(enriched)
     }
 
@@ -103,15 +116,35 @@ where
 
         let mut unique_dids = std::collections::HashSet::new();
         let mut unique_uris = std::collections::HashSet::new();
+        let mut contexts = Vec::with_capacity(message_count);
 
-        for message in &messages {
-            unique_dids.insert(message.extract_did().to_string());
-            for did in message.extract_mentioned_dids() {
-                unique_dids.insert(did.to_string());
+        for message in messages {
+            let author_did = message.extract_did().to_string();
+            let is_post = message
+                .commit
+                .as_ref()
+                .and_then(|c| c.collection.as_ref())
+                .is_some();
+            let mentioned_dids: Vec<String> = message
+                .extract_mentioned_dids()
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect();
+
+            unique_dids.insert(author_did.clone());
+            for did in &mentioned_dids {
+                unique_dids.insert(did.clone());
             }
             for uri in message.extract_post_uris() {
                 unique_uris.insert(uri);
             }
+
+            contexts.push(MessageContext {
+                message,
+                author_did,
+                is_post,
+                mentioned_dids,
+            });
         }
 
         let unique_dids_count = unique_dids.len();
@@ -128,8 +161,6 @@ where
         let cache_check_time = cache_check_start.elapsed().as_millis() as u64;
         tracing::Span::current().record("cache_check_time_ms", cache_check_time);
 
-        // Partition uncached items: consume `dids` and `uris` vectors,
-        // moving the strings directly into `uncached_dids`/`uncached_uris`.
         let uncached_dids: Vec<String> = dids
             .into_iter()
             .enumerate()
@@ -144,7 +175,6 @@ where
             .map(|(_, uri)| uri)
             .collect();
 
-        // Fetch profiles and posts sequentially to avoid rate limiting
         let profiles_result = async {
             if uncached_dids.is_empty() {
                 return Ok(vec![]);
@@ -183,7 +213,7 @@ where
         }
 
         let hydrate_start = Instant::now();
-        let results = self.hydrate_messages(messages).await;
+        let results = self.hydrate_contexts(contexts).await;
         let hydrate_time = hydrate_start.elapsed().as_millis() as u64;
         tracing::Span::current().record("hydrate_time_ms", hydrate_time);
 
@@ -199,13 +229,14 @@ where
         Ok(results)
     }
 
-    async fn hydrate_messages(&self, messages: Vec<JetstreamMessage>) -> Vec<EnrichedRecord> {
-        // Process messages sequentially. Since each hydration involves only cache lookups (no I/O)
-        // in typical mock/benchmark scenarios, sequential processing avoids the overhead
-        // of spawning concurrent tasks and can be faster for small batches.
-        let mut results = Vec::with_capacity(messages.len());
-        for message in messages {
-            match self.hydrate_message(message).await {
+    async fn hydrate_contexts(&self, contexts: Vec<MessageContext>) -> Vec<EnrichedRecord> {
+        let mut results = Vec::with_capacity(contexts.len());
+        let processed_at = chrono::Utc::now();
+        for ctx in contexts {
+            match self
+                .hydrate_one(ctx.message, ctx.author_did, ctx.is_post, ctx.mentioned_dids, processed_at)
+                .await
+            {
                 Ok(enriched) => results.push(enriched),
                 Err(e) => {
                     trace!("Failed to hydrate message: {}", e);
