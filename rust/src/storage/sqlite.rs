@@ -212,7 +212,7 @@ impl SQLiteStore {
         let at_uri = record.get_at_uri().unwrap_or_default();
         tracing::Span::current().record("at_uri", &at_uri);
 
-        let now = Utc::now();
+        let processed_at_str = record.processed_at.to_rfc3339();
 
         let message_json = simd_json_to_string(&record.message).unwrap();
         let metadata_json = simd_json_to_string(&record.hydrated_metadata).unwrap();
@@ -231,8 +231,8 @@ impl SQLiteStore {
         .bind(record.message.time_us.map(|t| t as i64))
         .bind(message_json)
         .bind(metadata_json)
-        .bind(record.processed_at.to_rfc3339())
-        .bind(now.to_rfc3339())
+        .bind(&processed_at_str)
+        .bind(&processed_at_str)
         .bind(record.metrics.hydration_time_ms as i64)
         .bind(record.metrics.api_calls_count as i64)
         .bind(record.metrics.cache_hit_rate)
