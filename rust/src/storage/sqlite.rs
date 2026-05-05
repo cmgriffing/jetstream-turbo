@@ -7,9 +7,8 @@ use sqlx::{
     SqliteConnection, SqlitePool,
 };
 use std::path::Path;
-use std::time::Instant;
 use tokio::time::{sleep, Duration};
-use tracing::{error, info, instrument, trace, warn};
+use tracing::{error, info, trace, warn};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CleanupResult {
@@ -495,23 +494,49 @@ impl SQLiteStore {
 }
 
 impl RecordStore for SQLiteStore {
-    #[instrument(
-        name = "sqlite_store_batch",
-        skip(self, records),
-        fields(count, duration_ms)
-    )]
     async fn store_batch(&self, records: &[EnrichedRecord]) -> TurboResult<Vec<i64>> {
-        let start = Instant::now();
-
         if records.is_empty() {
             return Ok(vec![]);
         }
 
         let count = records.len();
-        tracing::Span::current().record("count", count);
+        let now_str = Utc::now().to_rfc3339();
 
-        let now = Utc::now();
-        let now_str = now.to_rfc3339();
+        struct RowData {
+            at_uri: Option<String>,
+            did: String,
+            time_us: Option<i64>,
+            message_json: String,
+            metadata_json: String,
+            created_at: String,
+            hydrated_at: String,
+            hydration_time_ms: i64,
+            api_calls_count: i64,
+            cache_hit_rate: f64,
+            cache_hits: i64,
+            cache_misses: i64,
+        }
+
+        let row_data: Vec<RowData> = records
+            .iter()
+            .map(|record| {
+                let processed_at_str = record.processed_at.to_rfc3339();
+                RowData {
+                    at_uri: record.get_at_uri(),
+                    did: record.get_did().to_string(),
+                    time_us: record.message.time_us.map(|t| t as i64),
+                    message_json: simd_json_to_string(&record.message).unwrap(),
+                    metadata_json: simd_json_to_string(&record.hydrated_metadata).unwrap(),
+                    created_at: processed_at_str.clone(),
+                    hydrated_at: now_str.clone(),
+                    hydration_time_ms: record.metrics.hydration_time_ms as i64,
+                    api_calls_count: record.metrics.api_calls_count as i64,
+                    cache_hit_rate: record.metrics.cache_hit_rate,
+                    cache_hits: record.metrics.cache_hits as i64,
+                    cache_misses: record.metrics.cache_misses as i64,
+                }
+            })
+            .collect();
 
         const MAX_PARAMS: usize = 999;
         const COLUMNS: usize = 12;
@@ -521,11 +546,10 @@ impl RecordStore for SQLiteStore {
 
         let mut all_ids = Vec::with_capacity(count);
 
-        for chunk in records.chunks(MAX_ROWS_PER_INSERT) {
+        for chunk in row_data.chunks(MAX_ROWS_PER_INSERT) {
             let mut tx = self.pool.begin().await?;
 
-            let placeholders: String = std::iter::repeat(SINGLE_ROW_PLACEHOLDER)
-                .take(chunk.len())
+            let placeholders = std::iter::repeat_n(SINGLE_ROW_PLACEHOLDER, chunk.len())
                 .collect::<Vec<_>>()
                 .join(", ");
 
@@ -534,26 +558,25 @@ impl RecordStore for SQLiteStore {
                     at_uri, did, time_us, message, message_metadata,
                     created_at, hydrated_at, hydration_time_ms,
                     api_calls_count, cache_hit_rate, cache_hits, cache_misses
-                ) VALUES {}"#,
-                placeholders
+                ) VALUES {placeholders}"#,
             );
 
             let mut query = sqlx::query(&insert_sql);
 
-            for record in chunk {
+            for row in chunk {
                 query = query
-                    .bind(record.get_at_uri())
-                    .bind(record.get_did())
-                    .bind(record.message.time_us.map(|t| t as i64))
-                    .bind(simd_json_to_string(&record.message).unwrap())
-                    .bind(simd_json_to_string(&record.hydrated_metadata).unwrap())
-                    .bind(record.processed_at.to_rfc3339())
-                    .bind(&now_str)
-                    .bind(record.metrics.hydration_time_ms as i64)
-                    .bind(record.metrics.api_calls_count as i64)
-                    .bind(record.metrics.cache_hit_rate)
-                    .bind(record.metrics.cache_hits as i64)
-                    .bind(record.metrics.cache_misses as i64);
+                    .bind(&row.at_uri)
+                    .bind(&row.did)
+                    .bind(row.time_us)
+                    .bind(&row.message_json)
+                    .bind(&row.metadata_json)
+                    .bind(&row.created_at)
+                    .bind(&row.hydrated_at)
+                    .bind(row.hydration_time_ms)
+                    .bind(row.api_calls_count)
+                    .bind(row.cache_hit_rate)
+                    .bind(row.cache_hits)
+                    .bind(row.cache_misses);
             }
 
             let result = query.execute(&mut *tx).await?;
@@ -565,8 +588,6 @@ impl RecordStore for SQLiteStore {
             }
         }
 
-        let duration = start.elapsed().as_millis() as u64;
-        tracing::Span::current().record("duration_ms", duration);
         trace!("Stored batch of {} records", count);
         Ok(all_ids)
     }
