@@ -495,14 +495,23 @@ impl SQLiteStore {
 }
 
 impl RecordStore for SQLiteStore {
+    #[instrument(
+        name = "sqlite_store_batch",
+        skip(self, records),
+        fields(count, duration_ms)
+    )]
     async fn store_batch(&self, records: &[EnrichedRecord]) -> TurboResult<Vec<i64>> {
+        let start = Instant::now();
+
         if records.is_empty() {
             return Ok(vec![]);
         }
 
         let count = records.len();
+        tracing::Span::current().record("count", count);
 
-        let now_str = Utc::now().to_rfc3339();
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
 
         const MAX_PARAMS: usize = 999;
         const COLUMNS: usize = 12;
@@ -556,6 +565,8 @@ impl RecordStore for SQLiteStore {
             }
         }
 
+        let duration = start.elapsed().as_millis() as u64;
+        tracing::Span::current().record("duration_ms", duration);
         trace!("Stored batch of {} records", count);
         Ok(all_ids)
     }
