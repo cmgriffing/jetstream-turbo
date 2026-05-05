@@ -202,7 +202,16 @@ impl SQLiteStore {
         Ok(())
     }
 
+    #[instrument(
+        name = "sqlite_store_record",
+        skip(self, record),
+        fields(at_uri, duration_ms)
+    )]
     pub async fn store_record(&self, record: &EnrichedRecord) -> TurboResult<i64> {
+        let start = Instant::now();
+        let at_uri = record.get_at_uri().unwrap_or_default();
+        tracing::Span::current().record("at_uri", &at_uri);
+
         let now = Utc::now();
 
         let message_json = simd_json_to_string(&record.message).unwrap();
@@ -232,7 +241,11 @@ impl SQLiteStore {
         .execute(&self.pool)
         .await?;
 
-        Ok(result.last_insert_rowid())
+        let id = result.last_insert_rowid();
+        let duration = start.elapsed().as_millis() as u64;
+        tracing::Span::current().record("duration_ms", duration);
+        trace!("Stored record with ID: {}", id);
+        Ok(id)
     }
 
     pub async fn get_record_by_uri(&self, at_uri: &str) -> TurboResult<Option<EnrichedRecord>> {
