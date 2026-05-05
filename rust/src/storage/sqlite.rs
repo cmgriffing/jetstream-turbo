@@ -1,7 +1,7 @@
 use crate::models::{enriched::EnrichedRecord, TurboResult};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use simd_json::to_string as simd_json_to_string;
+
 use sqlx::{
     sqlite::SqliteConnectOptions, sqlite::SqliteJournalMode, sqlite::SqlitePoolOptions, Row,
     SqliteConnection, SqlitePool,
@@ -214,8 +214,8 @@ impl SQLiteStore {
 
         let now = Utc::now();
 
-        let message_json = simd_json_to_string(&record.message).unwrap();
-        let metadata_json = simd_json_to_string(&record.hydrated_metadata).unwrap();
+        let message_json = serde_json::to_string(&record.message).unwrap();
+        let metadata_json = serde_json::to_string(&record.hydrated_metadata).unwrap();
 
         let result = sqlx::query(
             r#"
@@ -558,8 +558,8 @@ impl RecordStore for SQLiteStore {
                     .bind(record.get_at_uri())
                     .bind(record.get_did())
                     .bind(record.message.time_us.map(|t| t as i64))
-                    .bind(simd_json_to_string(&record.message).unwrap())
-                    .bind(simd_json_to_string(&record.hydrated_metadata).unwrap())
+                    .bind(serde_json::to_string(&record.message).unwrap())
+                    .bind(serde_json::to_string(&record.hydrated_metadata).unwrap())
                     .bind(record.processed_at.to_rfc3339())
                     .bind(&now_str)
                     .bind(record.metrics.hydration_time_ms as i64)
