@@ -111,28 +111,10 @@ impl EnrichedRecord {
         }
     }
 
-    #[inline(always)]
     pub fn new_with_timestamp(message: JetstreamMessage, processed_at: DateTime<Utc>) -> Self {
-        Self {
-            message,
-            hydrated_metadata: HydratedMetadata {
-                author_profile: None,
-                mentioned_profiles: Vec::new(),
-                referenced_posts: Vec::new(),
-                hashtags: Vec::new(),
-                urls: Vec::new(),
-                mentions: Vec::new(),
-                detected_language: None,
-            },
-            processed_at,
-            metrics: ProcessingMetrics {
-                hydration_time_ms: 0,
-                api_calls_count: 0,
-                cache_hit_rate: 0.0,
-                cache_hits: 0,
-                cache_misses: 0,
-            },
-        }
+        let mut record = Self::new(message);
+        record.processed_at = processed_at;
+        record
     }
 
     #[inline(always)]
