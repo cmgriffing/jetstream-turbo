@@ -101,7 +101,13 @@ impl EnrichedRecord {
                 detected_language: None,
             },
             processed_at: DateTime::UNIX_EPOCH,
-            metrics: ProcessingMetrics::default(),
+            metrics: ProcessingMetrics {
+                hydration_time_ms: 0,
+                api_calls_count: 0,
+                cache_hit_rate: 0.0,
+                cache_hits: 0,
+                cache_misses: 0,
+            },
         }
     }
 
