@@ -14,13 +14,13 @@ where
 pub struct EnrichedRecord {
     /// Original jetstream message
     pub message: JetstreamMessage,
-    /// Hydrated metadata including profiles and referenced content
-    #[serde(default)]
-    pub hydrated_metadata: HydratedMetadata,
     /// Processing timestamp
     pub processed_at: DateTime<Utc>,
     /// Processing metrics
     pub metrics: ProcessingMetrics,
+    /// Hydrated metadata including profiles and referenced content
+    #[serde(default)]
+    pub hydrated_metadata: HydratedMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
