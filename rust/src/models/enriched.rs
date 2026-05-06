@@ -73,7 +73,7 @@ pub struct Mention {
     pub end_byte: u32,
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProcessingMetrics {
     /// Time taken to hydrate this record
     pub hydration_time_ms: u64,
