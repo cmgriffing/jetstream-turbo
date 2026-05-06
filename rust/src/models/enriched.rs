@@ -89,27 +89,25 @@ pub struct ProcessingMetrics {
 impl EnrichedRecord {
     #[inline(always)]
     pub fn new(message: JetstreamMessage) -> Self {
-        const DEFAULT_HYDRATED: HydratedMetadata = HydratedMetadata {
-            author_profile: None,
-            mentioned_profiles: Vec::new(),
-            referenced_posts: Vec::new(),
-            hashtags: Vec::new(),
-            urls: Vec::new(),
-            mentions: Vec::new(),
-            detected_language: None,
-        };
-        const DEFAULT_METRICS: ProcessingMetrics = ProcessingMetrics {
-            hydration_time_ms: 0,
-            api_calls_count: 0,
-            cache_hit_rate: 0.0,
-            cache_hits: 0,
-            cache_misses: 0,
-        };
         Self {
             message,
-            hydrated_metadata: DEFAULT_HYDRATED,
+            hydrated_metadata: HydratedMetadata {
+                author_profile: None,
+                mentioned_profiles: Vec::new(),
+                referenced_posts: Vec::new(),
+                hashtags: Vec::new(),
+                urls: Vec::new(),
+                mentions: Vec::new(),
+                detected_language: None,
+            },
             processed_at: DateTime::UNIX_EPOCH,
-            metrics: DEFAULT_METRICS,
+            metrics: ProcessingMetrics {
+                hydration_time_ms: 0,
+                api_calls_count: 0,
+                cache_hit_rate: 0.0,
+                cache_hits: 0,
+                cache_misses: 0,
+            },
         }
     }
 
