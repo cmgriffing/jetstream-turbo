@@ -100,7 +100,7 @@ impl EnrichedRecord {
                 mentions: Vec::new(),
                 detected_language: None,
             },
-            processed_at: Utc::now(),
+            processed_at: DateTime::UNIX_EPOCH,
             metrics: ProcessingMetrics {
                 hydration_time_ms: 0,
                 api_calls_count: 0,
