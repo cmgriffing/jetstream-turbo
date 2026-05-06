@@ -91,15 +91,7 @@ impl EnrichedRecord {
     pub fn new(message: JetstreamMessage) -> Self {
         Self {
             message,
-            hydrated_metadata: HydratedMetadata {
-                author_profile: None,
-                mentioned_profiles: Vec::new(),
-                referenced_posts: Vec::new(),
-                hashtags: Vec::new(),
-                urls: Vec::new(),
-                mentions: Vec::new(),
-                detected_language: None,
-            },
+            hydrated_metadata: Default::default(),
             processed_at: DateTime::UNIX_EPOCH,
             metrics: ProcessingMetrics {
                 hydration_time_ms: 0,
