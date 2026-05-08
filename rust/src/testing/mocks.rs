@@ -69,7 +69,10 @@ impl ProfileFetcher for MockProfileFetcher {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         self.requested_dids.lock().await.push(dids.to_vec());
         let mut profiles = self.profiles.lock().await;
-        let results = dids.iter().map(|did| profiles.remove(did.as_str())).collect();
+        let results = dids
+            .iter()
+            .map(|did| profiles.remove(did.as_str()))
+            .collect();
         Ok(results)
     }
 }

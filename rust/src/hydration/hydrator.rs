@@ -50,8 +50,14 @@ where
             .into_iter()
             .map(|s| s.to_string())
             .collect();
-        self.hydrate_one(message, author_did, is_post, mentioned_dids, chrono::Utc::now())
-            .await
+        self.hydrate_one(
+            message,
+            author_did,
+            is_post,
+            mentioned_dids,
+            chrono::Utc::now(),
+        )
+        .await
     }
 
     async fn hydrate_one(
@@ -234,7 +240,13 @@ where
         let processed_at = chrono::Utc::now();
         for ctx in contexts {
             match self
-                .hydrate_one(ctx.message, ctx.author_did, ctx.is_post, ctx.mentioned_dids, processed_at)
+                .hydrate_one(
+                    ctx.message,
+                    ctx.author_did,
+                    ctx.is_post,
+                    ctx.mentioned_dids,
+                    processed_at,
+                )
                 .await
             {
                 Ok(enriched) => results.push(enriched),
