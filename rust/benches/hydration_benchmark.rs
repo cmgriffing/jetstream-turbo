@@ -2,7 +2,9 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use jetstream_turbo_rs::hydration::TurboCache;
 use jetstream_turbo_rs::models::bluesky::{BlueskyPost, BlueskyProfile};
 use jetstream_turbo_rs::models::enriched::{EnrichedRecord, HydratedMetadata, ProcessingMetrics};
-use jetstream_turbo_rs::models::jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType};
+use jetstream_turbo_rs::models::jetstream::{
+    CommitData, JetstreamMessage, MessageKind, OperationType,
+};
 use jetstream_turbo_rs::storage::{SQLitePragmaConfig, SQLiteStore};
 use serde_json::json;
 use std::sync::Arc;
@@ -152,12 +154,10 @@ fn bench_cache_operations(c: &mut Criterion) {
 
             cache
         });
+        let dids: Vec<String> = (0..100).map(|i| format!("did:plc:test{}", i)).collect();
 
         b.iter(|| {
-            rt.block_on(async {
-                let dids: Vec<String> = (0..100).map(|i| format!("did:plc:test{}", i)).collect();
-                let _results = cache.get_user_profiles(&dids);
-            });
+            let _results = cache.get_user_profiles(&dids);
         });
     });
 
@@ -172,12 +172,10 @@ fn bench_cache_operations(c: &mut Criterion) {
 
             cache
         });
+        let uris: Vec<String> = (0..100).map(|i| format!("at://test/{}", i)).collect();
 
         b.iter(|| {
-            rt.block_on(async {
-                let uris: Vec<String> = (0..100).map(|i| format!("at://test/{}", i)).collect();
-                let _results = cache.get_posts(&uris);
-            });
+            let _results = cache.get_posts(&uris);
         });
     });
 

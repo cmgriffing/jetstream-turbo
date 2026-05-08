@@ -89,23 +89,22 @@ impl TurboCache {
 
     pub fn get_user_profiles(&self, dids: &[String]) -> Vec<Option<Arc<BlueskyProfile>>> {
         let mut profiles = Vec::with_capacity(dids.len());
-        let mut hits = 0_u64;
+        let mut misses = 0_u64;
 
         for did in dids {
             match self.user_cache.get(did) {
-                Some(profile) => {
-                    hits += 1;
-                    profiles.push(Some(profile));
+                Some(profile) => profiles.push(Some(profile)),
+                None => {
+                    misses += 1;
+                    profiles.push(None);
                 }
-                None => profiles.push(None),
             }
         }
 
-        let total = dids.len() as u64;
+        let hits = dids.len() as u64 - misses;
         if hits > 0 {
             self.metrics.user_hits.fetch_add(hits, Ordering::Relaxed);
         }
-        let misses = total.saturating_sub(hits);
         if misses > 0 {
             self.metrics
                 .user_misses
@@ -132,23 +131,22 @@ impl TurboCache {
 
     pub fn get_posts(&self, uris: &[String]) -> Vec<Option<Arc<BlueskyPost>>> {
         let mut posts = Vec::with_capacity(uris.len());
-        let mut hits = 0_u64;
+        let mut misses = 0_u64;
 
         for uri in uris {
             match self.post_cache.get(uri) {
-                Some(post) => {
-                    hits += 1;
-                    posts.push(Some(post));
+                Some(post) => posts.push(Some(post)),
+                None => {
+                    misses += 1;
+                    posts.push(None);
                 }
-                None => posts.push(None),
             }
         }
 
-        let total = uris.len() as u64;
+        let hits = uris.len() as u64 - misses;
         if hits > 0 {
             self.metrics.post_hits.fetch_add(hits, Ordering::Relaxed);
         }
-        let misses = total.saturating_sub(hits);
         if misses > 0 {
             self.metrics
                 .post_misses

@@ -68,8 +68,11 @@ impl ProfileFetcher for MockProfileFetcher {
     ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         self.requested_dids.lock().await.push(dids.to_vec());
-        let profiles = self.profiles.lock().await;
-        let results = dids.iter().map(|did| profiles.get(did).cloned()).collect();
+        let mut profiles = self.profiles.lock().await;
+        let results = dids
+            .iter()
+            .map(|did| profiles.remove(did.as_str()))
+            .collect();
         Ok(results)
     }
 }
@@ -100,8 +103,8 @@ impl PostFetcher for MockPostFetcher {
     async fn bulk_fetch_posts(&self, uris: &[String]) -> TurboResult<Vec<Option<BlueskyPost>>> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         self.requested_uris.lock().await.push(uris.to_vec());
-        let posts = self.posts.lock().await;
-        let results = uris.iter().map(|uri| posts.get(uri).cloned()).collect();
+        let mut posts = self.posts.lock().await;
+        let results = uris.iter().map(|uri| posts.remove(uri.as_str())).collect();
         Ok(results)
     }
 }

@@ -86,29 +86,39 @@ pub struct ProcessingMetrics {
     pub cache_misses: u32,
 }
 
+const DEFAULT_HYDRATED: HydratedMetadata = HydratedMetadata {
+    author_profile: None,
+    mentioned_profiles: Vec::new(),
+    referenced_posts: Vec::new(),
+    hashtags: Vec::new(),
+    urls: Vec::new(),
+    mentions: Vec::new(),
+    detected_language: None,
+};
+
+const DEFAULT_METRICS: ProcessingMetrics = ProcessingMetrics {
+    hydration_time_ms: 0,
+    api_calls_count: 0,
+    cache_hit_rate: 0.0,
+    cache_hits: 0,
+    cache_misses: 0,
+};
+
 impl EnrichedRecord {
     #[inline(always)]
     pub fn new(message: JetstreamMessage) -> Self {
         Self {
             message,
-            hydrated_metadata: HydratedMetadata {
-                author_profile: None,
-                mentioned_profiles: Vec::new(),
-                referenced_posts: Vec::new(),
-                hashtags: Vec::new(),
-                urls: Vec::new(),
-                mentions: Vec::new(),
-                detected_language: None,
-            },
-            processed_at: Utc::now(),
-            metrics: ProcessingMetrics {
-                hydration_time_ms: 0,
-                api_calls_count: 0,
-                cache_hit_rate: 0.0,
-                cache_hits: 0,
-                cache_misses: 0,
-            },
+            hydrated_metadata: DEFAULT_HYDRATED,
+            processed_at: DateTime::UNIX_EPOCH,
+            metrics: DEFAULT_METRICS,
         }
+    }
+
+    pub fn new_with_timestamp(message: JetstreamMessage, processed_at: DateTime<Utc>) -> Self {
+        let mut record = Self::new(message);
+        record.processed_at = processed_at;
+        record
     }
 
     #[inline(always)]

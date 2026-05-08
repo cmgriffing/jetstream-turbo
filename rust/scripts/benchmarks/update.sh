@@ -20,7 +20,7 @@ mkdir -p "$BASELINE_DIR"
 
 for result_file in "$BENCHMARK_OUTPUT"/*/new/estimates.json; do
     if [ -f "$result_file" ]; then
-        BENCH_NAME=$(basename "$(dirname "$result_file")")
+        BENCH_NAME=$(basename "$(dirname "$(dirname "$result_file")")")
         BASELINE_FILE="$BASELINE_DIR/${BENCH_NAME}.json"
         
         cp "$result_file" "$BASELINE_FILE"
