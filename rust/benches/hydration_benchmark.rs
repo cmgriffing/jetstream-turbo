@@ -154,12 +154,10 @@ fn bench_cache_operations(c: &mut Criterion) {
 
             cache
         });
+        let dids: Vec<String> = (0..100).map(|i| format!("did:plc:test{}", i)).collect();
 
         b.iter(|| {
-            rt.block_on(async {
-                let dids: Vec<String> = (0..100).map(|i| format!("did:plc:test{}", i)).collect();
-                let _results = cache.get_user_profiles(&dids);
-            });
+            let _results = cache.get_user_profiles(&dids);
         });
     });
 
@@ -174,12 +172,10 @@ fn bench_cache_operations(c: &mut Criterion) {
 
             cache
         });
+        let uris: Vec<String> = (0..100).map(|i| format!("at://test/{}", i)).collect();
 
         b.iter(|| {
-            rt.block_on(async {
-                let uris: Vec<String> = (0..100).map(|i| format!("at://test/{}", i)).collect();
-                let _results = cache.get_posts(&uris);
-            });
+            let _results = cache.get_posts(&uris);
         });
     });
 
