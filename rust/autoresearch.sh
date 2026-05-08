@@ -7,6 +7,7 @@ cd "$SCRIPT_DIR"
 BENCH_NAME="full_pipeline_batch_25"
 
 output=$(cargo bench --bench pipeline_benchmark "$BENCH_NAME" -- --noplot 2>&1)
+median_us=$(echo "$output" | grep "time:" | head -n1 | sed -n 's/.*\[\([0-9.]*\) µs \([0-9.]*\) µs \([0-9.]*\) µs\].*/\2/p')
 
 median_us=$(echo "$output" | grep "time:" | head -n1 | sed -n 's/.*\[\([0-9.]*\) µs \([0-9.]*\) µs \([0-9.]*\) µs\].*/\2/p')
 

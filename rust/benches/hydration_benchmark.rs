@@ -5,7 +5,7 @@ use jetstream_turbo_rs::models::enriched::{EnrichedRecord, HydratedMetadata, Pro
 use jetstream_turbo_rs::models::jetstream::{
     CommitData, JetstreamMessage, MessageKind, OperationType,
 };
-use jetstream_turbo_rs::storage::{SQLitePragmaConfig, SQLiteStore};
+use jetstream_turbo_rs::storage::{RecordStore, SQLitePragmaConfig, SQLiteStore};
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -339,9 +339,7 @@ fn bench_sqlite_operations(c: &mut Criterion) {
 
         b.iter(|| {
             rt.block_on(async {
-                for record in &records {
-                    let _id = store.store_record(record).await.unwrap();
-                }
+                let _ids = store.store_batch(&records).await.unwrap();
             });
         });
     });
