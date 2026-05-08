@@ -11,7 +11,6 @@ where
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlueskyProfile {
-    #[serde(serialize_with = "serialize_did")]
     pub did: Arc<str>,
     pub handle: String,
     #[serde(default, rename = "displayName")]
