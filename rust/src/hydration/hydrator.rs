@@ -1,6 +1,12 @@
 use crate::client::{PostFetcher, ProfileFetcher};
 use crate::hydration::TurboCache;
-use crate::models::{enriched::EnrichedRecord, jetstream::JetstreamMessage, TurboResult};
+use crate::models::{
+    enriched::EnrichedRecord,
+    jetstream::JetstreamMessage,
+    record_view::{FacetFeature, RecordView},
+    TurboResult,
+};
+use crate::utils::serde_utils::string_utils::is_valid_at_uri;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, trace};
@@ -10,6 +16,92 @@ struct MessageContext {
     author_did: String,
     is_post: bool,
     mentioned_dids: Vec<String>,
+}
+
+/// Extract mentioned DIDs from a record view.
+///
+/// Sources: reply parent/root URIs, mention facets, and embed record URIs.
+/// All DIDs are parsed from AT-URIs (`at://did:plc:.../...`).
+fn extract_mentioned_dids_from_view(rv: &RecordView<'_>) -> Vec<String> {
+    let mut mentioned_dids = Vec::new();
+
+    // From reply references
+    if let Some(refs) = rv.reply_refs() {
+        if let Some(did) = refs.parent_uri.and_then(extract_did_from_at_uri) {
+            if did.starts_with("did:plc:") {
+                mentioned_dids.push(did.to_string());
+            }
+        }
+        if let Some(did) = refs.root_uri.and_then(extract_did_from_at_uri) {
+            if did.starts_with("did:plc:") {
+                mentioned_dids.push(did.to_string());
+            }
+        }
+    }
+
+    // From mention facets
+    for facet in rv.facets() {
+        for feature in facet.features() {
+            if let FacetFeature::Mention { did } = feature {
+                if did.starts_with("did:plc:") {
+                    mentioned_dids.push(did.to_string());
+                }
+            }
+        }
+    }
+
+    // From embed record
+    if let Some(uri) = rv.embed_record_uri() {
+        if let Some(did) = extract_did_from_at_uri(uri) {
+            if did.starts_with("did:plc:") {
+                mentioned_dids.push(did.to_string());
+            }
+        }
+    }
+
+    mentioned_dids.sort();
+    mentioned_dids.dedup();
+    mentioned_dids
+}
+
+/// Extract referenced post URIs from a record view.
+///
+/// Sources: reply parent/root URIs and embed record URIs.
+/// All URIs are validated with `is_valid_at_uri`.
+fn extract_post_uris_from_view(rv: &RecordView<'_>) -> Vec<String> {
+    let mut uris = Vec::new();
+
+    // From reply references
+    if let Some(refs) = rv.reply_refs() {
+        if let Some(uri) = refs.parent_uri {
+            if !uri.is_empty() && is_valid_at_uri(uri) {
+                uris.push(uri.to_string());
+            }
+        }
+        if let Some(uri) = refs.root_uri {
+            if !uri.is_empty() && is_valid_at_uri(uri) {
+                uris.push(uri.to_string());
+            }
+        }
+    }
+
+    // From embed record
+    if let Some(uri) = rv.embed_record_uri() {
+        if !uri.is_empty() && is_valid_at_uri(uri) {
+            uris.push(uri.to_string());
+        }
+    }
+
+    uris.sort();
+    uris.dedup();
+    uris
+}
+
+/// Extract the DID from an AT-URI (`at://did:plc:abc123/...`).
+#[inline(always)]
+fn extract_did_from_at_uri(uri: &str) -> Option<&str> {
+    uri.strip_prefix("at://")
+        .and_then(|s| s.split('/').next())
 }
 
 pub struct Hydrator<P, Po> {
