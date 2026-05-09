@@ -137,11 +137,14 @@ where
         let author_did = message.extract_did().to_string();
         let at_uri = message.extract_at_uri();
         let is_post = at_uri.is_some();
+
         let mentioned_dids: Vec<String> = message
-            .extract_mentioned_dids()
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect();
+            .commit
+            .as_ref()
+            .and_then(|c| c.record.as_ref())
+            .map(|r| extract_mentioned_dids_from_view(&RecordView::new(r)))
+            .unwrap_or_default();
+
         self.hydrate_one(
             message,
             author_did,
@@ -223,18 +226,26 @@ where
                 .as_ref()
                 .and_then(|c| c.collection.as_ref())
                 .is_some();
-            let mentioned_dids: Vec<String> = message
-                .extract_mentioned_dids()
-                .into_iter()
-                .map(|s| s.to_string())
-                .collect();
+
+            let (mentioned_dids, post_uris) = message
+                .commit
+                .as_ref()
+                .and_then(|c| c.record.as_ref())
+                .map(|r| {
+                    let rv = RecordView::new(r);
+                    (
+                        extract_mentioned_dids_from_view(&rv),
+                        extract_post_uris_from_view(&rv),
+                    )
+                })
+                .unwrap_or_default();
 
             unique_dids.insert(author_did.clone());
             for did in &mentioned_dids {
                 unique_dids.insert(did.clone());
             }
-            for uri in message.extract_post_uris() {
-                unique_uris.insert(uri);
+            for uri in &post_uris {
+                unique_uris.insert(uri.clone());
             }
 
             contexts.push(MessageContext {
