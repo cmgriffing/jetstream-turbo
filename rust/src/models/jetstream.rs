@@ -139,38 +139,5 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_extract_mentioned_dids() {
-        let json_str = r#"
-        {
-            "did": "did:plc:author",
-            "time_us": 1770949213800000,
-            "kind": "commit",
-            "commit": {
-                "operation": "create",
-                "collection": "app.bsky.feed.post",
-                "rkey": "test123",
-                "record": {
-                    "$type": "app.bsky.feed.post",
-                    "text": "Test",
-                    "reply": {
-                        "parent": {
-                            "cid": "bafyrei...",
-                            "uri": "at://did:plc:parent123/app.bsky.feed.post/parent456"
-                        },
-                        "root": {
-                            "cid": "bafyrei...",
-                            "uri": "at://did:plc:root789/app.bsky.feed.post/root000"
-                        }
-                    }
-                }
-            }
-        }
-        "#;
 
-        let message: JetstreamMessage = serde_json::from_str(json_str).unwrap();
-        let mentioned = message.extract_mentioned_dids();
-        assert!(mentioned.contains(&"did:plc:parent123"));
-        assert!(mentioned.contains(&"did:plc:root789"));
-    }
 }

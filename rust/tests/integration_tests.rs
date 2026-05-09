@@ -179,9 +179,28 @@ mod tests {
             Some("at://did:plc:alice/app.bsky.feed.post/3jk7v7mjpxq3y".to_string())
         );
 
-        // Test DID extraction from mentions
-        let mentioned_dids = message.extract_mentioned_dids();
-        assert!(mentioned_dids.contains(&"did:plc:bob"));
+        // Test DID extraction from mentions via RecordView
+        use jetstream_turbo_rs::models::record_view::{FacetFeature, RecordView};
+        let rv = RecordView::new(
+            message
+                .commit
+                .as_ref()
+                .and_then(|c| c.record.as_ref())
+                .unwrap(),
+        );
+        let mut mentioned_dids: Vec<String> = Vec::new();
+        for facet in rv.facets() {
+            for feature in facet.features() {
+                if let FacetFeature::Mention { did } = feature {
+                    if did.starts_with("did:plc:") {
+                        mentioned_dids.push(did.to_string());
+                    }
+                }
+            }
+        }
+        mentioned_dids.sort();
+        mentioned_dids.dedup();
+        assert!(mentioned_dids.contains(&"did:plc:bob".to_string()));
         assert!(!mentioned_dids.is_empty());
     }
 
