@@ -1,4 +1,5 @@
 use crate::client::{PostFetcher, ProfileFetcher};
+use crate::hydration::resolver::CacheMissResolver;
 use crate::hydration::TurboCache;
 use crate::models::{
     enriched::EnrichedRecord,
@@ -105,17 +106,13 @@ fn extract_did_from_at_uri(uri: &str) -> Option<&str> {
 }
 
 pub struct Hydrator<P, Po> {
-    cache: TurboCache,
-    profile_fetcher: Arc<P>,
-    post_fetcher: Arc<Po>,
+    resolver: CacheMissResolver<P, Po>,
 }
 
 impl<P, Po> Clone for Hydrator<P, Po> {
     fn clone(&self) -> Self {
         Self {
-            cache: self.cache.clone(),
-            profile_fetcher: Arc::clone(&self.profile_fetcher),
-            post_fetcher: Arc::clone(&self.post_fetcher),
+            resolver: self.resolver.clone(),
         }
     }
 }
@@ -127,9 +124,7 @@ where
 {
     pub fn new(cache: TurboCache, profile_fetcher: Arc<P>, post_fetcher: Arc<Po>) -> Self {
         Self {
-            cache,
-            profile_fetcher,
-            post_fetcher,
+            resolver: CacheMissResolver::new(cache, profile_fetcher, post_fetcher),
         }
     }
 
@@ -174,30 +169,16 @@ where
             if let Some(ref uri) = at_uri {
                 tracing::Span::current().record("at_uri", uri);
             }
-            let mut author_profile = self.cache.get_user_profile(&author_did);
 
+            let author_profile = self.resolver.resolve_profile(&author_did).await?;
             let hit = author_profile.is_some();
             tracing::Span::current().record("cache_hit", hit);
-
-            if !hit {
-                let author_did_owned = author_did.clone();
-                let profiles = self
-                    .profile_fetcher
-                    .bulk_fetch_profiles(&[author_did_owned])
-                    .await?;
-
-                if let Some(profile) = profiles.into_iter().next().flatten() {
-                    let profile_arc = Arc::new(profile);
-                    author_profile = Some(Arc::clone(&profile_arc));
-                    self.cache.set_user_profile(author_did, profile_arc);
-                }
-            }
 
             enriched.hydrated_metadata.author_profile = author_profile;
         }
 
         for did in &mentioned_dids {
-            if let Some(profile) = self.cache.get_user_profile(did) {
+            if let Some(profile) = self.resolver.cache().get_user_profile(did) {
                 enriched.hydrated_metadata.add_mentioned_profile(profile);
             }
         }
@@ -265,61 +246,10 @@ where
         let uris: Vec<String> = unique_uris.into_iter().collect();
 
         let cache_check_start = Instant::now();
-        let cached_profile_flags = self.cache.check_user_profiles_cached(&dids);
-        let cached_post_flags = self.cache.check_posts_cached(&uris);
-        let cache_check_time = cache_check_start.elapsed().as_millis() as u64;
-        tracing::Span::current().record("cache_check_time_ms", cache_check_time);
-
-        let uncached_dids: Vec<String> = dids
-            .into_iter()
-            .enumerate()
-            .filter(|(i, _)| !cached_profile_flags[*i])
-            .map(|(_, did)| did)
-            .collect();
-
-        let uncached_uris: Vec<String> = uris
-            .into_iter()
-            .enumerate()
-            .filter(|(i, _)| !cached_post_flags[*i])
-            .map(|(_, uri)| uri)
-            .collect();
-
-        let profiles_result = async {
-            if uncached_dids.is_empty() {
-                return Ok(vec![]);
-            }
-            self.profile_fetcher
-                .bulk_fetch_profiles(&uncached_dids)
-                .await
-        }
-        .await;
-
-        let posts_result = async {
-            if uncached_uris.is_empty() {
-                return Ok(vec![]);
-            }
-            self.post_fetcher.bulk_fetch_posts(&uncached_uris).await
-        }
-        .await;
-
-        let api_fetch_time = cache_check_start.elapsed().as_millis() as u64 - cache_check_time;
+        self.resolver.resolve_profiles(&dids).await?;
+        self.resolver.resolve_posts(&uris).await?;
+        let api_fetch_time = cache_check_start.elapsed().as_millis() as u64;
         tracing::Span::current().record("api_fetch_time_ms", api_fetch_time);
-
-        if let Ok(profiles) = profiles_result {
-            for (did, maybe_profile) in uncached_dids.iter().zip(profiles) {
-                if let Some(profile) = maybe_profile {
-                    self.cache.set_user_profile(did.clone(), Arc::new(profile));
-                }
-            }
-        }
-
-        if let Ok(posts) = posts_result {
-            for (uri, maybe_post) in uncached_uris.iter().zip(posts) {
-                if let Some(post) = maybe_post {
-                    self.cache.set_post(uri.clone(), Arc::new(post));
-                }
-            }
-        }
 
         let hydrate_start = Instant::now();
         let results = self.hydrate_contexts(contexts).await;
@@ -362,6 +292,6 @@ where
     }
 
     pub fn get_cache(&self) -> &TurboCache {
-        &self.cache
+        self.resolver.cache()
     }
 }
