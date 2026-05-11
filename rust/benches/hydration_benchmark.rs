@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use jetstream_turbo_rs::hydration::TurboCache;
 use jetstream_turbo_rs::models::bluesky::{BlueskyPost, BlueskyProfile};
 use jetstream_turbo_rs::models::enriched::{EnrichedRecord, HydratedMetadata, ProcessingMetrics};
@@ -8,7 +8,18 @@ use jetstream_turbo_rs::models::jetstream::{
 use jetstream_turbo_rs::storage::{RecordStore, SQLitePragmaConfig, SQLiteStore};
 use serde_json::json;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+const MICROBENCH_BATCH_SIZE: u32 = 128;
+
+fn batched_microbench_iters(iters: u64) -> u64 {
+    iters * u64::from(MICROBENCH_BATCH_SIZE)
+}
+
+fn per_microbench_op(elapsed: Duration) -> Duration {
+    elapsed / MICROBENCH_BATCH_SIZE
+}
 
 fn create_test_profile(i: usize) -> BlueskyProfile {
     BlueskyProfile {
@@ -229,29 +240,51 @@ fn bench_cache_operations(c: &mut Criterion) {
 fn bench_serialization(c: &mut Criterion) {
     c.bench_function("serde_json_serialize_profile", |b| {
         let profile = create_test_profile(0);
-        b.iter(|| {
-            let _json = serde_json::to_string(&profile).unwrap();
+        b.iter_custom(|iters| {
+            let total_iters = batched_microbench_iters(iters);
+            let start = Instant::now();
+            for _ in 0..total_iters {
+                let json = serde_json::to_string(&profile).unwrap();
+                black_box(json);
+            }
+            per_microbench_op(start.elapsed())
         });
     });
 
     c.bench_function("serde_json_deserialize_profile", |b| {
         let json_str = serde_json::to_string(&create_test_profile(0)).unwrap();
-        b.iter(|| {
-            let _profile: BlueskyProfile = serde_json::from_str(&json_str).unwrap();
+        b.iter_custom(|iters| {
+            let total_iters = batched_microbench_iters(iters);
+            let start = Instant::now();
+            for _ in 0..total_iters {
+                let _profile: BlueskyProfile = serde_json::from_str(&json_str).unwrap();
+            }
+            per_microbench_op(start.elapsed())
         });
     });
 
     c.bench_function("serde_json_serialize_message", |b| {
         let message = create_test_message(0);
-        b.iter(|| {
-            let _json = serde_json::to_string(&message).unwrap();
+        b.iter_custom(|iters| {
+            let total_iters = batched_microbench_iters(iters);
+            let start = Instant::now();
+            for _ in 0..total_iters {
+                let json = serde_json::to_string(&message).unwrap();
+                black_box(json);
+            }
+            per_microbench_op(start.elapsed())
         });
     });
 
     c.bench_function("serde_json_deserialize_message", |b| {
         let json_str = serde_json::to_string(&create_test_message(0)).unwrap();
-        b.iter(|| {
-            let _message: JetstreamMessage = serde_json::from_str(&json_str).unwrap();
+        b.iter_custom(|iters| {
+            let total_iters = batched_microbench_iters(iters);
+            let start = Instant::now();
+            for _ in 0..total_iters {
+                let _message: JetstreamMessage = serde_json::from_str(&json_str).unwrap();
+            }
+            per_microbench_op(start.elapsed())
         });
     });
 
@@ -269,8 +302,14 @@ fn bench_serialization(c: &mut Criterion) {
                 cache_misses: 5,
             },
         };
-        b.iter(|| {
-            let _json = serde_json::to_string(&record).unwrap();
+        b.iter_custom(|iters| {
+            let total_iters = batched_microbench_iters(iters);
+            let start = Instant::now();
+            for _ in 0..total_iters {
+                let json = serde_json::to_string(&record).unwrap();
+                black_box(json);
+            }
+            per_microbench_op(start.elapsed())
         });
     });
 }
@@ -395,29 +434,52 @@ fn bench_sqlite_operations(c: &mut Criterion) {
 fn bench_enriched_record_creation(c: &mut Criterion) {
     c.bench_function("enriched_record_new", |b| {
         let message = create_test_message(0);
-        b.iter_batched(
-            || message.clone(),
-            EnrichedRecord::new,
-            BatchSize::SmallInput,
-        );
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                let messages: Vec<JetstreamMessage> = (0..MICROBENCH_BATCH_SIZE)
+                    .map(|_| message.clone())
+                    .collect();
+                let mut records = Vec::with_capacity(MICROBENCH_BATCH_SIZE as usize);
+                let start = Instant::now();
+                for message in messages {
+                    records.push(EnrichedRecord::new(message));
+                }
+                elapsed += start.elapsed();
+                black_box(records);
+            }
+            per_microbench_op(elapsed)
+        });
     });
 
     c.bench_function("jetstream_message_clone", |b| {
         let message = create_test_message(0);
-        b.iter(|| message.clone());
+        b.iter_custom(|iters| {
+            let total_iters = batched_microbench_iters(iters);
+            let start = Instant::now();
+            for _ in 0..total_iters {
+                black_box(message.clone());
+            }
+            per_microbench_op(start.elapsed())
+        });
     });
 
     c.bench_function("enriched_record_with_profile", |b| {
         let message = create_test_message(0);
         let profile = Arc::new(create_test_profile(0));
 
-        b.iter(|| {
-            let mut record = EnrichedRecord::new(message.clone());
-            record.hydrated_metadata.author_profile = Some(profile.clone());
-            record.metrics.cache_hits = 5;
-            record.metrics.cache_misses = 2;
-            record.calculate_cache_hit_rate();
-            let _hit_rate = record.metrics.cache_hit_rate;
+        b.iter_custom(|iters| {
+            let total_iters = batched_microbench_iters(iters);
+            let start = Instant::now();
+            for _ in 0..total_iters {
+                let mut record = EnrichedRecord::new(message.clone());
+                record.hydrated_metadata.author_profile = Some(profile.clone());
+                record.metrics.cache_hits = 5;
+                record.metrics.cache_misses = 2;
+                record.calculate_cache_hit_rate();
+                black_box(record.metrics.cache_hit_rate);
+            }
+            per_microbench_op(start.elapsed())
         });
     });
 
@@ -425,10 +487,16 @@ fn bench_enriched_record_creation(c: &mut Criterion) {
         let message = create_test_message(0);
         let record = EnrichedRecord::new(message);
 
-        b.iter(|| {
-            let _at_uri = record.get_at_uri();
-            let _did = record.get_did();
-            let _text = record.get_text();
+        b.iter_custom(|iters| {
+            let total_iters = batched_microbench_iters(iters);
+            let start = Instant::now();
+            for _ in 0..total_iters {
+                let at_uri = record.get_at_uri();
+                let did = record.get_did();
+                let text = record.get_text();
+                black_box((at_uri, did, text));
+            }
+            per_microbench_op(start.elapsed())
         });
     });
 }
