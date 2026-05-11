@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 use jetstream_turbo_rs::hydration::TurboCache;
 use jetstream_turbo_rs::models::bluesky::{BlueskyPost, BlueskyProfile};
 use jetstream_turbo_rs::models::enriched::{EnrichedRecord, HydratedMetadata, ProcessingMetrics};
@@ -395,9 +395,16 @@ fn bench_sqlite_operations(c: &mut Criterion) {
 fn bench_enriched_record_creation(c: &mut Criterion) {
     c.bench_function("enriched_record_new", |b| {
         let message = create_test_message(0);
-        b.iter(|| {
-            let _record = EnrichedRecord::new(message.clone());
-        });
+        b.iter_batched(
+            || message.clone(),
+            EnrichedRecord::new,
+            BatchSize::SmallInput,
+        );
+    });
+
+    c.bench_function("jetstream_message_clone", |b| {
+        let message = create_test_message(0);
+        b.iter(|| message.clone());
     });
 
     c.bench_function("enriched_record_with_profile", |b| {
