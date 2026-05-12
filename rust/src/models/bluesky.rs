@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
+use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize, Serializer};
+use std::fmt;
 use std::sync::Arc;
 
 fn serialize_did<S>(did: &Arc<str>, serializer: S) -> Result<S::Ok, S::Error>
@@ -9,7 +11,7 @@ where
     serializer.serialize_str(did)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BlueskyProfile {
     pub did: Arc<str>,
     pub handle: String,
@@ -30,6 +32,209 @@ pub struct BlueskyProfile {
     pub created_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<Label>>,
+}
+
+impl<'de> Deserialize<'de> for BlueskyProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        enum Field {
+            Did,
+            Handle,
+            DisplayName,
+            Description,
+            Avatar,
+            Banner,
+            FollowersCount,
+            FollowsCount,
+            PostsCount,
+            IndexedAt,
+            CreatedAt,
+            Labels,
+            Ignore,
+        }
+
+        impl<'de> Deserialize<'de> for Field {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct FieldVisitor;
+
+                impl Visitor<'_> for FieldVisitor {
+                    type Value = Field;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                        formatter.write_str("a BlueskyProfile field")
+                    }
+
+                    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+                    where
+                        E: de::Error,
+                    {
+                        Ok(match value {
+                            "did" => Field::Did,
+                            "handle" => Field::Handle,
+                            "displayName" => Field::DisplayName,
+                            "description" => Field::Description,
+                            "avatar" => Field::Avatar,
+                            "banner" => Field::Banner,
+                            "followersCount" => Field::FollowersCount,
+                            "followsCount" => Field::FollowsCount,
+                            "postsCount" => Field::PostsCount,
+                            "indexed_at" => Field::IndexedAt,
+                            "created_at" => Field::CreatedAt,
+                            "labels" => Field::Labels,
+                            _ => Field::Ignore,
+                        })
+                    }
+                }
+
+                deserializer.deserialize_identifier(FieldVisitor)
+            }
+        }
+
+        struct BlueskyProfileVisitor;
+
+        impl<'de> Visitor<'de> for BlueskyProfileVisitor {
+            type Value = BlueskyProfile;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a BlueskyProfile")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut did = None;
+                let mut handle = None;
+                let mut display_name = None;
+                let mut description = None;
+                let mut avatar = None;
+                let mut banner = None;
+                let mut followers_count = None;
+                let mut follows_count = None;
+                let mut posts_count = None;
+                let mut indexed_at = None;
+                let mut created_at = None;
+                let mut labels = None;
+
+                while let Some(field) = map.next_key()? {
+                    match field {
+                        Field::Did => {
+                            if did.is_some() {
+                                return Err(de::Error::duplicate_field("did"));
+                            }
+                            did = Some(map.next_value()?);
+                        }
+                        Field::Handle => {
+                            if handle.is_some() {
+                                return Err(de::Error::duplicate_field("handle"));
+                            }
+                            handle = Some(map.next_value()?);
+                        }
+                        Field::DisplayName => {
+                            if display_name.is_some() {
+                                return Err(de::Error::duplicate_field("displayName"));
+                            }
+                            display_name = Some(map.next_value()?);
+                        }
+                        Field::Description => {
+                            if description.is_some() {
+                                return Err(de::Error::duplicate_field("description"));
+                            }
+                            description = Some(map.next_value()?);
+                        }
+                        Field::Avatar => {
+                            if avatar.is_some() {
+                                return Err(de::Error::duplicate_field("avatar"));
+                            }
+                            avatar = Some(map.next_value()?);
+                        }
+                        Field::Banner => {
+                            if banner.is_some() {
+                                return Err(de::Error::duplicate_field("banner"));
+                            }
+                            banner = Some(map.next_value()?);
+                        }
+                        Field::FollowersCount => {
+                            if followers_count.is_some() {
+                                return Err(de::Error::duplicate_field("followersCount"));
+                            }
+                            followers_count = Some(map.next_value()?);
+                        }
+                        Field::FollowsCount => {
+                            if follows_count.is_some() {
+                                return Err(de::Error::duplicate_field("followsCount"));
+                            }
+                            follows_count = Some(map.next_value()?);
+                        }
+                        Field::PostsCount => {
+                            if posts_count.is_some() {
+                                return Err(de::Error::duplicate_field("postsCount"));
+                            }
+                            posts_count = Some(map.next_value()?);
+                        }
+                        Field::IndexedAt => {
+                            if indexed_at.is_some() {
+                                return Err(de::Error::duplicate_field("indexed_at"));
+                            }
+                            indexed_at = Some(map.next_value()?);
+                        }
+                        Field::CreatedAt => {
+                            if created_at.is_some() {
+                                return Err(de::Error::duplicate_field("created_at"));
+                            }
+                            created_at = Some(map.next_value()?);
+                        }
+                        Field::Labels => {
+                            if labels.is_some() {
+                                return Err(de::Error::duplicate_field("labels"));
+                            }
+                            labels = Some(map.next_value()?);
+                        }
+                        Field::Ignore => {
+                            let _ = map.next_value::<de::IgnoredAny>()?;
+                        }
+                    }
+                }
+
+                Ok(BlueskyProfile {
+                    did: did.ok_or_else(|| de::Error::missing_field("did"))?,
+                    handle: handle.ok_or_else(|| de::Error::missing_field("handle"))?,
+                    display_name: display_name.unwrap_or_default(),
+                    description: description.unwrap_or_default(),
+                    avatar: avatar.unwrap_or_default(),
+                    banner: banner.unwrap_or_default(),
+                    followers_count: followers_count.unwrap_or_default(),
+                    follows_count: follows_count.unwrap_or_default(),
+                    posts_count: posts_count.unwrap_or_default(),
+                    indexed_at: indexed_at.unwrap_or_default(),
+                    created_at: created_at.unwrap_or_default(),
+                    labels: labels.unwrap_or_default(),
+                })
+            }
+        }
+
+        const FIELDS: &[&str] = &[
+            "did",
+            "handle",
+            "displayName",
+            "description",
+            "avatar",
+            "banner",
+            "followersCount",
+            "followsCount",
+            "postsCount",
+            "indexed_at",
+            "created_at",
+            "labels",
+        ];
+
+        deserializer.deserialize_struct("BlueskyProfile", FIELDS, BlueskyProfileVisitor)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
