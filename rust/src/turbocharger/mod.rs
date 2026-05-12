@@ -1,9 +1,12 @@
-pub mod buffer;
 pub mod coordinator;
+pub mod diagnostics;
 pub mod orchestrator;
 
+pub use diagnostics::{
+    CacheStateDiagnostics, DiagnosticsCollector, HealthDiagnostics, HealthStatus,
+    MemoryPeakDiagnostics, NotRedisStateDiagnostics, ProcessMemoryDiagnostics,
+    SQLiteStateDiagnostics,
+};
 pub use orchestrator::{
-    CacheStateDiagnostics, HealthDiagnostics, HealthStatus, MemoryPeakDiagnostics,
-    NotRedisStateDiagnostics, ProcessMemoryDiagnostics, ProductionTurboCharger,
-    SQLiteStateDiagnostics, TurboCharger, TurboStats,
+    ProductionTurboCharger, TurboCharger, TurboStats,
 };

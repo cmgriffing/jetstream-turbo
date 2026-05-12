@@ -1,4 +1,3 @@
-use crate::utils::serde_utils::string_utils::is_valid_at_uri;
 use serde::{Deserialize, Serialize, Serializer};
 
 #[repr(u8)]
@@ -103,105 +102,6 @@ impl JetstreamMessage {
         }
         false
     }
-
-    pub fn extract_mentioned_dids(&self) -> Vec<&str> {
-        let mut mentioned_dids = Vec::new();
-
-        if let Some(commit) = &self.commit {
-            if let Some(record) = &commit.record {
-                // Extract from reply references
-                if let Some(reply) = record.get("reply") {
-                    if let Some(parent) = reply.get("parent") {
-                        if let Some(uri) = parent.get("uri").and_then(|u| u.as_str()) {
-                            if let Some(did) =
-                                uri.strip_prefix("at://").and_then(|s| s.split('/').next())
-                            {
-                                mentioned_dids.push(did);
-                            }
-                        }
-                    }
-                    if let Some(root) = reply.get("root") {
-                        if let Some(uri) = root.get("uri").and_then(|u| u.as_str()) {
-                            if let Some(did) =
-                                uri.strip_prefix("at://").and_then(|s| s.split('/').next())
-                            {
-                                mentioned_dids.push(did);
-                            }
-                        }
-                    }
-                }
-
-                // Extract from facets (mentions)
-                if let Some(facets) = record.get("facets").and_then(|f| f.as_array()) {
-                    for facet in facets {
-                        if let Some(features) = facet.get("features").and_then(|f| f.as_array()) {
-                            for feature in features {
-                                // Check for mention features
-                                if let Some(did) = feature.get("did").and_then(|d| d.as_str()) {
-                                    mentioned_dids.push(did);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Extract from embeds (quotes)
-                if let Some(embed) = record.get("embed") {
-                    if let Some(embed_record) = embed.get("record") {
-                        if let Some(uri) = embed_record.get("uri").and_then(|u| u.as_str()) {
-                            if let Some(did) =
-                                uri.strip_prefix("at://").and_then(|s| s.split('/').next())
-                            {
-                                mentioned_dids.push(did);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        mentioned_dids.retain(|did| did.starts_with("did:plc:"));
-        mentioned_dids.dedup();
-        mentioned_dids
-    }
-
-    pub fn extract_post_uris(&self) -> Vec<String> {
-        let mut uris = Vec::new();
-
-        if let Some(commit) = &self.commit {
-            if let Some(record) = &commit.record {
-                if let Some(reply) = record.get("reply") {
-                    if let Some(parent) = reply.get("parent") {
-                        if let Some(uri) = parent.get("uri").and_then(|u| u.as_str()) {
-                            if !uri.is_empty() && is_valid_at_uri(uri) {
-                                uris.push(uri.to_string());
-                            }
-                        }
-                    }
-                    if let Some(root) = reply.get("root") {
-                        if let Some(uri) = root.get("uri").and_then(|u| u.as_str()) {
-                            if !uri.is_empty() && is_valid_at_uri(uri) {
-                                uris.push(uri.to_string());
-                            }
-                        }
-                    }
-                }
-
-                if let Some(embed) = record.get("embed") {
-                    if let Some(embed_record) = embed.get("record") {
-                        if let Some(uri) = embed_record.get("uri").and_then(|u| u.as_str()) {
-                            if !uri.is_empty() && is_valid_at_uri(uri) {
-                                uris.push(uri.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        uris.dedup();
-        uris
-    }
 }
 
 #[cfg(test)]
@@ -239,38 +139,5 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_extract_mentioned_dids() {
-        let json_str = r#"
-        {
-            "did": "did:plc:author",
-            "time_us": 1770949213800000,
-            "kind": "commit",
-            "commit": {
-                "operation": "create",
-                "collection": "app.bsky.feed.post",
-                "rkey": "test123",
-                "record": {
-                    "$type": "app.bsky.feed.post",
-                    "text": "Test",
-                    "reply": {
-                        "parent": {
-                            "cid": "bafyrei...",
-                            "uri": "at://did:plc:parent123/app.bsky.feed.post/parent456"
-                        },
-                        "root": {
-                            "cid": "bafyrei...",
-                            "uri": "at://did:plc:root789/app.bsky.feed.post/root000"
-                        }
-                    }
-                }
-            }
-        }
-        "#;
 
-        let message: JetstreamMessage = serde_json::from_str(json_str).unwrap();
-        let mentioned = message.extract_mentioned_dids();
-        assert!(mentioned.contains(&"did:plc:parent123"));
-        assert!(mentioned.contains(&"did:plc:root789"));
-    }
 }

@@ -173,67 +173,6 @@ impl HydratedMetadata {
             self.referenced_posts.push(post);
         }
     }
-
-    pub fn extract_content_features(&mut self, text: &str, record: &Option<serde_json::Value>) {
-        // Reset arrays
-        self.hashtags.clear();
-        self.urls.clear();
-        self.mentions.clear();
-
-        // Extract from facets
-        if let Some(record) = record {
-            if let Some(facets) = record.get("facets").and_then(|f| f.as_array()) {
-                for facet in facets {
-                    let index = facet.get("index");
-                    let start = index
-                        .and_then(|i| i.get("byteStart").and_then(|v| v.as_u64()))
-                        .unwrap_or(0) as u32;
-                    let end = index
-                        .and_then(|i| i.get("byteEnd").and_then(|v| v.as_u64()))
-                        .unwrap_or(0) as u32;
-
-                    if let Some(features) = facet.get("features").and_then(|f| f.as_array()) {
-                        for feature in features {
-                            let feature_type =
-                                feature.get("$type").and_then(|t| t.as_str()).unwrap_or("");
-                            match feature_type {
-                                "app.bsky.richtext.facet#tag" => {
-                                    if let (Some(start_usize), Some(end_usize)) =
-                                        (start.try_into().ok(), end.try_into().ok())
-                                    {
-                                        if let Some(hashtag) = text.get(start_usize..end_usize) {
-                                            self.hashtags.push(
-                                                hashtag.trim_start_matches('#').to_lowercase(),
-                                            );
-                                        }
-                                    }
-                                }
-                                "app.bsky.richtext.facet#link" => {
-                                    if let Some(uri) = feature.get("uri").and_then(|u| u.as_str()) {
-                                        if uri.starts_with("http") {
-                                            self.urls.push(uri.to_string());
-                                        }
-                                    }
-                                }
-                                "app.bsky.richtext.facet#mention" => {
-                                    if let Some(did) = feature.get("did").and_then(|d| d.as_str()) {
-                                        self.mentions.push(Mention {
-                                            did: did.into(),
-                                            handle: None,
-                                            display_name: None,
-                                            start_byte: start,
-                                            end_byte: end,
-                                        });
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
