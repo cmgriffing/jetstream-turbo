@@ -11,14 +11,24 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-const MICROBENCH_BATCH_SIZE: u32 = 128;
+const MICROBENCH_BATCH_SIZE: u32 = 512;
+const CACHE_ACCESS_BATCH_SIZE: u32 = 8;
+const SQLITE_BENCH_BATCH_SIZE: u32 = 4;
 
 fn batched_microbench_iters(iters: u64) -> u64 {
     iters * u64::from(MICROBENCH_BATCH_SIZE)
 }
 
+fn batched_iters(iters: u64, batch_size: u32) -> u64 {
+    iters * u64::from(batch_size)
+}
+
 fn per_microbench_op(elapsed: Duration) -> Duration {
     elapsed / MICROBENCH_BATCH_SIZE
+}
+
+fn per_batched_op(elapsed: Duration, batch_size: u32) -> Duration {
+    elapsed / batch_size
 }
 
 fn create_test_profile(i: usize) -> BlueskyProfile {
@@ -145,12 +155,17 @@ fn bench_cache_operations(c: &mut Criterion) {
             cache
         });
 
-        b.iter(|| {
-            rt.block_on(async {
-                for i in 0..1000 {
-                    let _result = cache.get_post(&format!("at://test/{}", i));
-                }
-            });
+        b.iter_custom(|iters| {
+            let total_iters = batched_iters(iters, CACHE_ACCESS_BATCH_SIZE);
+            let start = Instant::now();
+            for _ in 0..total_iters {
+                rt.block_on(async {
+                    for i in 0..1000 {
+                        black_box(cache.get_post(&format!("at://test/{}", i)));
+                    }
+                });
+            }
+            per_batched_op(start.elapsed(), CACHE_ACCESS_BATCH_SIZE)
         });
     });
 
@@ -341,10 +356,15 @@ fn bench_sqlite_operations(c: &mut Criterion) {
             },
         };
 
-        b.iter(|| {
-            rt.block_on(async {
-                let _id = store.store_record(&record).await.unwrap();
-            });
+        b.iter_custom(|iters| {
+            let total_iters = batched_iters(iters, SQLITE_BENCH_BATCH_SIZE);
+            let start = Instant::now();
+            for _ in 0..total_iters {
+                rt.block_on(async {
+                    black_box(store.store_record(&record).await.unwrap());
+                });
+            }
+            per_batched_op(start.elapsed(), SQLITE_BENCH_BATCH_SIZE)
         });
     });
 
@@ -376,10 +396,15 @@ fn bench_sqlite_operations(c: &mut Criterion) {
             })
             .collect();
 
-        b.iter(|| {
-            rt.block_on(async {
-                let _ids = store.store_batch(&records).await.unwrap();
-            });
+        b.iter_custom(|iters| {
+            let total_iters = batched_iters(iters, SQLITE_BENCH_BATCH_SIZE);
+            let start = Instant::now();
+            for _ in 0..total_iters {
+                rt.block_on(async {
+                    black_box(store.store_batch(&records).await.unwrap());
+                });
+            }
+            per_batched_op(start.elapsed(), SQLITE_BENCH_BATCH_SIZE)
         });
     });
 
