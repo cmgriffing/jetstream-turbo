@@ -11,8 +11,8 @@ use crate::models::{
 use crate::storage::{EventPublisher, RecordStore, RedisStore, SQLitePragmaConfig, SQLiteStore};
 use crate::telemetry::ErrorReporter;
 use crate::turbocharger::diagnostics::{
-    derive_health, CacheStateDiagnostics, DiagnosticsCollector, HealthDiagnostics,
-    HealthStatus, NotRedisStateDiagnostics, SQLiteStateDiagnostics,
+    derive_health, CacheStateDiagnostics, DiagnosticsCollector, HealthDiagnostics, HealthStatus,
+    NotRedisStateDiagnostics, SQLiteStateDiagnostics,
 };
 use futures::StreamExt;
 use serde::Serialize;

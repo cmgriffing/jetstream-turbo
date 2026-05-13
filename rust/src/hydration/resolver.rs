@@ -42,10 +42,7 @@ where
 
     /// Ensure a single profile is in cache. Returns the profile if found or
     /// successfully fetched, or `None` if the profile does not exist.
-    pub async fn resolve_profile(
-        &self,
-        did: &str,
-    ) -> TurboResult<Option<Arc<BlueskyProfile>>> {
+    pub async fn resolve_profile(&self, did: &str) -> TurboResult<Option<Arc<BlueskyProfile>>> {
         if let Some(profile) = self.cache.get_user_profile(did) {
             return Ok(Some(profile));
         }
@@ -78,8 +75,7 @@ where
 
         if let Some(post) = posts.into_iter().next().flatten() {
             let post_arc = Arc::new(post);
-            self.cache
-                .set_post(uri.to_string(), Arc::clone(&post_arc));
+            self.cache.set_post(uri.to_string(), Arc::clone(&post_arc));
             Ok(Some(post_arc))
         } else {
             Ok(None)
@@ -243,7 +239,12 @@ mod tests {
         let resolved = resolver.resolve_profiles(&dids).await.unwrap();
         assert_eq!(resolved, 1);
 
-        assert_eq!(profile_fetcher.call_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            profile_fetcher
+                .call_count
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 
     #[tokio::test]

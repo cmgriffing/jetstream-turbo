@@ -138,6 +138,4 @@ mod tests {
             Some("at://did:plc:test/app.bsky.feed.post/3mepgzgiatv23".to_string())
         );
     }
-
-
 }
