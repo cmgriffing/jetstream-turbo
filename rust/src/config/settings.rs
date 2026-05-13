@@ -46,6 +46,8 @@ pub struct Settings {
     // Channel Configuration
     #[serde(default = "default_channel_capacity")]
     pub channel_capacity: usize,
+    #[serde(default = "default_monitor_broadcast_capacity")]
+    pub monitor_broadcast_capacity: usize,
 
     // Performance Configuration
     pub batch_size: usize,
@@ -100,6 +102,7 @@ impl Default for Settings {
             sqlite_journal_size_limit_mb: 512,
             http_port: 8080,
             channel_capacity: default_channel_capacity(),
+            monitor_broadcast_capacity: default_monitor_broadcast_capacity(),
             batch_size: 10,
             profile_batch_size: 25,
             post_batch_size: 25,
@@ -216,6 +219,11 @@ impl Settings {
             builder = builder.set_override("channel_capacity", channel_capacity)?;
         }
 
+        if let Ok(monitor_broadcast_capacity) = std::env::var("MONITOR_BROADCAST_CAPACITY") {
+            builder =
+                builder.set_override("monitor_broadcast_capacity", monitor_broadcast_capacity)?;
+        }
+
         if let Ok(trim_maxlen) = std::env::var("TRIM_MAXLEN") {
             builder = builder.set_override("trim_maxlen", trim_maxlen)?;
         }
@@ -278,6 +286,14 @@ impl Settings {
             anyhow::bail!("max_concurrent_requests must be greater than 0");
         }
 
+        if self.channel_capacity == 0 {
+            anyhow::bail!("channel_capacity must be greater than 0");
+        }
+
+        if self.monitor_broadcast_capacity == 0 {
+            anyhow::bail!("monitor_broadcast_capacity must be greater than 0");
+        }
+
         if self.cache_size_users == 0 || self.cache_size_posts == 0 {
             anyhow::bail!("cache_size_users and cache_size_posts must be greater than 0");
         }
@@ -317,6 +333,10 @@ fn default_channel_capacity() -> usize {
     10_000
 }
 
+fn default_monitor_broadcast_capacity() -> usize {
+    10_000
+}
+
 fn default_wanted_collections() -> String {
     "app.bsky.feed.post".to_string()
 }
@@ -344,6 +364,8 @@ mod tests {
         assert_eq!(settings.batch_size, 10);
         assert_eq!(settings.max_db_size_mb, 20 * 1024);
         assert_eq!(settings.max_concurrent_requests, 6);
+        assert_eq!(settings.channel_capacity, 10_000);
+        assert_eq!(settings.monitor_broadcast_capacity, 10_000);
         assert_eq!(settings.cache_size_users, 50_000);
         assert_eq!(settings.cache_size_posts, 40_000);
         assert_eq!(settings.sqlite_cache_size_kib, 64 * 1024);

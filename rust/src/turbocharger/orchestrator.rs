@@ -129,8 +129,8 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             settings.max_concurrent_requests.max(1) as usize
         ));
 
-        // Initialize broadcast channel
-        let (broadcast_sender, _) = broadcast::channel(1000);
+        // Initialize monitor broadcast channel
+        let (broadcast_sender, _) = broadcast::channel(settings.monitor_broadcast_capacity);
 
         info!("TurboCharger initialized successfully");
 
