@@ -12,8 +12,15 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast;
-use tracing::info;
+use tokio::time::{interval, timeout, Instant, MissedTickBehavior};
+use tracing::{debug, info, warn};
+
+const MONITOR_WS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+const MONITOR_WS_PEER_TIMEOUT: Duration = Duration::from_secs(75);
+const MONITOR_WS_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+const MONITOR_WS_LAG_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Deserialize)]
 pub struct StatsQuery {
@@ -89,6 +96,20 @@ async fn handle_websocket(
     mut broadcast_rx: broadcast::Receiver<crate::models::enriched::EnrichedRecord>,
 ) {
     let (mut sender, mut socket_rx) = socket.split();
+    let connection_id = uuid::Uuid::new_v4();
+    let mut heartbeat_interval = interval(MONITOR_WS_HEARTBEAT_INTERVAL);
+    let mut lag_log_interval = interval(MONITOR_WS_LAG_LOG_INTERVAL);
+    let mut last_peer_message = Instant::now();
+    let mut lagged_since_last_log: u64 = 0;
+    let mut lagged_total: u64 = 0;
+    let mut sent_total: u64 = 0;
+
+    heartbeat_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    lag_log_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    heartbeat_interval.tick().await;
+    lag_log_interval.tick().await;
+
+    info!(%connection_id, "Monitor WebSocket connected");
 
     loop {
         tokio::select! {
@@ -96,21 +117,128 @@ async fn handle_websocket(
                 match msg {
                     Ok(record) => {
                         if let Ok(json) = serde_json::to_string(&record) {
-                            if sender.send(Message::Text(json)).await.is_err() {
+                            if send_monitor_message(
+                                &mut sender,
+                                Message::Text(json),
+                                connection_id,
+                                "record",
+                            )
+                            .await
+                            .is_err()
+                            {
                                 break;
                             }
+                            sent_total += 1;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        lagged_since_last_log += skipped;
+                        lagged_total += skipped;
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        warn!(%connection_id, sent_total, lagged_total, "Monitor WebSocket broadcast channel closed");
+                        break;
+                    }
                 }
             }
             msg = socket_rx.next() => {
                 match msg {
-                    Some(Ok(Message::Close(_))) | None => break,
-                    _ => {}
+                    Some(Ok(Message::Close(frame))) => {
+                        info!(%connection_id, ?frame, sent_total, lagged_total, "Monitor WebSocket closed by peer");
+                        break;
+                    }
+                    Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
+                        last_peer_message = Instant::now();
+                    }
+                    Some(Ok(Message::Text(_))) | Some(Ok(Message::Binary(_))) => {
+                        last_peer_message = Instant::now();
+                    }
+                    Some(Err(error)) => {
+                        warn!(%connection_id, %error, sent_total, lagged_total, "Monitor WebSocket receive failed");
+                        break;
+                    }
+                    None => {
+                        info!(%connection_id, sent_total, lagged_total, "Monitor WebSocket peer disconnected");
+                        break;
+                    }
                 }
             }
+            _ = heartbeat_interval.tick() => {
+                let idle_for = last_peer_message.elapsed();
+                if idle_for >= MONITOR_WS_PEER_TIMEOUT {
+                    warn!(
+                        %connection_id,
+                        sent_total,
+                        lagged_total,
+                        idle_for_ms = idle_for.as_millis() as u64,
+                        "Monitor WebSocket peer timed out"
+                    );
+                    let _ = send_monitor_message(
+                        &mut sender,
+                        Message::Close(None),
+                        connection_id,
+                        "timeout_close",
+                    )
+                    .await;
+                    break;
+                }
+
+                if send_monitor_message(
+                    &mut sender,
+                    Message::Ping(b"jetstream-turbo".to_vec()),
+                    connection_id,
+                    "heartbeat",
+                )
+                .await
+                .is_err()
+                {
+                    break;
+                }
+            }
+            _ = lag_log_interval.tick() => {
+                if lagged_since_last_log > 0 {
+                    warn!(
+                        %connection_id,
+                        lagged_since_last_log,
+                        lagged_total,
+                        sent_total,
+                        "Monitor WebSocket receiver lagged behind broadcast ring"
+                    );
+                    lagged_since_last_log = 0;
+                }
+            }
+        }
+    }
+
+    debug!(%connection_id, sent_total, lagged_total, "Monitor WebSocket handler stopped");
+}
+
+async fn send_monitor_message(
+    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
+    message: Message,
+    connection_id: uuid::Uuid,
+    message_kind: &'static str,
+) -> Result<(), ()> {
+    match timeout(MONITOR_WS_SEND_TIMEOUT, sender.send(message)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            warn!(
+                %connection_id,
+                %error,
+                message_kind,
+                "Monitor WebSocket send failed"
+            );
+            Err(())
+        }
+        Err(_) => {
+            warn!(
+                %connection_id,
+                message_kind,
+                timeout_ms = MONITOR_WS_SEND_TIMEOUT.as_millis() as u64,
+                "Monitor WebSocket send timed out"
+            );
+            Err(())
         }
     }
 }
