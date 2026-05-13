@@ -101,8 +101,7 @@ fn extract_post_uris_from_view(rv: &RecordView<'_>) -> Vec<String> {
 /// Extract the DID from an AT-URI (`at://did:plc:abc123/...`).
 #[inline(always)]
 fn extract_did_from_at_uri(uri: &str) -> Option<&str> {
-    uri.strip_prefix("at://")
-        .and_then(|s| s.split('/').next())
+    uri.strip_prefix("at://").and_then(|s| s.split('/').next())
 }
 
 pub struct Hydrator<P, Po> {

@@ -7,6 +7,4 @@ pub use diagnostics::{
     MemoryPeakDiagnostics, NotRedisStateDiagnostics, ProcessMemoryDiagnostics,
     SQLiteStateDiagnostics,
 };
-pub use orchestrator::{
-    ProductionTurboCharger, TurboCharger, TurboStats,
-};
+pub use orchestrator::{ProductionTurboCharger, TurboCharger, TurboStats};
