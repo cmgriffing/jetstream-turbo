@@ -15,7 +15,7 @@ mod tests {
         // Test default configuration
         let settings = Settings::default();
         assert_eq!(settings.wanted_collections, "app.bsky.feed.post");
-        assert_eq!(settings.batch_size, 10);
+        assert_eq!(settings.batch_size, 25);
         assert!(settings.jetstream_hosts.len() > 0);
     }
 

@@ -16,6 +16,8 @@ pub struct CleanupResult {
     pub records_deleted: u64,
     pub new_size_bytes: i64,
     pub vacuum_pending: bool,
+    pub vacuum_deferred: bool,
+    pub reclaimable_bytes: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -402,6 +404,7 @@ impl SQLiteStore {
         vacuum_min_percent_freed: f64,
         cleanup_chunk_size: u32,
         cleanup_chunk_delay_ms: u64,
+        allow_vacuum: bool,
     ) -> TurboResult<CleanupResult> {
         let initial_size = self.get_db_size().await?;
         let mut current_retention = retention_days;
@@ -436,8 +439,13 @@ impl SQLiteStore {
             }
         }
 
-        let post_delete_size = self.get_db_size().await?;
-        let bytes_freed = initial_size.saturating_sub(post_delete_size);
+        let post_delete_snapshot = self.get_state_snapshot().await?;
+        let post_delete_size = post_delete_snapshot.db_size_bytes;
+        let reclaimable_bytes =
+            post_delete_snapshot.freelist_count * post_delete_snapshot.page_size_bytes;
+        let bytes_freed = initial_size
+            .saturating_sub(post_delete_size)
+            .max(reclaimable_bytes);
         let percent_freed = if initial_size > 0 {
             (bytes_freed as f64 / initial_size as f64) * 100.0
         } else {
@@ -448,8 +456,9 @@ impl SQLiteStore {
             || percent_freed >= vacuum_min_percent_freed;
 
         let mut vacuum_pending = false;
+        let mut vacuum_deferred = false;
 
-        if should_vacuum {
+        if should_vacuum && allow_vacuum {
             let pool = self.pool.clone();
             let freed_mb = bytes_freed / (1024 * 1024);
             let freed_percent = percent_freed as u64;
@@ -466,10 +475,17 @@ impl SQLiteStore {
 
             sleep(Duration::from_millis(500)).await;
             vacuum_pending = true;
+        } else if should_vacuum {
+            vacuum_deferred = true;
+            info!(
+                "Deferring VACUUM: reclaimable {}MB ({}%) but throughput is not in a low-traffic window",
+                reclaimable_bytes / (1024 * 1024),
+                percent_freed as u64
+            );
         } else {
             info!(
-                "Skipping VACUUM: freed {}MB ({}%), below threshold ({}MB, {}%)",
-                bytes_freed / (1024 * 1024),
+                "Skipping VACUUM: reclaimable {}MB ({}%), below threshold ({}MB, {}%)",
+                reclaimable_bytes / (1024 * 1024),
                 percent_freed as u64,
                 vacuum_min_bytes_freed / (1024 * 1024),
                 vacuum_min_percent_freed as u64
@@ -480,6 +496,66 @@ impl SQLiteStore {
             records_deleted: total_deleted,
             new_size_bytes: post_delete_size,
             vacuum_pending,
+            vacuum_deferred,
+            reclaimable_bytes,
+        })
+    }
+
+    pub async fn vacuum_reclaimable_space(
+        &self,
+        vacuum_min_bytes_freed: u64,
+        vacuum_min_percent_freed: f64,
+        allow_vacuum: bool,
+    ) -> TurboResult<CleanupResult> {
+        let snapshot = self.get_state_snapshot().await?;
+        let reclaimable_bytes = snapshot.freelist_count * snapshot.page_size_bytes;
+        let percent_reclaimable = if snapshot.db_size_bytes > 0 {
+            (reclaimable_bytes as f64 / snapshot.db_size_bytes as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let should_vacuum = reclaimable_bytes >= vacuum_min_bytes_freed as i64
+            || percent_reclaimable >= vacuum_min_percent_freed;
+
+        let mut vacuum_pending = false;
+        let mut vacuum_deferred = false;
+
+        if should_vacuum && allow_vacuum {
+            let pool = self.pool.clone();
+            tokio::spawn(async move {
+                info!("Starting background VACUUM for reclaimable SQLite freelist space");
+                match sqlx::query("VACUUM").execute(&pool).await {
+                    Ok(_) => info!("Background VACUUM completed"),
+                    Err(e) => error!("Background VACUUM failed: {}", e),
+                }
+            });
+
+            sleep(Duration::from_millis(500)).await;
+            vacuum_pending = true;
+        } else if should_vacuum {
+            vacuum_deferred = true;
+            info!(
+                "Deferring VACUUM: reclaimable {}MB ({}%) but throughput is not in a low-traffic window",
+                reclaimable_bytes / (1024 * 1024),
+                percent_reclaimable as u64
+            );
+        } else {
+            info!(
+                "Skipping VACUUM: reclaimable {}MB ({}%), below threshold ({}MB, {}%)",
+                reclaimable_bytes / (1024 * 1024),
+                percent_reclaimable as u64,
+                vacuum_min_bytes_freed / (1024 * 1024),
+                vacuum_min_percent_freed as u64
+            );
+        }
+
+        Ok(CleanupResult {
+            records_deleted: 0,
+            new_size_bytes: snapshot.db_size_bytes,
+            vacuum_pending,
+            vacuum_deferred,
+            reclaimable_bytes,
         })
     }
 
@@ -765,7 +841,7 @@ mod tests {
 
         let max_size = size_before / 2;
         let result = store
-            .cleanup_with_vacuum(7, max_size, 1024, 1.0, 1000, 50)
+            .cleanup_with_vacuum(7, max_size, 1024, 1.0, 1000, 50, true)
             .await
             .unwrap();
 
@@ -808,7 +884,7 @@ mod tests {
 
         let large_size = 100_000_000_000i64;
         let result = store
-            .cleanup_with_vacuum(7, large_size, 1024, 1.0, 1000, 50)
+            .cleanup_with_vacuum(7, large_size, 1024, 1.0, 1000, 50, true)
             .await
             .unwrap();
 

@@ -2,6 +2,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+pub const BLUESKY_API_BATCH_LIMIT: usize = 25;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Settings {
     // Bluesky Authentication
@@ -58,6 +60,7 @@ pub struct Settings {
     pub max_concurrent_requests: usize,
     pub cache_size_users: usize,
     pub cache_size_posts: usize,
+    pub cache_ttl_seconds: u64,
 
     // Retry Configuration
     pub max_retries: u32,
@@ -103,14 +106,15 @@ impl Default for Settings {
             http_port: 8080,
             channel_capacity: default_channel_capacity(),
             monitor_broadcast_capacity: default_monitor_broadcast_capacity(),
-            batch_size: 10,
-            profile_batch_size: 25,
-            post_batch_size: 25,
+            batch_size: BLUESKY_API_BATCH_LIMIT,
+            profile_batch_size: BLUESKY_API_BATCH_LIMIT,
+            post_batch_size: BLUESKY_API_BATCH_LIMIT,
             profile_batch_wait_ms: 150,
             post_batch_wait_ms: 300,
             max_concurrent_requests: 6,
             cache_size_users: 50_000,
             cache_size_posts: 40_000,
+            cache_ttl_seconds: 30 * 60,
             max_retries: 3,
             retry_base_delay: Duration::from_millis(100),
             statsd_host: None,
@@ -207,12 +211,24 @@ impl Settings {
             builder = builder.set_override("max_concurrent_requests", max_concurrent_requests)?;
         }
 
+        if let Ok(max_concurrent_requests) = std::env::var("TURBO_MAX_CONCURRENT") {
+            builder = builder.set_override("max_concurrent_requests", max_concurrent_requests)?;
+        }
+
+        if let Ok(batch_size) = std::env::var("TURBO_BATCH_SIZE") {
+            builder = builder.set_override("batch_size", batch_size)?;
+        }
+
         if let Ok(cache_size_users) = std::env::var("CACHE_SIZE_USERS") {
             builder = builder.set_override("cache_size_users", cache_size_users)?;
         }
 
         if let Ok(cache_size_posts) = std::env::var("CACHE_SIZE_POSTS") {
             builder = builder.set_override("cache_size_posts", cache_size_posts)?;
+        }
+
+        if let Ok(cache_ttl_seconds) = std::env::var("CACHE_TTL_SECONDS") {
+            builder = builder.set_override("cache_ttl_seconds", cache_ttl_seconds)?;
         }
 
         if let Ok(channel_capacity) = std::env::var("CHANNEL_CAPACITY") {
@@ -278,8 +294,22 @@ impl Settings {
             );
         }
 
-        if self.batch_size == 0 {
-            anyhow::bail!("batch_size must be greater than 0");
+        if self.batch_size != BLUESKY_API_BATCH_LIMIT {
+            anyhow::bail!(
+                "batch_size must be {BLUESKY_API_BATCH_LIMIT}; Bluesky bulk APIs cap batches at {BLUESKY_API_BATCH_LIMIT}"
+            );
+        }
+
+        if self.profile_batch_size == 0 || self.profile_batch_size > BLUESKY_API_BATCH_LIMIT {
+            anyhow::bail!(
+                "profile_batch_size must be between 1 and {BLUESKY_API_BATCH_LIMIT}; Bluesky getProfiles caps batches at {BLUESKY_API_BATCH_LIMIT}"
+            );
+        }
+
+        if self.post_batch_size == 0 || self.post_batch_size > BLUESKY_API_BATCH_LIMIT {
+            anyhow::bail!(
+                "post_batch_size must be between 1 and {BLUESKY_API_BATCH_LIMIT}; Bluesky getPosts caps batches at {BLUESKY_API_BATCH_LIMIT}"
+            );
         }
 
         if self.max_concurrent_requests == 0 {
@@ -296,6 +326,10 @@ impl Settings {
 
         if self.cache_size_users == 0 || self.cache_size_posts == 0 {
             anyhow::bail!("cache_size_users and cache_size_posts must be greater than 0");
+        }
+
+        if self.cache_ttl_seconds == 0 {
+            anyhow::bail!("cache_ttl_seconds must be greater than 0");
         }
 
         if self.max_db_size_mb == 0 {
@@ -361,13 +395,14 @@ mod tests {
         let settings = Settings::default();
         assert!(!settings.jetstream_hosts.is_empty());
         assert_eq!(settings.wanted_collections, "app.bsky.feed.post");
-        assert_eq!(settings.batch_size, 10);
+        assert_eq!(settings.batch_size, 25);
         assert_eq!(settings.max_db_size_mb, 20 * 1024);
         assert_eq!(settings.max_concurrent_requests, 6);
         assert_eq!(settings.channel_capacity, 10_000);
         assert_eq!(settings.monitor_broadcast_capacity, 10_000);
         assert_eq!(settings.cache_size_users, 50_000);
         assert_eq!(settings.cache_size_posts, 40_000);
+        assert_eq!(settings.cache_ttl_seconds, 30 * 60);
         assert_eq!(settings.sqlite_cache_size_kib, 64 * 1024);
         assert_eq!(settings.sqlite_mmap_size_mb, 256);
         assert_eq!(settings.sqlite_journal_size_limit_mb, 512);
