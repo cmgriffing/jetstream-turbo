@@ -9,8 +9,9 @@ services:
       - "8080:8080"
     environment:
       - RUST_LOG=info
-      - TURBO_BATCH_SIZE=10
-      - TURBO_MAX_CONCURRENT=100
+      - TURBO_BATCH_SIZE=25
+      - TURBO_MAX_CONCURRENT=6
+      - CACHE_TTL_SECONDS=1800
     env_file:
       - .env
     volumes:

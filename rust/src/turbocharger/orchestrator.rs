@@ -1,7 +1,7 @@
 use crate::client::{
     BlueskyAuthClient, BlueskyClient, JetstreamClient, MessageSource, PostFetcher, ProfileFetcher,
 };
-use crate::config::Settings;
+use crate::config::{Settings, BLUESKY_API_BATCH_LIMIT};
 use crate::hydration::{Hydrator, TurboCache};
 use crate::models::enriched::EnrichedRecord;
 use crate::models::{
@@ -16,16 +16,17 @@ use crate::turbocharger::diagnostics::{
 };
 use futures::StreamExt;
 use serde::Serialize;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::{interval, sleep};
 use tracing::{error, info, trace};
 
-const BATCH_SIZE: usize = 25;
 const BATCH_REPORT_LOG_TARGET: &str = "jetstream_turbo.batch_report";
+// Keep Jetstream flushes aligned with Bluesky's bulk API item cap.
+const BATCH_SIZE: usize = BLUESKY_API_BATCH_LIMIT;
 // The hydrator can consume up to one profile batch and one post batch per flush.
 // At 200ms, the time-based path can generate 5 flushes/sec, which maps to 10 API
 // requests/sec in the worst case and fully consumes the shared Bluesky limit.
@@ -33,6 +34,9 @@ const BATCH_REPORT_LOG_TARGET: &str = "jetstream_turbo.batch_report";
 // longer to fill without changing the API-imposed batch size of 25.
 const MAX_WAIT_TIME_MS: u64 = 250;
 const BATCH_REPORT_INTERVAL_SECS: u64 = 5 * 60;
+const THROUGHPUT_HISTORY_HOURS: u64 = 48;
+const VACUUM_MIN_HISTORY_HOURS: usize = 6;
+const VACUUM_LOW_TRAFFIC_PERCENTILE: f64 = 0.25;
 
 pub struct TurboCharger<M, P, Po, S, E> {
     settings: Settings,
@@ -47,6 +51,7 @@ pub struct TurboCharger<M, P, Po, S, E> {
     broadcast_sender: broadcast::Sender<EnrichedRecord>,
     error_reporter: ErrorReporter,
     diagnostics_collector: DiagnosticsCollector,
+    throughput_tracker: Arc<Mutex<ThroughputTracker>>,
 }
 
 impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, RedisStore> {
@@ -96,7 +101,11 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             .await;
 
         // Initialize cache
-        let cache = TurboCache::new(settings.cache_size_users, settings.cache_size_posts);
+        let cache = TurboCache::with_ttl(
+            settings.cache_size_users,
+            settings.cache_size_posts,
+            Duration::from_secs(settings.cache_ttl_seconds),
+        );
 
         // Initialize hydrator
         let hydrator = Hydrator::new(cache, bluesky_client.clone(), bluesky_client.clone());
@@ -147,6 +156,9 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             broadcast_sender,
             error_reporter,
             diagnostics_collector: DiagnosticsCollector::default(),
+            throughput_tracker: Arc::new(Mutex::new(ThroughputTracker::new(
+                THROUGHPUT_HISTORY_HOURS,
+            ))),
         })
     }
 }
@@ -292,6 +304,7 @@ where
     ) -> TurboResult<()> {
         match Self::resolve_batch_task_result(task_result) {
             Ok(count) => {
+                self.record_processed_count(count as u64);
                 trace!("Processed batch of {} messages", count);
                 Ok(())
             }
@@ -329,8 +342,21 @@ where
             batch,
         )
         .await?;
+        self.record_processed_count(count as u64);
         drop(permit);
         Ok(count)
+    }
+
+    fn record_processed_count(&self, count: u64) {
+        if count == 0 {
+            return;
+        }
+
+        let mut tracker = self
+            .throughput_tracker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        tracker.record(count, current_unix_seconds());
     }
 
     async fn process_batch_internal(
@@ -563,13 +589,24 @@ where
         &self,
     ) -> TurboResult<Option<crate::storage::sqlite::CleanupResult>> {
         let max_size_bytes = (self.settings.max_db_size_mb as i64) * 1024 * 1024;
-        let current_size = self.sqlite_store.get_db_size().await?;
+        let snapshot = self.sqlite_store.get_state_snapshot().await?;
+        let current_size = snapshot.db_size_bytes;
+        let reclaimable_bytes = snapshot.freelist_count * snapshot.page_size_bytes;
+        let reclaimable_percent = if current_size > 0 {
+            (reclaimable_bytes as f64 / current_size as f64) * 100.0
+        } else {
+            0.0
+        };
+        let vacuum_needed = reclaimable_bytes >= self.settings.vacuum_min_bytes_freed as i64
+            || reclaimable_percent >= self.settings.vacuum_min_percent_freed;
 
         if current_size > max_size_bytes {
+            let vacuum_allowed = self.is_low_throughput_vacuum_window();
             info!(
-                "Database size {}MB exceeds limit {}MB, running cleanup",
+                "Database size {}MB exceeds limit {}MB, running cleanup (vacuum_allowed={})",
                 current_size / (1024 * 1024),
-                self.settings.max_db_size_mb
+                self.settings.max_db_size_mb,
+                vacuum_allowed
             );
             let result = self
                 .sqlite_store
@@ -580,18 +617,63 @@ where
                     self.settings.vacuum_min_percent_freed,
                     self.settings.cleanup_chunk_size,
                     self.settings.cleanup_chunk_delay_ms,
+                    vacuum_allowed,
                 )
                 .await?;
             info!(
-                "Cleanup complete: {} records deleted, new size: {}MB, vacuum_pending: {}",
+                "Cleanup complete: {} records deleted, new size: {}MB, reclaimable: {}MB, vacuum_pending: {}, vacuum_deferred: {}",
                 result.records_deleted,
                 result.new_size_bytes / (1024 * 1024),
-                result.vacuum_pending
+                result.reclaimable_bytes / (1024 * 1024),
+                result.vacuum_pending,
+                result.vacuum_deferred
             );
             return Ok(Some(result));
         }
 
+        if vacuum_needed {
+            let vacuum_allowed = self.is_low_throughput_vacuum_window();
+            info!(
+                "SQLite freelist has {}MB reclaimable ({}%), evaluating VACUUM without retention cleanup (vacuum_allowed={})",
+                reclaimable_bytes / (1024 * 1024),
+                reclaimable_percent as u64,
+                vacuum_allowed
+            );
+            let result = self
+                .sqlite_store
+                .vacuum_reclaimable_space(
+                    self.settings.vacuum_min_bytes_freed,
+                    self.settings.vacuum_min_percent_freed,
+                    vacuum_allowed,
+                )
+                .await?;
+            return Ok(Some(result));
+        }
+
         Ok(None)
+    }
+
+    fn is_low_throughput_vacuum_window(&self) -> bool {
+        let mut tracker = self
+            .throughput_tracker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let decision = tracker.vacuum_window_decision(
+            current_unix_seconds(),
+            VACUUM_MIN_HISTORY_HOURS,
+            VACUUM_LOW_TRAFFIC_PERCENTILE,
+        );
+
+        info!(
+            current_hour_count = decision.current_hour_count,
+            completed_hour_samples = decision.completed_hour_samples,
+            threshold_count = decision.threshold_count,
+            enough_history = decision.enough_history,
+            allow_vacuum = decision.allow_vacuum,
+            "Evaluated low-throughput VACUUM window"
+        );
+
+        decision.allow_vacuum
     }
 
     pub fn start_db_cleanup_task(self: &Arc<Self>) {
@@ -657,6 +739,150 @@ pub struct TurboStats {
     pub cache_post_hit_rate: f64,
     pub redis_stream_length: usize,
     pub redis_version: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ThroughputHour {
+    hour_start_unix_seconds: u64,
+    records_processed: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VacuumWindowDecision {
+    allow_vacuum: bool,
+    enough_history: bool,
+    current_hour_count: u64,
+    completed_hour_samples: usize,
+    threshold_count: Option<u64>,
+}
+
+#[derive(Debug)]
+struct ThroughputTracker {
+    history_hours: u64,
+    buckets: VecDeque<ThroughputHour>,
+}
+
+impl ThroughputTracker {
+    fn new(history_hours: u64) -> Self {
+        Self {
+            history_hours,
+            buckets: VecDeque::new(),
+        }
+    }
+
+    fn record(&mut self, count: u64, now_unix_seconds: u64) {
+        let hour_start = hour_start_unix_seconds(now_unix_seconds);
+
+        match self.buckets.back_mut() {
+            Some(bucket) if bucket.hour_start_unix_seconds == hour_start => {
+                bucket.records_processed = bucket.records_processed.saturating_add(count);
+            }
+            Some(bucket) if bucket.hour_start_unix_seconds > hour_start => {
+                self.insert_or_add(hour_start, count);
+            }
+            _ => self.buckets.push_back(ThroughputHour {
+                hour_start_unix_seconds: hour_start,
+                records_processed: count,
+            }),
+        }
+
+        self.trim(now_unix_seconds);
+    }
+
+    fn vacuum_window_decision(
+        &mut self,
+        now_unix_seconds: u64,
+        min_completed_hour_samples: usize,
+        low_traffic_percentile: f64,
+    ) -> VacuumWindowDecision {
+        self.trim(now_unix_seconds);
+
+        let current_hour_start = hour_start_unix_seconds(now_unix_seconds);
+        let current_hour_count = self
+            .buckets
+            .iter()
+            .find(|bucket| bucket.hour_start_unix_seconds == current_hour_start)
+            .map(|bucket| bucket.records_processed)
+            .unwrap_or(0);
+
+        let mut completed_counts: Vec<u64> = self
+            .buckets
+            .iter()
+            .filter(|bucket| bucket.hour_start_unix_seconds < current_hour_start)
+            .map(|bucket| bucket.records_processed)
+            .collect();
+
+        let completed_hour_samples = completed_counts.len();
+        let enough_history = completed_hour_samples >= min_completed_hour_samples;
+
+        if !enough_history {
+            return VacuumWindowDecision {
+                allow_vacuum: current_hour_count == 0,
+                enough_history,
+                current_hour_count,
+                completed_hour_samples,
+                threshold_count: None,
+            };
+        }
+
+        completed_counts.sort_unstable();
+        let percentile_index = ((completed_counts.len() - 1) as f64 * low_traffic_percentile)
+            .round()
+            .clamp(0.0, (completed_counts.len() - 1) as f64)
+            as usize;
+        let threshold_count = completed_counts[percentile_index];
+
+        VacuumWindowDecision {
+            allow_vacuum: current_hour_count <= threshold_count,
+            enough_history,
+            current_hour_count,
+            completed_hour_samples,
+            threshold_count: Some(threshold_count),
+        }
+    }
+
+    fn insert_or_add(&mut self, hour_start: u64, count: u64) {
+        for bucket in &mut self.buckets {
+            if bucket.hour_start_unix_seconds == hour_start {
+                bucket.records_processed = bucket.records_processed.saturating_add(count);
+                return;
+            }
+        }
+
+        self.buckets.push_back(ThroughputHour {
+            hour_start_unix_seconds: hour_start,
+            records_processed: count,
+        });
+        self.buckets
+            .make_contiguous()
+            .sort_by_key(|bucket| bucket.hour_start_unix_seconds);
+    }
+
+    fn trim(&mut self, now_unix_seconds: u64) {
+        let oldest_allowed = hour_start_unix_seconds(
+            now_unix_seconds.saturating_sub(self.history_hours.saturating_mul(60 * 60)),
+        );
+
+        while self
+            .buckets
+            .front()
+            .map(|bucket| bucket.hour_start_unix_seconds < oldest_allowed)
+            .unwrap_or(false)
+        {
+            self.buckets.pop_front();
+        }
+    }
+}
+
+fn current_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn hour_start_unix_seconds(unix_seconds: u64) -> u64 {
+    unix_seconds - (unix_seconds % (60 * 60))
 }
 
 /// Concrete type alias for the production TurboCharger
@@ -852,14 +1078,15 @@ mod tests {
 
     #[test]
     fn batch_flush_counters_capture_mix_of_full_and_partial_batches() {
+        const TEST_BATCH_SIZE: usize = 25;
         let mut counters = BatchFlushCounters::default();
 
-        counters.record(BATCH_SIZE, BatchFlushReason::Full, BATCH_SIZE);
-        counters.record(BATCH_SIZE, BatchFlushReason::Timer, 12);
-        counters.record(BATCH_SIZE, BatchFlushReason::Shutdown, 3);
+        counters.record(TEST_BATCH_SIZE, BatchFlushReason::Full, TEST_BATCH_SIZE);
+        counters.record(TEST_BATCH_SIZE, BatchFlushReason::Timer, 12);
+        counters.record(TEST_BATCH_SIZE, BatchFlushReason::Shutdown, 3);
 
         let snapshot = counters
-            .snapshot(BATCH_SIZE)
+            .snapshot(TEST_BATCH_SIZE)
             .expect("snapshot should exist");
         assert_eq!(snapshot.total_batches, 3);
         assert_eq!(snapshot.total_messages, 40);
@@ -875,11 +1102,63 @@ mod tests {
 
     #[test]
     fn batch_flush_counters_reset_clears_window_data() {
+        const TEST_BATCH_SIZE: usize = 25;
         let mut counters = BatchFlushCounters::default();
-        counters.record(BATCH_SIZE, BatchFlushReason::Timer, 7);
+        counters.record(TEST_BATCH_SIZE, BatchFlushReason::Timer, 7);
 
-        assert!(counters.snapshot(BATCH_SIZE).is_some());
+        assert!(counters.snapshot(TEST_BATCH_SIZE).is_some());
         counters.reset();
-        assert!(counters.snapshot(BATCH_SIZE).is_none());
+        assert!(counters.snapshot(TEST_BATCH_SIZE).is_none());
+    }
+
+    #[test]
+    fn throughput_tracker_allows_vacuum_during_low_traffic_hours() {
+        let mut tracker = ThroughputTracker::new(48);
+        let base = 1_800_000_000;
+
+        for hour in 0..8 {
+            tracker.record(10_000 + hour, base + hour * 60 * 60);
+        }
+        tracker.record(500, base + 8 * 60 * 60);
+
+        let decision = tracker.vacuum_window_decision(base + 8 * 60 * 60 + 60, 6, 0.25);
+
+        assert!(decision.enough_history);
+        assert!(decision.allow_vacuum);
+        assert_eq!(decision.completed_hour_samples, 8);
+        assert_eq!(decision.current_hour_count, 500);
+    }
+
+    #[test]
+    fn throughput_tracker_defers_vacuum_during_peak_hours() {
+        let mut tracker = ThroughputTracker::new(48);
+        let base = 1_800_000_000;
+
+        for hour in 0..8 {
+            tracker.record(1_000 + hour, base + hour * 60 * 60);
+        }
+        tracker.record(20_000, base + 8 * 60 * 60);
+
+        let decision = tracker.vacuum_window_decision(base + 8 * 60 * 60 + 60, 6, 0.25);
+
+        assert!(decision.enough_history);
+        assert!(!decision.allow_vacuum);
+        assert_eq!(decision.current_hour_count, 20_000);
+    }
+
+    #[test]
+    fn throughput_tracker_retains_only_configured_history_window() {
+        let mut tracker = ThroughputTracker::new(48);
+        let base = 1_800_000_000;
+
+        for hour in 0..50 {
+            tracker.record(100, base + hour * 60 * 60);
+        }
+
+        assert_eq!(tracker.buckets.len(), 49);
+        assert_eq!(
+            tracker.buckets.front().unwrap().hour_start_unix_seconds,
+            hour_start_unix_seconds(base + 60 * 60)
+        );
     }
 }
