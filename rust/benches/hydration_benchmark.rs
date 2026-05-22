@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 const MICROBENCH_BATCH_SIZE: u32 = 512;
+const ENRICHED_RECORD_NEW_BATCH_SIZE: u32 = 8 * 1024;
 const CACHE_ACCESS_BATCH_SIZE: u32 = 8;
 const SQLITE_BENCH_BATCH_SIZE: u32 = 4;
 
@@ -25,6 +26,10 @@ fn batched_iters(iters: u64, batch_size: u32) -> u64 {
 
 fn per_microbench_op(elapsed: Duration) -> Duration {
     elapsed / MICROBENCH_BATCH_SIZE
+}
+
+fn per_enriched_record_new_op(elapsed: Duration) -> Duration {
+    elapsed / ENRICHED_RECORD_NEW_BATCH_SIZE
 }
 
 fn per_batched_op(elapsed: Duration, batch_size: u32) -> Duration {
@@ -462,10 +467,10 @@ fn bench_enriched_record_creation(c: &mut Criterion) {
         b.iter_custom(|iters| {
             let mut elapsed = Duration::ZERO;
             for _ in 0..iters {
-                let messages: Vec<JetstreamMessage> = (0..MICROBENCH_BATCH_SIZE)
+                let messages: Vec<JetstreamMessage> = (0..ENRICHED_RECORD_NEW_BATCH_SIZE)
                     .map(|_| message.clone())
                     .collect();
-                let mut records = Vec::with_capacity(MICROBENCH_BATCH_SIZE as usize);
+                let mut records = Vec::with_capacity(ENRICHED_RECORD_NEW_BATCH_SIZE as usize);
                 let start = Instant::now();
                 for message in messages {
                     records.push(EnrichedRecord::new(message));
@@ -473,7 +478,7 @@ fn bench_enriched_record_creation(c: &mut Criterion) {
                 elapsed += start.elapsed();
                 black_box(records);
             }
-            per_microbench_op(elapsed)
+            per_enriched_record_new_op(elapsed)
         });
     });
 
