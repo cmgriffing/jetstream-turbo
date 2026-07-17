@@ -191,6 +191,7 @@ impl ErrorReporter {
             TurboError::Io(_) => "Io",
             TurboError::TaskJoin(_) => "TaskJoin",
             TurboError::Timeout(_) => "Timeout",
+            TurboError::BatchStageTimeout { .. } => "BatchStageTimeout",
             TurboError::Internal(_) => "Internal",
             TurboError::NotFound(_) => "NotFound",
             TurboError::PermissionDenied(_) => "PermissionDenied",

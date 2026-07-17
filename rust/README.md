@@ -556,3 +556,20 @@ The Rust implementation of jetstream-turbo represents a significant architectura
 5. **Future-proof design** with scalable, extensible architecture
 
 The implementation is **production-ready** with comprehensive testing, documentation, and deployment automation. It successfully demonstrates Rust's strengths for high-performance, data-intensive applications while maintaining the functional requirements of the original system.
+
+## Pipeline progress supervision
+
+Pipeline diagnostics are always present at `/api/v1/health`; that endpoint remains HTTP 200 so incident tooling can read the body. `/ready` returns 503 when dependencies are unhealthy and, after rollout is enabled, when useful ingress or downstream completion is stale.
+
+| Environment variable | Default | Purpose |
+| --- | ---: | --- |
+| `JETSTREAM_DATA_IDLE_TIMEOUT_SECS` | `120` | Maximum useful-data age before endpoint rotation; control and malformed frames do not refresh it. |
+| `BATCH_EXECUTION_TIMEOUT_SECS` | `60` | Outer deadline across hydration, storage, publication, and broadcast preparation. |
+| `PIPELINE_STARTUP_GRACE_SECS` | `300` | Grace period before missing first ingress is stale. |
+| `READINESS_RECOVERY_SUCCESSES` | `3` | Consecutive healthy observations required after staleness. |
+| `PIPELINE_DEADLINES_ENABLED` | `false` | Enables upstream idle and batch deadlines. |
+| `PIPELINE_PROGRESS_READINESS_ENABLED` | `false` | Makes progress participate in `/ready`. |
+
+The health snapshot includes readiness state/stage/reason, stage ages, active batches, capacity, input drops, reconnect reasons, and broadcast state. Prometheus exposes the corresponding ages, totals, capacity, timeout, drop, receiver/send, and reconnect-reason metrics.
+
+Alert separately on stale delivery, oldest batch age, timeouts/input drops, and transport loss. Roll out with both flags off, measure normal stage-age percentiles, enable deadlines, then enable progress-aware readiness. Roll back by setting both flags to `false`; diagnostics remain available.

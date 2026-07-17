@@ -1,10 +1,11 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use jetstream_turbo_rs::hydration::{Hydrator, TurboCache};
 use jetstream_turbo_rs::storage::{EventPublisher, RecordStore};
 use jetstream_turbo_rs::testing::{
     create_message_batch, create_post_message, create_profile, MockEventPublisher, MockPostFetcher,
     MockProfileFetcher, MockRecordStore,
 };
+use jetstream_turbo_rs::turbocharger::{PipelineProgress, PipelineStage};
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::broadcast;
@@ -129,11 +130,38 @@ fn bench_full_pipeline_batch_25(c: &mut Criterion) {
     });
 }
 
+fn bench_progress_tracker_ingress_update(c: &mut Criterion) {
+    let progress = PipelineProgress::new(6, 10_000);
+    c.bench_function("progress_tracker_ingress_update", |b| {
+        b.iter(|| {
+            progress.valid_ingress();
+            black_box(&progress);
+        });
+    });
+}
+
+fn bench_progress_tracker_batch_boundaries(c: &mut Criterion) {
+    let progress = PipelineProgress::new(6, 10_000);
+    c.bench_function("progress_tracker_batch_boundaries", |b| {
+        b.iter(|| {
+            let batch_id = progress.batch_started();
+            progress.batch_stage(batch_id, PipelineStage::Storage);
+            progress.store_succeeded();
+            progress.batch_stage(batch_id, PipelineStage::Publication);
+            progress.publication_succeeded();
+            progress.batch_completed(batch_id, 25);
+            black_box(batch_id);
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_single_message_hydration,
     bench_batch_hydration_25,
     bench_full_pipeline_single,
     bench_full_pipeline_batch_25,
+    bench_progress_tracker_ingress_update,
+    bench_progress_tracker_batch_boundaries,
 );
 criterion_main!(benches);

@@ -1,3 +1,5 @@
 pub mod sqlite;
 
-pub use sqlite::{HourlyStat, HourlyUptime, Storage, UptimeResponse};
+pub use sqlite::{
+    AvailabilityHistory, HourlyStat, HourlyUptime, ReliabilityHistory, Storage, UptimeResponse,
+};

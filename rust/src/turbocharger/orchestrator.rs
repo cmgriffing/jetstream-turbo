@@ -12,7 +12,12 @@ use crate::storage::{EventPublisher, RecordStore, RedisStore, SQLitePragmaConfig
 use crate::telemetry::ErrorReporter;
 use crate::turbocharger::diagnostics::{
     derive_health, CacheStateDiagnostics, DiagnosticsCollector, HealthDiagnostics, HealthStatus,
-    NotRedisStateDiagnostics, SQLiteStateDiagnostics,
+    NotRedisStateDiagnostics, ReadinessDiagnostics, SQLiteStateDiagnostics,
+};
+use crate::turbocharger::progress::PipelineProgress;
+use crate::turbocharger::progress::PipelineStage;
+use crate::turbocharger::progress::{
+    PipelineProgressSnapshot, PipelineReadinessState, ProgressThresholds,
 };
 use futures::StreamExt;
 use serde::Serialize;
@@ -21,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Semaphore};
 use tokio::task::JoinSet;
-use tokio::time::{interval, sleep};
+use tokio::time::{interval, sleep, timeout_at, Instant};
 use tracing::{error, info, trace};
 
 const BATCH_SIZE: usize = 25;
@@ -47,6 +52,7 @@ pub struct TurboCharger<M, P, Po, S, E> {
     broadcast_sender: broadcast::Sender<EnrichedRecord>,
     error_reporter: ErrorReporter,
     diagnostics_collector: DiagnosticsCollector,
+    progress: Arc<PipelineProgress>,
 }
 
 impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, RedisStore> {
@@ -62,11 +68,23 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
         );
 
         // Initialize Jetstream client
-        let jetstream_client = JetstreamClient::new(
+        let progress = Arc::new(PipelineProgress::new(
+            settings.max_concurrent_requests,
+            settings.channel_capacity,
+        ));
+        let mut jetstream_client = JetstreamClient::new(
             settings.jetstream_hosts.clone(),
             settings.wanted_collections.clone(),
         )
-        .with_channel_capacity(settings.channel_capacity);
+        .with_channel_capacity(settings.channel_capacity)
+        .with_progress_tracker(Arc::clone(&progress));
+        jetstream_client = if settings.pipeline_deadlines_enabled {
+            jetstream_client.with_data_idle_timeout(Duration::from_secs(
+                settings.jetstream_data_idle_timeout_secs,
+            ))
+        } else {
+            jetstream_client.without_data_idle_timeout()
+        };
 
         // Authenticate directly with Bluesky
         let auth_client = Arc::new(BlueskyAuthClient::new(
@@ -147,6 +165,7 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             broadcast_sender,
             error_reporter,
             diagnostics_collector: DiagnosticsCollector::default(),
+            progress,
         })
     }
 }
@@ -219,7 +238,10 @@ where
             }
 
             while let Some(task_result) = batch_tasks.try_join_next() {
-                self.handle_batch_task_result(task_result)?;
+                if let Err(error) = self.handle_batch_task_result(task_result) {
+                    Self::abort_and_drain_batch_tasks(&mut batch_tasks).await;
+                    return Err(error);
+                }
             }
 
             if last_stats.elapsed() >= Duration::from_secs(30) {
@@ -231,6 +253,18 @@ where
                     post_hit_rate * 100.0
                 );
                 batch_reporter.maybe_log();
+                let snapshot = self.progress.snapshot(self.progress_thresholds());
+                info!(
+                    readiness_state = ?snapshot.readiness_state,
+                    stale_stage = ?snapshot.stale_stage,
+                    ingress_age_seconds = ?snapshot.ingress_age_seconds,
+                    completion_age_seconds = ?snapshot.completion_age_seconds,
+                    active_permits = snapshot.active_permits,
+                    maximum_permits = snapshot.maximum_permits,
+                    input_occupancy = snapshot.input_occupancy,
+                    input_drops = snapshot.input_drops,
+                    "Pipeline progress summary"
+                );
 
                 last_stats = std::time::Instant::now();
             }
@@ -258,6 +292,12 @@ where
         let record_store = Arc::clone(&self.record_store);
         let event_publisher = Arc::clone(&self.event_publisher);
         let broadcast_sender = self.broadcast_sender.clone();
+        let progress = Arc::clone(&self.progress);
+        let batch_id = progress.batch_started();
+        let timeout = self
+            .settings
+            .pipeline_deadlines_enabled
+            .then(|| Duration::from_secs(self.settings.batch_execution_timeout_secs));
         let permit = self.semaphore.clone().acquire_owned().await.map_err(|e| {
             TurboError::Internal(format!("Batch semaphore closed unexpectedly: {e}"))
         })?;
@@ -270,6 +310,9 @@ where
                 event_publisher,
                 broadcast_sender,
                 batch,
+                progress,
+                batch_id,
+                timeout,
             )
             .await
         });
@@ -317,6 +360,11 @@ where
         Ok(())
     }
 
+    async fn abort_and_drain_batch_tasks(batch_tasks: &mut JoinSet<TurboResult<usize>>) {
+        batch_tasks.abort_all();
+        while batch_tasks.join_next().await.is_some() {}
+    }
+
     async fn process_batch(&self, batch: Vec<JetstreamMessage>) -> TurboResult<usize> {
         let permit = self.semaphore.acquire().await.map_err(|e| {
             TurboError::Internal(format!("Batch semaphore closed unexpectedly: {e}"))
@@ -327,6 +375,11 @@ where
             Arc::clone(&self.event_publisher),
             self.broadcast_sender.clone(),
             batch,
+            Arc::clone(&self.progress),
+            self.progress.batch_started(),
+            self.settings
+                .pipeline_deadlines_enabled
+                .then(|| Duration::from_secs(self.settings.batch_execution_timeout_secs)),
         )
         .await?;
         drop(permit);
@@ -339,28 +392,81 @@ where
         event_publisher: Arc<E>,
         broadcast_sender: broadcast::Sender<EnrichedRecord>,
         batch: Vec<JetstreamMessage>,
+        progress: Arc<PipelineProgress>,
+        batch_id: u64,
+        timeout: Option<Duration>,
     ) -> TurboResult<usize> {
-        let enriched_records = hydrator.hydrate_batch(batch).await?;
+        let deadline = timeout
+            .map(|duration| Instant::now() + duration)
+            .unwrap_or_else(|| Instant::now() + Duration::from_secs(100 * 365 * 24 * 60 * 60));
+        let timeout_secs = timeout.map(|duration| duration.as_secs()).unwrap_or(0);
+        progress.batch_stage(batch_id, PipelineStage::Hydration);
+        let enriched_records = match timeout_at(deadline, hydrator.hydrate_batch(batch)).await {
+            Ok(Ok(records)) => records,
+            Ok(Err(error)) => {
+                progress.batch_failed(batch_id);
+                return Err(error);
+            }
+            Err(_) => {
+                return Err(batch_timeout(
+                    &progress,
+                    batch_id,
+                    PipelineStage::Hydration,
+                    timeout_secs,
+                ))
+            }
+        };
         let count = enriched_records.len();
 
         if count == 0 {
+            progress.batch_completed(batch_id, 0);
             return Ok(0);
         }
 
-        let store_records = enriched_records.clone();
-        let publish_records = enriched_records.clone();
-
-        let store_future = async { record_store.store_batch(&store_records).await };
-        let publish_future = async { event_publisher.publish_batch(&publish_records).await };
-
-        let (store_result, publish_result) = tokio::join!(store_future, publish_future);
-
-        let _store_ids = store_result?;
-        let _publish_ids = publish_result?;
-
-        for enriched in enriched_records {
-            let _ = broadcast_sender.send(enriched);
+        progress.batch_stage(batch_id, PipelineStage::Storage);
+        match timeout_at(deadline, record_store.store_batch(&enriched_records)).await {
+            Ok(Ok(_)) => progress.store_succeeded(),
+            Ok(Err(error)) => {
+                progress.batch_failed(batch_id);
+                return Err(error);
+            }
+            Err(_) => {
+                return Err(batch_timeout(
+                    &progress,
+                    batch_id,
+                    PipelineStage::Storage,
+                    timeout_secs,
+                ))
+            }
         }
+
+        progress.batch_stage(batch_id, PipelineStage::Publication);
+        match timeout_at(deadline, event_publisher.publish_batch(&enriched_records)).await {
+            Ok(Ok(_)) => progress.publication_succeeded(),
+            Ok(Err(error)) => {
+                progress.batch_failed(batch_id);
+                return Err(error);
+            }
+            Err(_) => {
+                return Err(batch_timeout(
+                    &progress,
+                    batch_id,
+                    PipelineStage::Publication,
+                    timeout_secs,
+                ))
+            }
+        }
+
+        progress.batch_stage(batch_id, PipelineStage::Broadcast);
+        let receivers = broadcast_sender.receiver_count();
+        let mut successful_sends = 0;
+        for enriched in enriched_records {
+            if broadcast_sender.send(enriched).is_ok() {
+                successful_sends += 1;
+            }
+        }
+        progress.broadcast_state(receivers, successful_sends);
+        progress.batch_completed(batch_id, count);
 
         Ok(count)
     }
@@ -371,6 +477,30 @@ where
 
     pub fn subscribe(&self) -> broadcast::Receiver<EnrichedRecord> {
         self.broadcast_sender.subscribe()
+    }
+
+    fn progress_thresholds(&self) -> ProgressThresholds {
+        ProgressThresholds {
+            startup_grace: Duration::from_secs(self.settings.pipeline_startup_grace_secs),
+            ingress_idle: Duration::from_secs(self.settings.jetstream_data_idle_timeout_secs),
+            batch_execution: Duration::from_secs(self.settings.batch_execution_timeout_secs),
+            recovery_successes: self.settings.readiness_recovery_successes,
+        }
+    }
+}
+
+fn batch_timeout(
+    progress: &PipelineProgress,
+    batch_id: u64,
+    stage: PipelineStage,
+    timeout_secs: u64,
+) -> TurboError {
+    progress.batch_timed_out(batch_id);
+    metrics::counter!("pipeline_batch_timeouts_total", "stage" => format!("{stage:?}").to_lowercase()).increment(1);
+    TurboError::BatchStageTimeout {
+        batch_id,
+        stage: format!("{stage:?}").to_lowercase(),
+        timeout_secs,
     }
 }
 
@@ -444,16 +574,39 @@ where
             }
         };
         let session_count = self.bluesky_client.get_session_count().await;
+        let pipeline_progress = self.progress.snapshot(self.progress_thresholds());
         let diagnostics = self
-            .collect_health_diagnostics(redis_healthy, sqlite_available)
+            .collect_health_diagnostics(redis_healthy, sqlite_available, pipeline_progress.clone())
             .await;
 
+        let dependency_healthy = redis_healthy && sqlite_available && session_count > 0;
+        let readiness = if !dependency_healthy {
+            ReadinessDiagnostics {
+                state: PipelineReadinessState::Stale,
+                stage: None,
+                reason: Some("dependency_unhealthy".to_string()),
+            }
+        } else {
+            ReadinessDiagnostics {
+                state: pipeline_progress.readiness_state,
+                stage: pipeline_progress.stale_stage,
+                reason: pipeline_progress.readiness_reason.clone(),
+            }
+        };
+
         Ok(HealthStatus {
-            healthy: derive_health(redis_healthy, sqlite_available, session_count),
+            healthy: derive_health(
+                redis_healthy,
+                sqlite_available,
+                session_count,
+                &pipeline_progress,
+                self.settings.pipeline_progress_readiness_enabled,
+            ),
             redis_connected: redis_healthy,
             sqlite_available,
             session_count,
             diagnostics,
+            readiness,
         })
     }
 
@@ -474,7 +627,8 @@ where
             }
         };
 
-        self.collect_health_diagnostics(redis_connected, sqlite_available)
+        let pipeline_progress = self.progress.snapshot(self.progress_thresholds());
+        self.collect_health_diagnostics(redis_connected, sqlite_available, pipeline_progress)
             .await
     }
 
@@ -482,6 +636,7 @@ where
         &self,
         redis_connected: bool,
         sqlite_available: bool,
+        pipeline_progress: PipelineProgressSnapshot,
     ) -> HealthDiagnostics {
         let cache = self.hydrator.get_cache();
         let cache_metrics = cache.get_metrics();
@@ -556,6 +711,7 @@ where
             cache_state,
             sqlite_state,
             not_redis_state,
+            pipeline_progress,
         )
     }
 
@@ -827,6 +983,67 @@ impl BatchReporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::ProfileFetcher;
+    use crate::hydration::TurboCache;
+    use crate::models::bluesky::BlueskyProfile;
+    use crate::models::enriched::EnrichedRecord;
+    use crate::storage::{EventPublisher, RecordStore};
+    use crate::testing::{
+        create_post_message, MockEventPublisher, MockMessageSource, MockPostFetcher,
+        MockProfileFetcher, MockRecordStore,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Notify;
+
+    struct CancellationFlag(Arc<AtomicBool>);
+    impl Drop for CancellationFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct BlockingProfileFetcher {
+        started: Arc<Notify>,
+        cancelled: Arc<AtomicBool>,
+    }
+    impl ProfileFetcher for BlockingProfileFetcher {
+        async fn bulk_fetch_profiles(
+            &self,
+            _dids: &[String],
+        ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
+            let _cancel = CancellationFlag(Arc::clone(&self.cancelled));
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    struct BlockingRecordStore {
+        started: Arc<Notify>,
+        cancelled: Arc<AtomicBool>,
+    }
+    impl RecordStore for BlockingRecordStore {
+        async fn store_batch(&self, _records: &[EnrichedRecord]) -> TurboResult<Vec<i64>> {
+            let _cancel = CancellationFlag(Arc::clone(&self.cancelled));
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    struct BlockingEventPublisher {
+        started: Arc<Notify>,
+        cancelled: Arc<AtomicBool>,
+    }
+    impl EventPublisher for BlockingEventPublisher {
+        async fn publish_batch(&self, _records: &[EnrichedRecord]) -> TurboResult<Vec<String>> {
+            let _cancel = CancellationFlag(Arc::clone(&self.cancelled));
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    fn progress() -> Arc<PipelineProgress> {
+        Arc::new(PipelineProgress::new(1, 10))
+    }
 
     #[test]
     fn resolve_batch_task_result_propagates_worker_error() {
@@ -881,5 +1098,153 @@ mod tests {
         assert!(counters.snapshot(BATCH_SIZE).is_some());
         counters.reset();
         assert!(counters.snapshot(BATCH_SIZE).is_none());
+    }
+
+    #[tokio::test]
+    async fn hydration_timeout_is_typed_and_cancels_blocked_work() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let hydrator = Hydrator::new(
+            TurboCache::new(10, 10),
+            Arc::new(BlockingProfileFetcher {
+                started: Arc::new(Notify::new()),
+                cancelled: Arc::clone(&cancelled),
+            }),
+            Arc::new(MockPostFetcher::new()),
+        );
+        let progress = progress();
+        let batch_id = progress.batch_started();
+        let result = TurboCharger::<
+            MockMessageSource,
+            BlockingProfileFetcher,
+            MockPostFetcher,
+            MockRecordStore,
+            MockEventPublisher,
+        >::process_batch_internal(
+            hydrator,
+            Arc::new(MockRecordStore::new()),
+            Arc::new(MockEventPublisher::new()),
+            broadcast::channel(1).0,
+            vec![create_post_message(1)],
+            Arc::clone(&progress),
+            batch_id,
+            Some(Duration::from_millis(20)),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(TurboError::BatchStageTimeout { stage, .. }) if stage == "hydration")
+        );
+        assert!(cancelled.load(Ordering::SeqCst));
+        let snapshot = progress.snapshot(crate::turbocharger::ProgressThresholds {
+            startup_grace: Duration::from_secs(1),
+            ingress_idle: Duration::from_secs(1),
+            batch_execution: Duration::from_secs(1),
+            recovery_successes: 1,
+        });
+        assert_eq!(snapshot.timed_out_batches, 1);
+        assert_eq!(snapshot.active_permits, 0);
+    }
+
+    #[tokio::test]
+    async fn storage_timeout_releases_permit_and_processing_can_resume() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let hydrator = Hydrator::new(
+            TurboCache::new(10, 10),
+            Arc::new(MockProfileFetcher::new()),
+            Arc::new(MockPostFetcher::new()),
+        );
+        let progress = progress();
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+        let batch_id = progress.batch_started();
+        let task = tokio::spawn({
+            let progress = Arc::clone(&progress);
+            async move {
+                let _permit = permit;
+                TurboCharger::<
+                    MockMessageSource,
+                    MockProfileFetcher,
+                    MockPostFetcher,
+                    BlockingRecordStore,
+                    MockEventPublisher,
+                >::process_batch_internal(
+                    hydrator,
+                    Arc::new(BlockingRecordStore {
+                        started: Arc::new(Notify::new()),
+                        cancelled: Arc::clone(&cancelled),
+                    }),
+                    Arc::new(MockEventPublisher::new()),
+                    broadcast::channel(1).0,
+                    vec![create_post_message(2)],
+                    progress,
+                    batch_id,
+                    Some(Duration::from_millis(20)),
+                )
+                .await
+            }
+        });
+        let result = task.await.unwrap();
+        assert!(
+            matches!(result, Err(TurboError::BatchStageTimeout { stage, .. }) if stage == "storage")
+        );
+        assert_eq!(semaphore.available_permits(), 1);
+
+        let resumed_id = progress.batch_started();
+        let resumed = TurboCharger::<
+            MockMessageSource,
+            MockProfileFetcher,
+            MockPostFetcher,
+            MockRecordStore,
+            MockEventPublisher,
+        >::process_batch_internal(
+            Hydrator::new(
+                TurboCache::new(10, 10),
+                Arc::new(MockProfileFetcher::new()),
+                Arc::new(MockPostFetcher::new()),
+            ),
+            Arc::new(MockRecordStore::new()),
+            Arc::new(MockEventPublisher::new()),
+            broadcast::channel(1).0,
+            vec![create_post_message(3)],
+            Arc::clone(&progress),
+            resumed_id,
+            Some(Duration::from_secs(1)),
+        )
+        .await;
+        assert_eq!(resumed.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn publication_timeout_reports_publication_stage() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let progress = progress();
+        let batch_id = progress.batch_started();
+        let result = TurboCharger::<
+            MockMessageSource,
+            MockProfileFetcher,
+            MockPostFetcher,
+            MockRecordStore,
+            BlockingEventPublisher,
+        >::process_batch_internal(
+            Hydrator::new(
+                TurboCache::new(10, 10),
+                Arc::new(MockProfileFetcher::new()),
+                Arc::new(MockPostFetcher::new()),
+            ),
+            Arc::new(MockRecordStore::new()),
+            Arc::new(BlockingEventPublisher {
+                started: Arc::new(Notify::new()),
+                cancelled: Arc::clone(&cancelled),
+            }),
+            broadcast::channel(1).0,
+            vec![create_post_message(4)],
+            Arc::clone(&progress),
+            batch_id,
+            Some(Duration::from_millis(20)),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(TurboError::BatchStageTimeout { stage, .. }) if stage == "publication")
+        );
+        assert!(cancelled.load(Ordering::SeqCst));
     }
 }

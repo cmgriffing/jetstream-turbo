@@ -49,6 +49,14 @@ pub struct Settings {
     #[serde(default = "default_monitor_broadcast_capacity")]
     pub monitor_broadcast_capacity: usize,
 
+    // Pipeline Progress and Recovery Configuration
+    pub jetstream_data_idle_timeout_secs: u64,
+    pub batch_execution_timeout_secs: u64,
+    pub pipeline_startup_grace_secs: u64,
+    pub readiness_recovery_successes: u32,
+    pub pipeline_progress_readiness_enabled: bool,
+    pub pipeline_deadlines_enabled: bool,
+
     // Performance Configuration
     pub batch_size: usize,
     pub profile_batch_size: usize,
@@ -103,6 +111,12 @@ impl Default for Settings {
             http_port: 8080,
             channel_capacity: default_channel_capacity(),
             monitor_broadcast_capacity: default_monitor_broadcast_capacity(),
+            jetstream_data_idle_timeout_secs: 120,
+            batch_execution_timeout_secs: 60,
+            pipeline_startup_grace_secs: 300,
+            readiness_recovery_successes: 3,
+            pipeline_progress_readiness_enabled: false,
+            pipeline_deadlines_enabled: false,
             batch_size: 10,
             profile_batch_size: 25,
             post_batch_size: 25,
@@ -224,6 +238,25 @@ impl Settings {
                 builder.set_override("monitor_broadcast_capacity", monitor_broadcast_capacity)?;
         }
 
+        if let Ok(value) = std::env::var("JETSTREAM_DATA_IDLE_TIMEOUT_SECS") {
+            builder = builder.set_override("jetstream_data_idle_timeout_secs", value)?;
+        }
+        if let Ok(value) = std::env::var("BATCH_EXECUTION_TIMEOUT_SECS") {
+            builder = builder.set_override("batch_execution_timeout_secs", value)?;
+        }
+        if let Ok(value) = std::env::var("PIPELINE_STARTUP_GRACE_SECS") {
+            builder = builder.set_override("pipeline_startup_grace_secs", value)?;
+        }
+        if let Ok(value) = std::env::var("READINESS_RECOVERY_SUCCESSES") {
+            builder = builder.set_override("readiness_recovery_successes", value)?;
+        }
+        if let Ok(value) = std::env::var("PIPELINE_PROGRESS_READINESS_ENABLED") {
+            builder = builder.set_override("pipeline_progress_readiness_enabled", value)?;
+        }
+        if let Ok(value) = std::env::var("PIPELINE_DEADLINES_ENABLED") {
+            builder = builder.set_override("pipeline_deadlines_enabled", value)?;
+        }
+
         if let Ok(trim_maxlen) = std::env::var("TRIM_MAXLEN") {
             builder = builder.set_override("trim_maxlen", trim_maxlen)?;
         }
@@ -294,6 +327,19 @@ impl Settings {
             anyhow::bail!("monitor_broadcast_capacity must be greater than 0");
         }
 
+        if self.jetstream_data_idle_timeout_secs == 0 {
+            anyhow::bail!("jetstream_data_idle_timeout_secs must be greater than 0");
+        }
+        if self.batch_execution_timeout_secs == 0 {
+            anyhow::bail!("batch_execution_timeout_secs must be greater than 0");
+        }
+        if self.pipeline_startup_grace_secs == 0 {
+            anyhow::bail!("pipeline_startup_grace_secs must be greater than 0");
+        }
+        if self.readiness_recovery_successes == 0 {
+            anyhow::bail!("readiness_recovery_successes must be greater than 0");
+        }
+
         if self.cache_size_users == 0 || self.cache_size_posts == 0 {
             anyhow::bail!("cache_size_users and cache_size_posts must be greater than 0");
         }
@@ -355,6 +401,9 @@ fn normalize_optional_setting(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_default_settings() {
@@ -366,6 +415,12 @@ mod tests {
         assert_eq!(settings.max_concurrent_requests, 6);
         assert_eq!(settings.channel_capacity, 10_000);
         assert_eq!(settings.monitor_broadcast_capacity, 10_000);
+        assert_eq!(settings.jetstream_data_idle_timeout_secs, 120);
+        assert_eq!(settings.batch_execution_timeout_secs, 60);
+        assert_eq!(settings.pipeline_startup_grace_secs, 300);
+        assert_eq!(settings.readiness_recovery_successes, 3);
+        assert!(!settings.pipeline_progress_readiness_enabled);
+        assert!(!settings.pipeline_deadlines_enabled);
         assert_eq!(settings.cache_size_users, 50_000);
         assert_eq!(settings.cache_size_posts, 40_000);
         assert_eq!(settings.sqlite_cache_size_kib, 64 * 1024);
@@ -400,5 +455,58 @@ mod tests {
             normalize_optional_setting(Some("  https://us.i.posthog.com  ".to_string())),
             Some("https://us.i.posthog.com".to_string())
         );
+    }
+
+    #[test]
+    fn test_pipeline_settings_validation() {
+        let mut settings = Settings::default();
+        settings.stream_name = "test".to_string();
+        settings.bluesky_handle = "test.bsky.social".to_string();
+        settings.bluesky_app_password = "password".to_string();
+
+        settings.jetstream_data_idle_timeout_secs = 0;
+        assert!(settings.validate().is_err());
+        settings.jetstream_data_idle_timeout_secs = 1;
+        settings.batch_execution_timeout_secs = 0;
+        assert!(settings.validate().is_err());
+        settings.batch_execution_timeout_secs = 1;
+        settings.pipeline_startup_grace_secs = 0;
+        assert!(settings.validate().is_err());
+        settings.pipeline_startup_grace_secs = 1;
+        settings.readiness_recovery_successes = 0;
+        assert!(settings.validate().is_err());
+        settings.readiness_recovery_successes = 1;
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn test_pipeline_settings_load_from_environment() {
+        let _guard = ENV_LOCK.lock().expect("environment test lock poisoned");
+        let values = [
+            ("STREAM_NAME", "test"),
+            ("BLUESKY_HANDLE", "test.bsky.social"),
+            ("BLUESKY_APP_PASSWORD", "password"),
+            ("JETSTREAM_DATA_IDLE_TIMEOUT_SECS", "45"),
+            ("BATCH_EXECUTION_TIMEOUT_SECS", "30"),
+            ("PIPELINE_STARTUP_GRACE_SECS", "90"),
+            ("READINESS_RECOVERY_SUCCESSES", "5"),
+            ("PIPELINE_PROGRESS_READINESS_ENABLED", "true"),
+            ("PIPELINE_DEADLINES_ENABLED", "false"),
+        ];
+        for (key, value) in values {
+            std::env::set_var(key, value);
+        }
+
+        let settings = Settings::from_env().expect("pipeline settings should load");
+
+        for (key, _) in values {
+            std::env::remove_var(key);
+        }
+        assert_eq!(settings.jetstream_data_idle_timeout_secs, 45);
+        assert_eq!(settings.batch_execution_timeout_secs, 30);
+        assert_eq!(settings.pipeline_startup_grace_secs, 90);
+        assert_eq!(settings.readiness_recovery_successes, 5);
+        assert!(settings.pipeline_progress_readiness_enabled);
+        assert!(!settings.pipeline_deadlines_enabled);
     }
 }

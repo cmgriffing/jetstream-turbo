@@ -195,6 +195,12 @@ function App() {
                   streak={stats.current_streak_a}
                   uptimeAllTime={stats.uptime_a_all_time}
                   connected={stats.connected_a || false}
+                  deliveryAvailable={stats.delivery_available_a}
+                  transportUptime={stats.transport_uptime_a_all_time}
+                  deliveryUptime={stats.delivery_uptime_a_all_time}
+                  reconnectReason={stats.reconnect_reason_a}
+                  dataIdleReconnects={stats.data_idle_reconnects_a}
+                  clientRecoveryMs={stats.client_recovery_a_ms}
                 />
                 <StreamCard
                   streamId="b"
@@ -205,6 +211,12 @@ function App() {
                   streak={stats.current_streak_b}
                   uptimeAllTime={stats.uptime_b_all_time}
                   connected={stats.connected_b || false}
+                  deliveryAvailable={stats.delivery_available_b}
+                  transportUptime={stats.transport_uptime_b_all_time}
+                  deliveryUptime={stats.delivery_uptime_b_all_time}
+                  reconnectReason={stats.reconnect_reason_b}
+                  dataIdleReconnects={stats.data_idle_reconnects_b}
+                  clientRecoveryMs={stats.client_recovery_b_ms}
                 />
                 <StreamCard
                   streamId="baseline-1"
@@ -215,6 +227,12 @@ function App() {
                   streak={stats.current_streak_baseline_1}
                   uptimeAllTime={stats.uptime_baseline_1_all_time}
                   connected={stats.connected_baseline_1 || false}
+                  deliveryAvailable={stats.delivery_available_baseline_1}
+                  transportUptime={stats.transport_uptime_baseline_1_all_time}
+                  deliveryUptime={stats.delivery_uptime_baseline_1_all_time}
+                  reconnectReason={stats.reconnect_reason_baseline_1}
+                  dataIdleReconnects={stats.data_idle_reconnects_baseline_1}
+                  clientRecoveryMs={stats.client_recovery_baseline_1_ms}
                 />
                 <StreamCard
                   streamId="baseline-2"
@@ -225,6 +243,12 @@ function App() {
                   streak={stats.current_streak_baseline_2}
                   uptimeAllTime={stats.uptime_baseline_2_all_time}
                   connected={stats.connected_baseline_2 || false}
+                  deliveryAvailable={stats.delivery_available_baseline_2}
+                  transportUptime={stats.transport_uptime_baseline_2_all_time}
+                  deliveryUptime={stats.delivery_uptime_baseline_2_all_time}
+                  reconnectReason={stats.reconnect_reason_baseline_2}
+                  dataIdleReconnects={stats.data_idle_reconnects_baseline_2}
+                  clientRecoveryMs={stats.client_recovery_baseline_2_ms}
                 />
               </div>
             </div>

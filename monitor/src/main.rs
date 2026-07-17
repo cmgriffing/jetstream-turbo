@@ -2,10 +2,12 @@ use anyhow::Result;
 use jetstream_monitor::{
     config::Settings,
     stats::{
-        StatsAggregator, StreamStatsInternal, UptimeDetailedStats, UptimeMetricsSnapshot,
-        UptimeTracker,
+        AvailabilitySnapshot, StatsAggregator, StreamStatsInternal, UptimeDetailedStats,
+        UptimeMetricsSnapshot, UptimeTracker,
     },
-    storage::{HourlyStat, HourlyUptime, Storage, UptimeResponse},
+    storage::{
+        AvailabilityHistory, HourlyStat, HourlyUptime, ReliabilityHistory, Storage, UptimeResponse,
+    },
     stream::{StreamClient, StreamId},
     websocket,
 };
@@ -59,6 +61,46 @@ fn delta_counter(current: u64, previous: u64) -> u64 {
     } else {
         // Counter reset or process restart: treat the current value as interval data.
         current
+    }
+}
+
+fn availability_interval(
+    previous: &AvailabilitySnapshot,
+    current: &AvailabilitySnapshot,
+) -> AvailabilityHistory {
+    let reconnect_reasons = current
+        .reason_counts
+        .iter()
+        .map(|(reason, count)| {
+            (
+                reason.clone(),
+                delta_counter(
+                    *count,
+                    previous.reason_counts.get(reason).copied().unwrap_or(0),
+                ),
+            )
+        })
+        .collect();
+    AvailabilityHistory {
+        transport_up_seconds: delta_counter(
+            current.transport_up_seconds,
+            previous.transport_up_seconds,
+        ),
+        transport_down_seconds: delta_counter(
+            current.transport_down_seconds,
+            previous.transport_down_seconds,
+        ),
+        delivery_up_seconds: delta_counter(
+            current.delivery_up_seconds,
+            previous.delivery_up_seconds,
+        ),
+        delivery_down_seconds: delta_counter(
+            current.delivery_down_seconds,
+            previous.delivery_down_seconds,
+        ),
+        reconnect_reasons,
+        client_recovery_ms: delta_counter(current.client_recovery_ms, previous.client_recovery_ms),
+        coverage: "observed".to_string(),
     }
 }
 
@@ -303,6 +345,15 @@ async fn main() -> Result<()> {
             let up = uptime_for_storage.read().unwrap();
             up.get_metrics_snapshot()
         };
+        let mut previous_availability = {
+            let up = uptime_for_storage.read().unwrap();
+            (
+                up.availability_snapshot(StreamId::A),
+                up.availability_snapshot(StreamId::B),
+                up.availability_snapshot(StreamId::Baseline1),
+                up.availability_snapshot(StreamId::Baseline2),
+            )
+        };
 
         loop {
             interval.tick().await;
@@ -337,6 +388,15 @@ async fn main() -> Result<()> {
                     up.get_metrics_snapshot()
                 };
                 let interval_metrics = build_interval_metrics(previous_snapshot, current_snapshot);
+                let current_availability = {
+                    let up = uptime_for_storage.read().unwrap();
+                    (
+                        up.availability_snapshot(StreamId::A),
+                        up.availability_snapshot(StreamId::B),
+                        up.availability_snapshot(StreamId::Baseline1),
+                        up.availability_snapshot(StreamId::Baseline2),
+                    )
+                };
 
                 if let Err(e) = storage_arc
                     .save_hourly_uptime(
@@ -368,6 +428,31 @@ async fn main() -> Result<()> {
                     tracing::error!("Failed to save hourly uptime: {}", e);
                 }
 
+                let reliability = ReliabilityHistory {
+                    stream_a: availability_interval(
+                        &previous_availability.0,
+                        &current_availability.0,
+                    ),
+                    stream_b: availability_interval(
+                        &previous_availability.1,
+                        &current_availability.1,
+                    ),
+                    baseline_1: availability_interval(
+                        &previous_availability.2,
+                        &current_availability.2,
+                    ),
+                    baseline_2: availability_interval(
+                        &previous_availability.3,
+                        &current_availability.3,
+                    ),
+                };
+                if let Err(e) = storage_arc
+                    .save_hourly_reliability(chrono::Utc::now(), &reliability)
+                    .await
+                {
+                    tracing::error!("Failed to save hourly reliability: {}", e);
+                }
+
                 if let Err(e) = storage_arc
                     .save_lifetime_totals(
                         current_snapshot.total_messages_a,
@@ -379,6 +464,7 @@ async fn main() -> Result<()> {
                 }
 
                 previous_snapshot = current_snapshot;
+                previous_availability = current_availability;
                 last_hour = current_hour;
             }
         }

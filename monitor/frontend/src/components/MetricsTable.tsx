@@ -134,24 +134,49 @@ function calculateStats(
   const b: StreamAccumulator = { uptimeSeconds: 0, downtimeSeconds: 0, messages: 0 };
   const baseline1: StreamAccumulator = { uptimeSeconds: 0, downtimeSeconds: 0, messages: 0 };
   const baseline2: StreamAccumulator = { uptimeSeconds: 0, downtimeSeconds: 0, messages: 0 };
+  const deliveryA: StreamAccumulator = { uptimeSeconds: 0, downtimeSeconds: 0, messages: 0 };
+  const deliveryB: StreamAccumulator = { uptimeSeconds: 0, downtimeSeconds: 0, messages: 0 };
+  const deliveryBaseline1: StreamAccumulator = { uptimeSeconds: 0, downtimeSeconds: 0, messages: 0 };
+  const deliveryBaseline2: StreamAccumulator = { uptimeSeconds: 0, downtimeSeconds: 0, messages: 0 };
+  const reasonTotals: Record<string, number> = {};
+  let clientRecoveryMs = 0;
+  let observedReliabilityRows = 0;
   let disconnectsA = 0;
   let disconnectsB = 0;
 
   data.forEach((row) => {
-    a.uptimeSeconds += toNonNegative(row.stream_a_seconds);
-    a.downtimeSeconds += toNonNegative(row.stream_a_downtime_seconds);
+    const reliability = row.reliability;
+    a.uptimeSeconds += toNonNegative(reliability?.stream_a.transport_up_seconds ?? row.stream_a_seconds);
+    a.downtimeSeconds += toNonNegative(reliability?.stream_a.transport_down_seconds ?? row.stream_a_downtime_seconds);
     a.messages += toNonNegative(row.stream_a_messages);
-    b.uptimeSeconds += toNonNegative(row.stream_b_seconds);
-    b.downtimeSeconds += toNonNegative(row.stream_b_downtime_seconds);
+    b.uptimeSeconds += toNonNegative(reliability?.stream_b.transport_up_seconds ?? row.stream_b_seconds);
+    b.downtimeSeconds += toNonNegative(reliability?.stream_b.transport_down_seconds ?? row.stream_b_downtime_seconds);
     b.messages += toNonNegative(row.stream_b_messages);
-    baseline1.uptimeSeconds += toNonNegative(row.baseline_1_seconds);
-    baseline1.downtimeSeconds += toNonNegative(row.baseline_1_downtime_seconds);
+    baseline1.uptimeSeconds += toNonNegative(reliability?.baseline_1.transport_up_seconds ?? row.baseline_1_seconds);
+    baseline1.downtimeSeconds += toNonNegative(reliability?.baseline_1.transport_down_seconds ?? row.baseline_1_downtime_seconds);
     baseline1.messages += toNonNegative(row.baseline_1_messages);
-    baseline2.uptimeSeconds += toNonNegative(row.baseline_2_seconds);
-    baseline2.downtimeSeconds += toNonNegative(row.baseline_2_downtime_seconds);
+    baseline2.uptimeSeconds += toNonNegative(reliability?.baseline_2.transport_up_seconds ?? row.baseline_2_seconds);
+    baseline2.downtimeSeconds += toNonNegative(reliability?.baseline_2.transport_down_seconds ?? row.baseline_2_downtime_seconds);
     baseline2.messages += toNonNegative(row.baseline_2_messages);
     disconnectsA += toNonNegative(row.stream_a_disconnects);
     disconnectsB += toNonNegative(row.stream_b_disconnects);
+    if (reliability) {
+      observedReliabilityRows += 1;
+      deliveryA.uptimeSeconds += toNonNegative(reliability.stream_a.delivery_up_seconds);
+      deliveryA.downtimeSeconds += toNonNegative(reliability.stream_a.delivery_down_seconds);
+      deliveryB.uptimeSeconds += toNonNegative(reliability.stream_b.delivery_up_seconds);
+      deliveryB.downtimeSeconds += toNonNegative(reliability.stream_b.delivery_down_seconds);
+      deliveryBaseline1.uptimeSeconds += toNonNegative(reliability.baseline_1.delivery_up_seconds);
+      deliveryBaseline1.downtimeSeconds += toNonNegative(reliability.baseline_1.delivery_down_seconds);
+      deliveryBaseline2.uptimeSeconds += toNonNegative(reliability.baseline_2.delivery_up_seconds);
+      deliveryBaseline2.downtimeSeconds += toNonNegative(reliability.baseline_2.delivery_down_seconds);
+      for (const stream of [reliability.stream_a, reliability.stream_b, reliability.baseline_1, reliability.baseline_2]) {
+        clientRecoveryMs += toNonNegative(stream.client_recovery_ms);
+        Object.entries(stream.reconnect_reasons).forEach(([reason, count]) => {
+          reasonTotals[reason] = (reasonTotals[reason] ?? 0) + toNonNegative(count);
+        });
+      }
+    }
   });
 
   const fallbackObservedSeconds = Math.max(
@@ -166,6 +191,13 @@ function calculateStats(
     b: summarizeStream(b, fallbackObservedSeconds, requestedWindow),
     baseline1: summarizeStream(baseline1, fallbackObservedSeconds, requestedWindow),
     baseline2: summarizeStream(baseline2, fallbackObservedSeconds, requestedWindow),
+    deliveryA: summarizeStream(deliveryA, 0, requestedWindow),
+    deliveryB: summarizeStream(deliveryB, 0, requestedWindow),
+    deliveryBaseline1: summarizeStream(deliveryBaseline1, 0, requestedWindow),
+    deliveryBaseline2: summarizeStream(deliveryBaseline2, 0, requestedWindow),
+    reliabilityCoverage: data.length > 0 ? (observedReliabilityRows / data.length) * 100 : 0,
+    reasonTotals,
+    clientRecoveryMs,
     disconnectsA,
     disconnectsB,
     requestedWindow,
@@ -245,7 +277,7 @@ export function MetricsTable({
           <TableBody>
             <TableRow className="monitor-metrics-row">
               <TableCell className="monitor-table-label whitespace-normal">
-                Uptime ({windowLabel} window)
+                Transport uptime ({windowLabel} window)
               </TableCell>
               <TableCell
                 className={cn(
@@ -278,6 +310,30 @@ export function MetricsTable({
                 )}
               >
                 {formatUptimePercent(stats.baseline2.uptimePercent, { minimumFractionDigits: 2 })}%
+              </TableCell>
+            </TableRow>
+
+            <TableRow className="monitor-metrics-row">
+              <TableCell className="monitor-table-label whitespace-normal">Delivery uptime ({windowLabel} window)</TableCell>
+              {[stats.deliveryA, stats.deliveryB, stats.deliveryBaseline1, stats.deliveryBaseline2].map((stream, index) => (
+                <TableCell key={index} className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                  {stats.reliabilityCoverage > 0 ? `${formatUptimePercent(stream.uptimePercent, { minimumFractionDigits: 2 })}%` : "Unknown"}
+                </TableCell>
+              ))}
+            </TableRow>
+
+            <TableRow className="monitor-metrics-row">
+              <TableCell className="monitor-table-label whitespace-normal">Reliability coverage</TableCell>
+              <TableCell colSpan={4} className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                {stats.reliabilityCoverage.toFixed(1)}% {stats.reliabilityCoverage < 100 ? "(legacy / unknown intervals present)" : ""}
+              </TableCell>
+            </TableRow>
+
+            <TableRow className="monitor-metrics-row">
+              <TableCell className="monitor-table-label whitespace-normal">Reconnect causes / client recovery</TableCell>
+              <TableCell colSpan={4} className="monitor-table-value text-right whitespace-normal">
+                {Object.keys(stats.reasonTotals).length ? Object.entries(stats.reasonTotals).map(([reason, count]) => `${reason}: ${count}`).join(", ") : "Unknown"}
+                {stats.clientRecoveryMs > 0 ? ` · ${formatDurationLong(stats.clientRecoveryMs / 1000)} client recovery` : ""}
               </TableCell>
             </TableRow>
 
