@@ -13,6 +13,12 @@ interface StreamCardProps {
   uptime?: number;
   uptimeAllTime?: number;
   connected: boolean;
+  deliveryAvailable?: boolean;
+  transportUptime?: number;
+  deliveryUptime?: number;
+  reconnectReason?: string;
+  dataIdleReconnects?: number;
+  clientRecoveryMs?: number;
 }
 
 function formatDuration(ms: number): string {
@@ -50,6 +56,12 @@ export const StreamCard = memo(function StreamCard({
   streak,
   uptimeAllTime,
   connected,
+  deliveryAvailable,
+  transportUptime,
+  deliveryUptime,
+  reconnectReason,
+  dataIdleReconnects,
+  clientRecoveryMs,
 }: StreamCardProps) {
   const streamVariantClass =
     streamId === "a"
@@ -122,16 +134,40 @@ export const StreamCard = memo(function StreamCard({
         </div>
 
         <div className="monitor-stream-metric">
-          <p className="monitor-stream-metric-label">Uptime (all-time)</p>
+          <p className="monitor-stream-metric-label">Transport uptime</p>
           <p className="monitor-stream-metric-value">
-            {uptimeAllTime !== undefined ? (
+            {(transportUptime ?? uptimeAllTime) !== undefined ? (
               <>
-                {formatUptimePercent(uptimeAllTime, { minimumFractionDigits: 2 })}
+                {formatUptimePercent(transportUptime ?? uptimeAllTime ?? 0, { minimumFractionDigits: 2 })}
                 <span className="monitor-stream-metric-unit">%</span>
               </>
             ) : (
               <span className="monitor-stream-metric-value--empty">--</span>
             )}
+          </p>
+        </div>
+        <div className="monitor-stream-metric">
+          <p className="monitor-stream-metric-label">
+            Delivery uptime
+            <button type="button" className="monitor-tooltip-trigger relative inline-flex cursor-pointer" aria-label="More info about delivery uptime">
+              <Info className="h-2.5 w-2.5" aria-hidden="true" />
+              <span className="monitor-tooltip">Useful records arriving on time, independent of socket reachability.</span>
+            </button>
+          </p>
+          <p className="monitor-stream-metric-value">
+            {deliveryUptime !== undefined ? <>{formatUptimePercent(deliveryUptime, { minimumFractionDigits: 2 })}<span className="monitor-stream-metric-unit">%</span></> : <span className="monitor-stream-metric-value--empty">--</span>}
+          </p>
+        </div>
+        <div className="monitor-stream-metric">
+          <p className="monitor-stream-metric-label">Delivery state</p>
+          <p className="monitor-stream-metric-value">{deliveryAvailable === undefined ? "Unknown" : deliveryAvailable ? "Delivering" : "Stale"}</p>
+        </div>
+        <div className="monitor-stream-metric">
+          <p className="monitor-stream-metric-label">Recovery / cause</p>
+          <p className="monitor-stream-metric-value">
+            {reconnectReason ? reconnectReason.replace(/_/g, " ") : "--"}
+            {dataIdleReconnects ? <span className="monitor-stream-metric-unit"> ×{dataIdleReconnects}</span> : null}
+            {clientRecoveryMs ? <span className="monitor-stream-metric-unit"> {formatDuration(clientRecoveryMs)}</span> : null}
           </p>
         </div>
       </div>

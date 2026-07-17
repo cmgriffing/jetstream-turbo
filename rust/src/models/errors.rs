@@ -66,6 +66,13 @@ pub enum TurboError {
     #[error("Elapsed timeout")]
     Timeout(#[from] tokio::time::error::Elapsed),
 
+    #[error("Batch {batch_id} timed out in {stage} after {timeout_secs}s")]
+    BatchStageTimeout {
+        batch_id: u64,
+        stage: String,
+        timeout_secs: u64,
+    },
+
     // Generic errors
     #[error("Internal error: {0}")]
     Internal(String),
@@ -90,6 +97,7 @@ impl TurboError {
                 | TurboError::RedisOperation(_)
                 | TurboError::WebSocketConnection(_)
                 | TurboError::Timeout(_)
+                | TurboError::BatchStageTimeout { .. }
                 | TurboError::ExpiredToken(_)
         )
     }

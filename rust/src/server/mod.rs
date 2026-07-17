@@ -286,7 +286,7 @@ fn readiness_http_status(status: &HealthStatus) -> StatusCode {
 }
 
 fn health_http_response(status: HealthStatus) -> (StatusCode, HealthResponse) {
-    let status_code = readiness_http_status(&status);
+    let status_code = StatusCode::OK;
     let response_status = if status.healthy {
         "healthy"
     } else {
@@ -442,6 +442,105 @@ fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> Strin
         "Configured not_redis stream trim max length.",
         optional_usize_metric_value(diagnostics.not_redis_state.configured_max_length),
     );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_pipeline_ingress_age_seconds",
+        "Age of the most recent valid Jetstream message.",
+        optional_u64_metric_value(diagnostics.pipeline_progress.ingress_age_seconds),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_pipeline_completion_age_seconds",
+        "Age of the most recent successful batch completion.",
+        optional_u64_metric_value(diagnostics.pipeline_progress.completion_age_seconds),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_pipeline_active_batches",
+        "Current active batch count.",
+        diagnostics.pipeline_progress.active_permits.to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_pipeline_maximum_batches",
+        "Configured maximum concurrent batch count.",
+        diagnostics.pipeline_progress.maximum_permits.to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_pipeline_oldest_batch_age_seconds",
+        "Age of the oldest active batch.",
+        optional_u64_metric_value(
+            diagnostics
+                .pipeline_progress
+                .oldest_active_batch_age_seconds,
+        ),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_pipeline_ingress_messages_total",
+        "Valid ingress messages observed.",
+        diagnostics.pipeline_progress.ingress_messages.to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_pipeline_completed_records_total",
+        "Records in successfully completed batches.",
+        diagnostics.pipeline_progress.completed_records.to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_pipeline_batch_timeouts_total",
+        "Batches stopped by their execution deadline.",
+        diagnostics.pipeline_progress.timed_out_batches.to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_pipeline_input_drops_total",
+        "Messages dropped at the saturated input boundary.",
+        diagnostics.pipeline_progress.input_drops.to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_pipeline_broadcast_receivers",
+        "Current monitor broadcast receiver count.",
+        diagnostics
+            .pipeline_progress
+            .broadcast_receivers
+            .to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_pipeline_successful_broadcasts_total",
+        "Successful sends into the monitor broadcast channel.",
+        diagnostics
+            .pipeline_progress
+            .successful_broadcasts
+            .to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_pipeline_ready",
+        "Whether progress is currently healthy (1 = healthy, 0 = otherwise).",
+        (diagnostics.pipeline_progress.readiness_state
+            == crate::turbocharger::PipelineReadinessState::Healthy)
+            .then_some("1")
+            .unwrap_or("0")
+            .to_string(),
+    );
+    output.push_str("# HELP jetstream_turbo_reconnects_total Upstream reconnects grouped by initiating reason.\n");
+    output.push_str("# TYPE jetstream_turbo_reconnects_total counter\n");
+    let mut reconnect_reasons: Vec<_> = diagnostics
+        .pipeline_progress
+        .reconnect_reasons
+        .iter()
+        .collect();
+    reconnect_reasons.sort_by_key(|(reason, _)| reason.as_str());
+    for (reason, count) in reconnect_reasons {
+        output.push_str(&format!(
+            "jetstream_turbo_reconnects_total{{reason=\"{reason}\"}} {count}\n"
+        ));
+    }
 
     output
 }
@@ -492,12 +591,16 @@ mod tests {
     use super::{health_http_response, prometheus_metrics_from_diagnostics, readiness_http_status};
     use crate::turbocharger::{
         CacheStateDiagnostics, HealthDiagnostics, HealthStatus, MemoryPeakDiagnostics,
-        NotRedisStateDiagnostics, ProcessMemoryDiagnostics, SQLiteStateDiagnostics,
+        NotRedisStateDiagnostics, PipelineProgress, PipelineReadinessState,
+        ProcessMemoryDiagnostics, ProgressThresholds, ReadinessDiagnostics, SQLiteStateDiagnostics,
     };
     use axum::http::StatusCode;
     use serde_json::Value;
+    use std::time::Duration;
 
     fn sample_diagnostics() -> HealthDiagnostics {
+        let progress = PipelineProgress::new(6, 10_000);
+        let _ = progress.valid_ingress();
         HealthDiagnostics {
             process_memory: ProcessMemoryDiagnostics {
                 pid: 42,
@@ -549,6 +652,12 @@ mod tests {
                 configured_max_length: Some(100),
                 collection_error: None,
             },
+            pipeline_progress: progress.snapshot(ProgressThresholds {
+                startup_grace: Duration::from_secs(1),
+                ingress_idle: Duration::from_secs(10),
+                batch_execution: Duration::from_secs(10),
+                recovery_successes: 1,
+            }),
         }
     }
 
@@ -559,6 +668,15 @@ mod tests {
             sqlite_available: healthy,
             session_count: if healthy { 1 } else { 0 },
             diagnostics: sample_diagnostics(),
+            readiness: ReadinessDiagnostics {
+                state: if healthy {
+                    PipelineReadinessState::Healthy
+                } else {
+                    PipelineReadinessState::Stale
+                },
+                stage: None,
+                reason: (!healthy).then(|| "dependency_unhealthy".to_string()),
+            },
         }
     }
 
@@ -589,9 +707,9 @@ mod tests {
     }
 
     #[test]
-    fn health_http_response_is_unhealthy_and_503_for_unhealthy_status() {
+    fn health_http_response_keeps_diagnostics_available_when_unhealthy() {
         let (status_code, response) = health_http_response(sample_health(false));
-        assert_eq!(status_code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(status_code, StatusCode::OK);
         assert_eq!(response.status, "unhealthy");
         assert!(!response.data.healthy);
     }
@@ -610,6 +728,8 @@ mod tests {
         assert!(json["data"]["diagnostics"]["cache_state"]["user_capacity"].is_number());
         assert!(json["data"]["diagnostics"]["sqlite_state"]["journal_mode"].is_string());
         assert!(json["data"]["diagnostics"]["not_redis_state"]["stream_name"].is_string());
+        assert_eq!(json["data"]["readiness"]["state"], "healthy");
+        assert!(json["data"]["diagnostics"]["pipeline_progress"]["ingress_messages"].is_number());
     }
 
     #[test]
@@ -628,6 +748,8 @@ mod tests {
         assert!(output.contains("jetstream_turbo_sqlite_db_size_bytes 8192"));
         assert!(output.contains("jetstream_turbo_not_redis_connected 1"));
         assert!(output.contains("jetstream_turbo_not_redis_stream_length 7"));
+        assert!(output.contains("jetstream_turbo_pipeline_ingress_messages_total 1"));
+        assert!(output.contains("jetstream_turbo_pipeline_maximum_batches 6"));
     }
 
     #[test]

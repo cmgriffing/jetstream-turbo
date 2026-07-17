@@ -1,6 +1,7 @@
-use crate::stream::{ConnectionStatus, StreamId, StreamMessage};
+use crate::stream::{ConnectionStatus, ReconnectReason, StreamId, StreamMessage};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -54,6 +55,30 @@ pub struct StreamStats {
     pub uptime_baseline_2_all_time: f64,
     pub current_streak_baseline_1: f64,
     pub current_streak_baseline_2: f64,
+    pub delivery_available_a: bool,
+    pub delivery_available_b: bool,
+    pub delivery_available_baseline_1: bool,
+    pub delivery_available_baseline_2: bool,
+    pub transport_uptime_a_all_time: f64,
+    pub transport_uptime_b_all_time: f64,
+    pub transport_uptime_baseline_1_all_time: f64,
+    pub transport_uptime_baseline_2_all_time: f64,
+    pub delivery_uptime_a_all_time: f64,
+    pub delivery_uptime_b_all_time: f64,
+    pub delivery_uptime_baseline_1_all_time: f64,
+    pub delivery_uptime_baseline_2_all_time: f64,
+    pub reconnect_reason_a: Option<ReconnectReason>,
+    pub reconnect_reason_b: Option<ReconnectReason>,
+    pub reconnect_reason_baseline_1: Option<ReconnectReason>,
+    pub reconnect_reason_baseline_2: Option<ReconnectReason>,
+    pub data_idle_reconnects_a: u64,
+    pub data_idle_reconnects_b: u64,
+    pub data_idle_reconnects_baseline_1: u64,
+    pub data_idle_reconnects_baseline_2: u64,
+    pub client_recovery_a_ms: u64,
+    pub client_recovery_b_ms: u64,
+    pub client_recovery_baseline_1_ms: u64,
+    pub client_recovery_baseline_2_ms: u64,
 }
 
 pub struct StatsAggregator {
@@ -192,6 +217,21 @@ impl StatsAggregator {
                     )
                 };
 
+                let (
+                    availability_a,
+                    availability_b,
+                    availability_baseline_1,
+                    availability_baseline_2,
+                ) = {
+                    let up = uptime.read().unwrap();
+                    (
+                        up.availability_snapshot(StreamId::A),
+                        up.availability_snapshot(StreamId::B),
+                        up.availability_snapshot(StreamId::Baseline1),
+                        up.availability_snapshot(StreamId::Baseline2),
+                    )
+                };
+
                 let stats_snapshot = StreamStats {
                     stream_a: internal.total_a,
                     stream_b: internal.total_b,
@@ -233,6 +273,34 @@ impl StatsAggregator {
                     uptime_baseline_2_all_time,
                     current_streak_baseline_1: streak_baseline_1,
                     current_streak_baseline_2: streak_baseline_2,
+                    delivery_available_a: availability_a.delivery_available,
+                    delivery_available_b: availability_b.delivery_available,
+                    delivery_available_baseline_1: availability_baseline_1.delivery_available,
+                    delivery_available_baseline_2: availability_baseline_2.delivery_available,
+                    transport_uptime_a_all_time: availability_a.transport_uptime_percent(),
+                    transport_uptime_b_all_time: availability_b.transport_uptime_percent(),
+                    transport_uptime_baseline_1_all_time: availability_baseline_1
+                        .transport_uptime_percent(),
+                    transport_uptime_baseline_2_all_time: availability_baseline_2
+                        .transport_uptime_percent(),
+                    delivery_uptime_a_all_time: availability_a.delivery_uptime_percent(),
+                    delivery_uptime_b_all_time: availability_b.delivery_uptime_percent(),
+                    delivery_uptime_baseline_1_all_time: availability_baseline_1
+                        .delivery_uptime_percent(),
+                    delivery_uptime_baseline_2_all_time: availability_baseline_2
+                        .delivery_uptime_percent(),
+                    reconnect_reason_a: availability_a.last_reason,
+                    reconnect_reason_b: availability_b.last_reason,
+                    reconnect_reason_baseline_1: availability_baseline_1.last_reason,
+                    reconnect_reason_baseline_2: availability_baseline_2.last_reason,
+                    data_idle_reconnects_a: availability_a.data_idle_reconnects(),
+                    data_idle_reconnects_b: availability_b.data_idle_reconnects(),
+                    data_idle_reconnects_baseline_1: availability_baseline_1.data_idle_reconnects(),
+                    data_idle_reconnects_baseline_2: availability_baseline_2.data_idle_reconnects(),
+                    client_recovery_a_ms: availability_a.client_recovery_ms,
+                    client_recovery_b_ms: availability_b.client_recovery_ms,
+                    client_recovery_baseline_1_ms: availability_baseline_1.client_recovery_ms,
+                    client_recovery_baseline_2_ms: availability_baseline_2.client_recovery_ms,
                 };
 
                 let _ = tx.send(stats_snapshot);
@@ -263,6 +331,169 @@ impl StreamStatsInternal {
 }
 
 #[derive(Debug, Default)]
+struct AvailabilityState {
+    transport_connected: bool,
+    delivery_available: bool,
+    transport_up_started: Option<Instant>,
+    transport_down_started: Option<Instant>,
+    transport_up_seconds: u64,
+    transport_down_seconds: u64,
+    delivery_up_started: Option<Instant>,
+    delivery_down_started: Option<Instant>,
+    delivery_up_seconds: u64,
+    delivery_down_seconds: u64,
+    client_recovery_started: Option<Instant>,
+    client_recovery_ms: u64,
+    last_reason: Option<ReconnectReason>,
+    reason_counts: HashMap<String, u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AvailabilitySnapshot {
+    pub transport_connected: bool,
+    pub delivery_available: bool,
+    pub transport_up_seconds: u64,
+    pub transport_down_seconds: u64,
+    pub delivery_up_seconds: u64,
+    pub delivery_down_seconds: u64,
+    pub client_recovery_ms: u64,
+    pub last_reason: Option<ReconnectReason>,
+    pub reason_counts: HashMap<String, u64>,
+}
+
+impl AvailabilitySnapshot {
+    pub fn transport_uptime_percent(&self) -> f64 {
+        percent(self.transport_up_seconds, self.transport_down_seconds)
+    }
+    pub fn delivery_uptime_percent(&self) -> f64 {
+        percent(self.delivery_up_seconds, self.delivery_down_seconds)
+    }
+    pub fn data_idle_reconnects(&self) -> u64 {
+        self.reason_counts
+            .get("dataidletimeout")
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+fn percent(up: u64, down: u64) -> f64 {
+    let observed = up.saturating_add(down);
+    if observed == 0 {
+        0.0
+    } else {
+        (up as f64 / observed as f64) * 100.0
+    }
+}
+
+impl AvailabilityState {
+    fn apply(&mut self, status: &ConnectionStatus, now: Instant) {
+        if let Some(reason) = status.reconnect_reason {
+            self.last_reason = Some(reason);
+            *self
+                .reason_counts
+                .entry(format!("{reason:?}").to_lowercase())
+                .or_insert(0) += 1;
+        }
+
+        if status.connected {
+            if !self.transport_connected {
+                if let Some(start) = self.client_recovery_started.take() {
+                    self.client_recovery_ms = self
+                        .client_recovery_ms
+                        .saturating_add(now.duration_since(start).as_millis() as u64);
+                } else if let Some(start) = self.transport_down_started.take() {
+                    self.transport_down_seconds = self
+                        .transport_down_seconds
+                        .saturating_add(now.duration_since(start).as_secs());
+                }
+                self.transport_up_started = Some(now);
+            }
+            self.transport_connected = true;
+        } else {
+            if self.transport_connected {
+                if let Some(start) = self.transport_up_started.take() {
+                    self.transport_up_seconds = self
+                        .transport_up_seconds
+                        .saturating_add(now.duration_since(start).as_secs());
+                }
+            }
+            self.transport_connected = false;
+            if status.client_recovery {
+                self.client_recovery_started.get_or_insert(now);
+                self.transport_down_started = None;
+            } else {
+                self.transport_down_started.get_or_insert(now);
+            }
+        }
+
+        if status.delivery_available {
+            self.mark_delivery(now);
+        } else if self.delivery_available {
+            if let Some(start) = self.delivery_up_started.take() {
+                self.delivery_up_seconds = self
+                    .delivery_up_seconds
+                    .saturating_add(now.duration_since(start).as_secs());
+            }
+            self.delivery_available = false;
+            self.delivery_down_started.get_or_insert(now);
+        } else {
+            self.delivery_down_started.get_or_insert(now);
+        }
+    }
+
+    fn mark_delivery(&mut self, now: Instant) {
+        if !self.delivery_available {
+            if let Some(start) = self.delivery_down_started.take() {
+                self.delivery_down_seconds = self
+                    .delivery_down_seconds
+                    .saturating_add(now.duration_since(start).as_secs());
+            }
+            self.delivery_up_started = Some(now);
+        }
+        self.delivery_available = true;
+    }
+
+    fn snapshot(&self, now: Instant) -> AvailabilitySnapshot {
+        let transport_up = self.transport_up_seconds.saturating_add(
+            self.transport_up_started
+                .map(|start| now.duration_since(start).as_secs())
+                .unwrap_or(0),
+        );
+        let transport_down = self.transport_down_seconds.saturating_add(
+            self.transport_down_started
+                .map(|start| now.duration_since(start).as_secs())
+                .unwrap_or(0),
+        );
+        let delivery_up = self.delivery_up_seconds.saturating_add(
+            self.delivery_up_started
+                .map(|start| now.duration_since(start).as_secs())
+                .unwrap_or(0),
+        );
+        let delivery_down = self.delivery_down_seconds.saturating_add(
+            self.delivery_down_started
+                .map(|start| now.duration_since(start).as_secs())
+                .unwrap_or(0),
+        );
+        let client_recovery_ms = self.client_recovery_ms.saturating_add(
+            self.client_recovery_started
+                .map(|start| now.duration_since(start).as_millis() as u64)
+                .unwrap_or(0),
+        );
+        AvailabilitySnapshot {
+            transport_connected: self.transport_connected,
+            delivery_available: self.delivery_available,
+            transport_up_seconds: transport_up,
+            transport_down_seconds: transport_down,
+            delivery_up_seconds: delivery_up,
+            delivery_down_seconds: delivery_down,
+            client_recovery_ms,
+            last_reason: self.last_reason,
+            reason_counts: self.reason_counts.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
 pub struct BaselineStream {
     pub connected: bool,
     pub connected_at: Option<Instant>,
@@ -273,10 +504,13 @@ pub struct BaselineStream {
     pub disconnected_seconds: u64,
     pub total_messages: u64,
     pub message_samples: VecDeque<(Instant, u64)>,
+    availability: AvailabilityState,
 }
 
 #[derive(Debug)]
 pub struct UptimeTracker {
+    availability_a: AvailabilityState,
+    availability_b: AvailabilityState,
     pub connected_a: bool,
     pub connected_b: bool,
     pub connected_at_a: Option<Instant>,
@@ -345,6 +579,8 @@ pub struct UptimeMetricsSnapshot {
 impl Default for UptimeTracker {
     fn default() -> Self {
         Self {
+            availability_a: AvailabilityState::default(),
+            availability_b: AvailabilityState::default(),
             connected_a: false,
             connected_b: false,
             connected_at_a: None,
@@ -393,6 +629,13 @@ impl UptimeTracker {
 
     pub fn handle_connection_status(&mut self, status: ConnectionStatus) {
         let now = Instant::now();
+
+        match status.stream_id {
+            StreamId::A => self.availability_a.apply(&status, now),
+            StreamId::B => self.availability_b.apply(&status, now),
+            StreamId::Baseline1 => self.baseline_1.availability.apply(&status, now),
+            StreamId::Baseline2 => self.baseline_2.availability.apply(&status, now),
+        }
 
         match status.stream_id {
             StreamId::A => {
@@ -488,8 +731,7 @@ impl UptimeTracker {
         } else {
             if let Some(session_start) = baseline.session_start.take() {
                 let elapsed = now.duration_since(session_start).as_secs();
-                baseline.connected_seconds =
-                    baseline.connected_seconds.saturating_add(elapsed);
+                baseline.connected_seconds = baseline.connected_seconds.saturating_add(elapsed);
             }
             baseline.connected = false;
             baseline.disconnected_at = Some(now);
@@ -511,21 +753,35 @@ impl UptimeTracker {
 
         match stream_id {
             StreamId::A => {
+                self.availability_a.mark_delivery(now);
                 self.total_messages_a = total_count;
                 Self::record_sample(&mut self.message_samples_a, now, total_count);
             }
             StreamId::B => {
+                self.availability_b.mark_delivery(now);
                 self.total_messages_b = total_count;
                 Self::record_sample(&mut self.message_samples_b, now, total_count);
             }
             StreamId::Baseline1 => {
+                self.baseline_1.availability.mark_delivery(now);
                 self.baseline_1.total_messages = total_count;
                 Self::record_sample(&mut self.baseline_1.message_samples, now, total_count);
             }
             StreamId::Baseline2 => {
+                self.baseline_2.availability.mark_delivery(now);
                 self.baseline_2.total_messages = total_count;
                 Self::record_sample(&mut self.baseline_2.message_samples, now, total_count);
             }
+        }
+    }
+
+    pub fn availability_snapshot(&self, stream_id: StreamId) -> AvailabilitySnapshot {
+        let now = Instant::now();
+        match stream_id {
+            StreamId::A => self.availability_a.snapshot(now),
+            StreamId::B => self.availability_b.snapshot(now),
+            StreamId::Baseline1 => self.baseline_1.availability.snapshot(now),
+            StreamId::Baseline2 => self.baseline_2.availability.snapshot(now),
         }
     }
 
@@ -1085,7 +1341,8 @@ pub struct UptimeDetailedStats {
 #[cfg(test)]
 mod tests {
     use super::UptimeTracker;
-    use crate::stream::{ConnectionStatus, StreamId};
+    use crate::stream::{ConnectionStatus, ReconnectReason, StreamId};
+    use std::time::Duration;
 
     fn status(
         stream_id: StreamId,
@@ -1097,6 +1354,9 @@ mod tests {
             connected,
             connected_at: None,
             connect_time_ms,
+            delivery_available: connected,
+            reconnect_reason: None,
+            client_recovery: false,
         }
     }
 
@@ -1128,5 +1388,59 @@ mod tests {
         tracker.handle_connection_status(status(StreamId::B, true, None));
 
         assert_eq!(tracker.get_connection_latency_b_ms(), 75.0);
+    }
+
+    #[test]
+    fn data_idle_recovery_is_delivery_downtime_not_transport_downtime() {
+        let mut tracker = UptimeTracker::new();
+        tracker.handle_connection_status(status(StreamId::A, true, Some(10)));
+        tracker.record_total_count(StreamId::A, 1);
+        tracker.handle_connection_status(ConnectionStatus {
+            stream_id: StreamId::A,
+            connected: false,
+            connected_at: None,
+            connect_time_ms: None,
+            delivery_available: false,
+            reconnect_reason: Some(ReconnectReason::DataIdleTimeout),
+            client_recovery: true,
+        });
+        std::thread::sleep(Duration::from_millis(2));
+        tracker.handle_connection_status(status(StreamId::A, true, Some(5)));
+        tracker.record_total_count(StreamId::A, 2);
+
+        let availability = tracker.availability_snapshot(StreamId::A);
+        assert_eq!(availability.transport_down_seconds, 0);
+        assert!(availability.client_recovery_ms >= 1);
+        assert_eq!(
+            availability.last_reason,
+            Some(ReconnectReason::DataIdleTimeout)
+        );
+        assert_eq!(availability.data_idle_reconnects(), 1);
+        assert!(availability.delivery_available);
+    }
+
+    #[test]
+    fn transport_failure_marks_both_models_down_and_retains_reason() {
+        let mut tracker = UptimeTracker::new();
+        tracker.handle_connection_status(status(StreamId::B, true, Some(10)));
+        tracker.record_total_count(StreamId::B, 1);
+        tracker.handle_connection_status(ConnectionStatus {
+            stream_id: StreamId::B,
+            connected: false,
+            connected_at: None,
+            connect_time_ms: None,
+            delivery_available: false,
+            reconnect_reason: Some(ReconnectReason::HandshakeFailure),
+            client_recovery: false,
+        });
+
+        let availability = tracker.availability_snapshot(StreamId::B);
+        assert!(!availability.transport_connected);
+        assert!(!availability.delivery_available);
+        assert_eq!(
+            availability.last_reason,
+            Some(ReconnectReason::HandshakeFailure)
+        );
+        assert_eq!(availability.reason_counts.get("handshakefailure"), Some(&1));
     }
 }

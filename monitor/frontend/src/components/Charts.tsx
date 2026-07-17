@@ -354,8 +354,16 @@ export function UptimeChart24h({
       const observed = uptime + downtime;
       return observed > 0 ? clampPercent((uptime / observed) * 100) : 0;
     });
+    const deliveryPercent = (up: number, down: number) => {
+      const observed = toNonNegative(up) + toNonNegative(down);
+      return observed > 0 ? clampPercent((toNonNegative(up) / observed) * 100) : Number.NaN;
+    };
+    const deliveryA = data.map((row) => row.reliability ? deliveryPercent(row.reliability.stream_a.delivery_up_seconds, row.reliability.stream_a.delivery_down_seconds) : Number.NaN);
+    const deliveryB = data.map((row) => row.reliability ? deliveryPercent(row.reliability.stream_b.delivery_up_seconds, row.reliability.stream_b.delivery_down_seconds) : Number.NaN);
+    const deliveryBaseline1 = data.map((row) => row.reliability ? deliveryPercent(row.reliability.baseline_1.delivery_up_seconds, row.reliability.baseline_1.delivery_down_seconds) : Number.NaN);
+    const deliveryBaseline2 = data.map((row) => row.reliability ? deliveryPercent(row.reliability.baseline_2.delivery_up_seconds, row.reliability.baseline_2.delivery_down_seconds) : Number.NaN);
     const uptimeDomain = getAdaptiveDomain(
-      [...uptimeA, ...uptimeB, ...uptimeBaseline1, ...uptimeBaseline2],
+      [...uptimeA, ...uptimeB, ...uptimeBaseline1, ...uptimeBaseline2, ...deliveryA, ...deliveryB, ...deliveryBaseline1, ...deliveryBaseline2],
       {
         defaultMin: 0,
         defaultMax: 100,
@@ -373,7 +381,7 @@ export function UptimeChart24h({
         labels,
         datasets: [
           {
-            label: streamAName,
+            label: `${streamAName} transport`,
             data: uptimeA,
             backgroundColor: palette.streamA,
             borderColor: palette.streamA,
@@ -382,7 +390,7 @@ export function UptimeChart24h({
             borderSkipped: false,
           },
           {
-            label: streamBName,
+            label: `${streamBName} transport`,
             data: uptimeB,
             backgroundColor: palette.streamB,
             borderColor: palette.streamB,
@@ -391,7 +399,7 @@ export function UptimeChart24h({
             borderSkipped: false,
           },
           {
-            label: baseline1Name,
+            label: `${baseline1Name} transport`,
             data: uptimeBaseline1,
             backgroundColor: palette.baseline,
             borderColor: palette.baseline,
@@ -400,7 +408,7 @@ export function UptimeChart24h({
             borderSkipped: false,
           },
           {
-            label: baseline2Name,
+            label: `${baseline2Name} transport`,
             data: uptimeBaseline2,
             backgroundColor: palette.baselineBg,
             borderColor: palette.baseline,
@@ -408,6 +416,10 @@ export function UptimeChart24h({
             borderRadius: 0,
             borderSkipped: false,
           },
+          { label: `${streamAName} delivery`, data: deliveryA, backgroundColor: `${palette.streamA}66`, borderColor: palette.streamA, borderWidth: 1, borderRadius: 0, borderSkipped: false },
+          { label: `${streamBName} delivery`, data: deliveryB, backgroundColor: `${palette.streamB}66`, borderColor: palette.streamB, borderWidth: 1, borderRadius: 0, borderSkipped: false },
+          { label: `${baseline1Name} delivery`, data: deliveryBaseline1, backgroundColor: `${palette.baseline}66`, borderColor: palette.baseline, borderWidth: 1, borderRadius: 0, borderSkipped: false },
+          { label: `${baseline2Name} delivery`, data: deliveryBaseline2, backgroundColor: `${palette.baselineBg}66`, borderColor: palette.baseline, borderWidth: 1, borderRadius: 0, borderSkipped: false },
         ],
       },
       options: {

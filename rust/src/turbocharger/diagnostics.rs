@@ -1,3 +1,6 @@
+use crate::turbocharger::progress::{
+    PipelineProgressSnapshot, PipelineReadinessState, PipelineStage,
+};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::process::Command;
@@ -18,6 +21,15 @@ pub struct HealthStatus {
     pub sqlite_available: bool,
     pub session_count: usize,
     pub diagnostics: HealthDiagnostics,
+    pub readiness: ReadinessDiagnostics,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ReadinessDiagnostics {
+    pub state: PipelineReadinessState,
+    pub stage: Option<PipelineStage>,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -27,6 +39,7 @@ pub struct HealthDiagnostics {
     pub cache_state: CacheStateDiagnostics,
     pub sqlite_state: SQLiteStateDiagnostics,
     pub not_redis_state: NotRedisStateDiagnostics,
+    pub pipeline_progress: PipelineProgressSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -141,12 +154,14 @@ impl DiagnosticsCollector {
         cache_state: CacheStateDiagnostics,
         sqlite_state: SQLiteStateDiagnostics,
         not_redis_state: NotRedisStateDiagnostics,
+        pipeline_progress: PipelineProgressSnapshot,
     ) -> HealthDiagnostics {
         HealthDiagnostics {
             process_memory,
             cache_state,
             sqlite_state,
             not_redis_state,
+            pipeline_progress,
         }
     }
 }
@@ -161,8 +176,18 @@ impl Default for DiagnosticsCollector {
 // Derive health
 // ---------------------------------------------------------------------------
 
-pub fn derive_health(redis_connected: bool, sqlite_available: bool, session_count: usize) -> bool {
-    redis_connected && sqlite_available && session_count > 0
+pub fn derive_health(
+    redis_connected: bool,
+    sqlite_available: bool,
+    session_count: usize,
+    progress: &PipelineProgressSnapshot,
+    progress_readiness_enabled: bool,
+) -> bool {
+    redis_connected
+        && sqlite_available
+        && session_count > 0
+        && (!progress_readiness_enabled
+            || progress.readiness_state == PipelineReadinessState::Healthy)
 }
 
 // ---------------------------------------------------------------------------
@@ -376,25 +401,68 @@ fn parse_ps_memory_output(stdout: &str) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::turbocharger::{PipelineProgress, ProgressThresholds};
+
+    fn progress_snapshot(valid_ingress: bool) -> PipelineProgressSnapshot {
+        let progress = PipelineProgress::new(2, 10);
+        if valid_ingress {
+            let _ = progress.valid_ingress();
+        }
+        progress.snapshot(ProgressThresholds {
+            startup_grace: if valid_ingress {
+                Duration::from_secs(1)
+            } else {
+                Duration::ZERO
+            },
+            ingress_idle: Duration::from_secs(1),
+            batch_execution: Duration::from_secs(1),
+            recovery_successes: 1,
+        })
+    }
 
     #[test]
     fn derive_health_requires_redis_connection() {
-        assert!(!derive_health(false, true, 1));
+        assert!(!derive_health(
+            false,
+            true,
+            1,
+            &progress_snapshot(true),
+            true
+        ));
     }
 
     #[test]
     fn derive_health_requires_sqlite_availability() {
-        assert!(!derive_health(true, false, 1));
+        assert!(!derive_health(
+            true,
+            false,
+            1,
+            &progress_snapshot(true),
+            true
+        ));
     }
 
     #[test]
     fn derive_health_requires_active_sessions() {
-        assert!(!derive_health(true, true, 0));
+        assert!(!derive_health(
+            true,
+            true,
+            0,
+            &progress_snapshot(true),
+            true
+        ));
     }
 
     #[test]
     fn derive_health_is_true_when_all_signals_are_healthy() {
-        assert!(derive_health(true, true, 1));
+        assert!(derive_health(true, true, 1, &progress_snapshot(true), true));
+    }
+
+    #[test]
+    fn derive_health_honors_progress_rollout_control() {
+        let stale = progress_snapshot(false);
+        assert!(!derive_health(true, true, 1, &stale, true));
+        assert!(derive_health(true, true, 1, &stale, false));
     }
 
     #[test]

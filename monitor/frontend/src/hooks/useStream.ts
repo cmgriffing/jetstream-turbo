@@ -33,6 +33,47 @@ export interface StreamStats {
   uptime_baseline_2_all_time?: number
   current_streak_baseline_1?: number
   current_streak_baseline_2?: number
+  delivery_available_a?: boolean
+  delivery_available_b?: boolean
+  delivery_available_baseline_1?: boolean
+  delivery_available_baseline_2?: boolean
+  transport_uptime_a_all_time?: number
+  transport_uptime_b_all_time?: number
+  transport_uptime_baseline_1_all_time?: number
+  transport_uptime_baseline_2_all_time?: number
+  delivery_uptime_a_all_time?: number
+  delivery_uptime_b_all_time?: number
+  delivery_uptime_baseline_1_all_time?: number
+  delivery_uptime_baseline_2_all_time?: number
+  reconnect_reason_a?: string
+  reconnect_reason_b?: string
+  reconnect_reason_baseline_1?: string
+  reconnect_reason_baseline_2?: string
+  data_idle_reconnects_a?: number
+  data_idle_reconnects_b?: number
+  data_idle_reconnects_baseline_1?: number
+  data_idle_reconnects_baseline_2?: number
+  client_recovery_a_ms?: number
+  client_recovery_b_ms?: number
+  client_recovery_baseline_1_ms?: number
+  client_recovery_baseline_2_ms?: number
+}
+
+export interface AvailabilityHistory {
+  transport_up_seconds: number
+  transport_down_seconds: number
+  delivery_up_seconds: number
+  delivery_down_seconds: number
+  reconnect_reasons: Record<string, number>
+  client_recovery_ms: number
+  coverage: string
+}
+
+export interface ReliabilityHistory {
+  stream_a: AvailabilityHistory
+  stream_b: AvailabilityHistory
+  baseline_1: AvailabilityHistory
+  baseline_2: AvailabilityHistory
 }
 
 interface UptimeHistoryResponse {
@@ -84,7 +125,7 @@ function pickNumber(record: Record<string, unknown>, keys: string[]): number {
   return 0
 }
 
-function normalizeUptimeRow(value: unknown): HourlyUptime | null {
+export function normalizeUptimeRow(value: unknown): HourlyUptime | null {
   const row = readObject(value)
   if (!row) {
     return null
@@ -95,26 +136,36 @@ function normalizeUptimeRow(value: unknown): HourlyUptime | null {
     return null
   }
 
+  let reliability: ReliabilityHistory | null = null
+  const rawReliability = row.reliability_json ?? row.reliability
+  if (typeof rawReliability === 'string' && rawReliability.trim()) {
+    try { reliability = JSON.parse(rawReliability) as ReliabilityHistory } catch { reliability = null }
+  } else if (readObject(rawReliability)) {
+    reliability = rawReliability as ReliabilityHistory
+  }
+
   return {
     hour,
-    stream_a_seconds: pickNumber(row, ['stream_a_seconds', 'uptime_a_seconds']),
-    stream_b_seconds: pickNumber(row, ['stream_b_seconds', 'uptime_b_seconds']),
-    stream_a_downtime_seconds: pickNumber(row, ['stream_a_downtime_seconds', 'downtime_a_seconds']),
-    stream_b_downtime_seconds: pickNumber(row, ['stream_b_downtime_seconds', 'downtime_b_seconds']),
+    stream_a_seconds: reliability?.stream_a.transport_up_seconds ?? pickNumber(row, ['stream_a_seconds', 'uptime_a_seconds']),
+    stream_b_seconds: reliability?.stream_b.transport_up_seconds ?? pickNumber(row, ['stream_b_seconds', 'uptime_b_seconds']),
+    stream_a_downtime_seconds: reliability?.stream_a.transport_down_seconds ?? pickNumber(row, ['stream_a_downtime_seconds', 'downtime_a_seconds']),
+    stream_b_downtime_seconds: reliability?.stream_b.transport_down_seconds ?? pickNumber(row, ['stream_b_downtime_seconds', 'downtime_b_seconds']),
     stream_a_disconnects: pickNumber(row, ['stream_a_disconnects', 'disconnects_a']),
     stream_b_disconnects: pickNumber(row, ['stream_b_disconnects', 'disconnects_b']),
     stream_a_messages: pickNumber(row, ['stream_a_messages', 'messages_a']),
     stream_b_messages: pickNumber(row, ['stream_b_messages', 'messages_b']),
-    baseline_1_seconds: pickNumber(row, ['baseline_1_seconds']),
-    baseline_2_seconds: pickNumber(row, ['baseline_2_seconds']),
-    baseline_1_downtime_seconds: pickNumber(row, ['baseline_1_downtime_seconds']),
-    baseline_2_downtime_seconds: pickNumber(row, ['baseline_2_downtime_seconds']),
+    baseline_1_seconds: reliability?.baseline_1.transport_up_seconds ?? pickNumber(row, ['baseline_1_seconds']),
+    baseline_2_seconds: reliability?.baseline_2.transport_up_seconds ?? pickNumber(row, ['baseline_2_seconds']),
+    baseline_1_downtime_seconds: reliability?.baseline_1.transport_down_seconds ?? pickNumber(row, ['baseline_1_downtime_seconds']),
+    baseline_2_downtime_seconds: reliability?.baseline_2.transport_down_seconds ?? pickNumber(row, ['baseline_2_downtime_seconds']),
     baseline_1_messages: pickNumber(row, ['baseline_1_messages']),
     baseline_2_messages: pickNumber(row, ['baseline_2_messages']),
+    reliability,
+    reliability_classification: readString(row.reliability_classification) ?? (reliability ? 'observed' : 'legacy_unknown'),
   }
 }
 
-function extractUptimeRows(response: unknown): HourlyUptime[] {
+export function extractUptimeRows(response: unknown): HourlyUptime[] {
   if (Array.isArray(response)) {
     return response
       .map(normalizeUptimeRow)
@@ -324,4 +375,6 @@ export interface HourlyUptime {
   baseline_2_downtime_seconds: number
   baseline_1_messages: number
   baseline_2_messages: number
+  reliability: ReliabilityHistory | null
+  reliability_classification: string
 }

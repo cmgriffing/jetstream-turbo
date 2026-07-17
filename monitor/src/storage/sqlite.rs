@@ -1,7 +1,8 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
+use std::collections::HashMap;
 
 const LEGACY_UPTIME_CONTRACT_VERSION: i64 = 1;
 const INTERVAL_UPTIME_CONTRACT_VERSION: i64 = 2;
@@ -50,6 +51,31 @@ pub struct HourlyUptime {
     pub baseline_2_messages: i64,
     #[serde(skip_serializing)]
     pub metrics_contract_version: i64,
+    #[sqlx(default)]
+    pub reliability_json: String,
+    #[sqlx(default)]
+    pub reliability_contract_version: i64,
+    #[sqlx(default)]
+    pub reliability_classification: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AvailabilityHistory {
+    pub transport_up_seconds: u64,
+    pub transport_down_seconds: u64,
+    pub delivery_up_seconds: u64,
+    pub delivery_down_seconds: u64,
+    pub reconnect_reasons: HashMap<String, u64>,
+    pub client_recovery_ms: u64,
+    pub coverage: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReliabilityHistory {
+    pub stream_a: AvailabilityHistory,
+    pub stream_b: AvailabilityHistory,
+    pub baseline_1: AvailabilityHistory,
+    pub baseline_2: AvailabilityHistory,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -138,6 +164,8 @@ impl Storage {
                 baseline_1_messages INTEGER NOT NULL DEFAULT 0,
                 baseline_2_messages INTEGER NOT NULL DEFAULT 0,
                 metrics_contract_version INTEGER NOT NULL DEFAULT 1,
+                reliability_json TEXT NOT NULL DEFAULT '',
+                reliability_contract_version INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             "#,
@@ -283,6 +311,15 @@ impl Storage {
         .execute(&pool)
         .await
         .ok();
+
+        sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN reliability_json TEXT NOT NULL DEFAULT ''",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+        sqlx::query("ALTER TABLE hourly_uptime ADD COLUMN reliability_contract_version INTEGER NOT NULL DEFAULT 0")
+            .execute(&pool).await.ok();
 
         sqlx::query(
             r#"
@@ -453,6 +490,23 @@ impl Storage {
         Ok(())
     }
 
+    pub async fn save_hourly_reliability(
+        &self,
+        hour: DateTime<Utc>,
+        reliability: &ReliabilityHistory,
+    ) -> Result<()> {
+        let hour_str = hour.format("%Y-%m-%d %H:00:00").to_string();
+        let reliability_json = serde_json::to_string(reliability)?;
+        sqlx::query(
+            "UPDATE hourly_uptime SET reliability_json = ?, reliability_contract_version = 1, updated_at = CURRENT_TIMESTAMP WHERE hour = ?",
+        )
+        .bind(reliability_json)
+        .bind(hour_str)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn get_uptime_since(&self, since: DateTime<Utc>) -> Result<Vec<HourlyUptime>> {
         let since_str = since.format("%Y-%m-%d %H:00:00").to_string();
 
@@ -468,7 +522,7 @@ impl Storage {
                    baseline_1_seconds, baseline_2_seconds,
                    baseline_1_downtime_seconds, baseline_2_downtime_seconds,
                    baseline_1_messages, baseline_2_messages,
-                   metrics_contract_version
+                   metrics_contract_version, reliability_json, reliability_contract_version
             FROM hourly_uptime
             WHERE hour < ?
             ORDER BY hour DESC
@@ -491,7 +545,7 @@ impl Storage {
                    baseline_1_seconds, baseline_2_seconds,
                    baseline_1_downtime_seconds, baseline_2_downtime_seconds,
                    baseline_1_messages, baseline_2_messages,
-                   metrics_contract_version
+                   metrics_contract_version, reliability_json, reliability_contract_version
             FROM hourly_uptime
             WHERE hour >= ?
             ORDER BY hour ASC
@@ -557,6 +611,12 @@ impl Storage {
 
         for mut row in rows {
             let original = row.clone();
+            row.reliability_classification =
+                if row.reliability_contract_version > 0 && !row.reliability_json.is_empty() {
+                    "observed".to_string()
+                } else {
+                    "legacy_unknown".to_string()
+                };
 
             if row.metrics_contract_version == LEGACY_UPTIME_CONTRACT_VERSION {
                 let (downtime_a, downtime_b, disconnects_a, disconnects_b, messages_a, messages_b) =
@@ -625,7 +685,9 @@ impl Storage {
 
 #[cfg(test)]
 mod tests {
-    use super::{Storage, INTERVAL_UPTIME_CONTRACT_VERSION};
+    use super::{
+        AvailabilityHistory, ReliabilityHistory, Storage, INTERVAL_UPTIME_CONTRACT_VERSION,
+    };
     use chrono::{Duration, Utc};
     use sqlx::SqlitePool;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -690,7 +752,6 @@ mod tests {
                 INTERVAL_UPTIME_CONTRACT_VERSION,
             )
             .await?;
-
         storage
             .save_hourly_uptime(
                 recent_hour,
@@ -717,6 +778,28 @@ mod tests {
                 INTERVAL_UPTIME_CONTRACT_VERSION,
             )
             .await?;
+        storage
+            .save_hourly_reliability(
+                recent_hour,
+                &ReliabilityHistory {
+                    stream_a: AvailabilityHistory {
+                        transport_up_seconds: 3200,
+                        delivery_up_seconds: 2800,
+                        delivery_down_seconds: 400,
+                        coverage: "observed".to_string(),
+                        ..Default::default()
+                    },
+                    stream_b: AvailabilityHistory {
+                        transport_up_seconds: 3000,
+                        delivery_up_seconds: 2900,
+                        delivery_down_seconds: 100,
+                        coverage: "observed".to_string(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .await?;
 
         let rows = storage
             .get_uptime_since(Utc::now() - Duration::hours(24))
@@ -737,6 +820,10 @@ mod tests {
             row.metrics_contract_version,
             INTERVAL_UPTIME_CONTRACT_VERSION
         );
+        assert_eq!(row.reliability_classification, "observed");
+        let reliability: ReliabilityHistory = serde_json::from_str(&row.reliability_json)?;
+        assert_eq!(reliability.stream_a.transport_up_seconds, 3200);
+        assert_eq!(reliability.stream_a.delivery_down_seconds, 400);
 
         Ok(())
     }

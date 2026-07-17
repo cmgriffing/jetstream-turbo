@@ -1,6 +1,6 @@
 use chrono::Utc;
 use futures::{SinkExt, Stream, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
@@ -18,9 +18,19 @@ pub enum StreamId {
     Baseline2,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconnectReason {
+    DataIdleTimeout,
+    HandshakeFailure,
+    SocketRead,
+    SocketWrite,
+    PeerClose,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ConnectionStatus, StreamClient, StreamId};
+    use super::{ConnectionStatus, ReconnectReason, StreamClient, StreamId};
     use futures::{SinkExt, StreamExt};
     use std::time::Duration;
     use tokio::net::TcpListener;
@@ -62,9 +72,18 @@ mod tests {
         assert_eq!(connected.stream_id, StreamId::A);
         assert!(connected.connected);
 
+        let delivering = next_status(&mut statuses).await;
+        assert!(delivering.connected);
+        assert!(delivering.delivery_available);
+
         let disconnected = next_status(&mut statuses).await;
         assert_eq!(disconnected.stream_id, StreamId::A);
         assert!(!disconnected.connected);
+        assert_eq!(
+            disconnected.reconnect_reason,
+            Some(ReconnectReason::DataIdleTimeout)
+        );
+        assert!(disconnected.client_recovery);
     }
 }
 
@@ -93,6 +112,9 @@ pub struct ConnectionStatus {
     pub connected: bool,
     pub connected_at: Option<Instant>,
     pub connect_time_ms: Option<u64>,
+    pub delivery_available: bool,
+    pub reconnect_reason: Option<ReconnectReason>,
+    pub client_recovery: bool,
 }
 
 pub struct StreamClient {
@@ -246,6 +268,9 @@ impl StreamClient {
                             connected: true,
                             connected_at: Some(connect_start),
                             connect_time_ms: Some(connect_time_ms),
+                            delivery_available: false,
+                            reconnect_reason: None,
+                            client_recovery: false,
                         });
 
                         let (mut write, mut read) = ws_stream.split();
@@ -254,6 +279,8 @@ impl StreamClient {
                         let mut last_message = Instant::now();
                         let update_interval = Duration::from_millis(100);
                         let mut last_delivery_latency_us: Option<u64> = None;
+                        let mut delivery_available = false;
+                        let mut reconnect_reason = ReconnectReason::DataIdleTimeout;
 
                         while let Ok(Some(msg_result)) =
                             tokio::time::timeout(idle_timeout, read.next()).await
@@ -263,6 +290,18 @@ impl StreamClient {
                                     last_message = Instant::now();
                                     count += 1;
                                     last_delivery_latency_us = extract_delivery_latency_us(&text);
+                                    if !delivery_available {
+                                        delivery_available = true;
+                                        let _ = tx_status.send(ConnectionStatus {
+                                            stream_id,
+                                            connected: true,
+                                            connected_at: Some(connect_start),
+                                            connect_time_ms: None,
+                                            delivery_available: true,
+                                            reconnect_reason: None,
+                                            client_recovery: false,
+                                        });
+                                    }
                                     if last_send.elapsed() >= update_interval {
                                         if tx_msg
                                             .send(StreamMessage {
@@ -279,11 +318,13 @@ impl StreamClient {
                                     }
                                 }
                                 Ok(Message::Close(_)) => {
+                                    reconnect_reason = ReconnectReason::PeerClose;
                                     info!(stream = ?stream_id, "Connection closed by server");
                                     break;
                                 }
                                 Ok(Message::Ping(payload)) => {
                                     if let Err(e) = write.send(Message::Pong(payload)).await {
+                                        reconnect_reason = ReconnectReason::SocketWrite;
                                         error!(stream = ?stream_id, "Failed to send WebSocket pong: {}", e);
                                         break;
                                     }
@@ -293,6 +334,7 @@ impl StreamClient {
                                     }
                                 }
                                 Err(e) => {
+                                    reconnect_reason = ReconnectReason::SocketRead;
                                     error!(stream = ?stream_id, "WebSocket error: {}", e);
                                     break;
                                 }
@@ -317,18 +359,30 @@ impl StreamClient {
                         {
                             return;
                         }
+
+                        let _ = tx_status.send(ConnectionStatus {
+                            stream_id,
+                            connected: false,
+                            connected_at: None,
+                            connect_time_ms: None,
+                            delivery_available: false,
+                            reconnect_reason: Some(reconnect_reason),
+                            client_recovery: reconnect_reason == ReconnectReason::DataIdleTimeout,
+                        });
                     }
                     Err(e) => {
                         error!(stream = ?stream_id, "Connection failed: {}", e);
+                        let _ = tx_status.send(ConnectionStatus {
+                            stream_id,
+                            connected: false,
+                            connected_at: None,
+                            connect_time_ms: None,
+                            delivery_available: false,
+                            reconnect_reason: Some(ReconnectReason::HandshakeFailure),
+                            client_recovery: false,
+                        });
                     }
                 }
-
-                let _ = tx_status.send(ConnectionStatus {
-                    stream_id,
-                    connected: false,
-                    connected_at: None,
-                    connect_time_ms: None,
-                });
 
                 warn!(stream = ?stream_id, "Reconnecting in {:?}...", reconnect_delay);
                 sleep(reconnect_delay).await;
