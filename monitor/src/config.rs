@@ -16,6 +16,12 @@ pub struct Settings {
     pub database_url: String,
     #[serde(default = "default_stream_idle_timeout_seconds")]
     pub stream_idle_timeout_seconds: u64,
+    #[serde(default = "default_connection_timeout_seconds")]
+    pub connection_timeout_seconds: u64,
+    #[serde(default = "default_diagnostics_log_path")]
+    pub diagnostics_log_path: String,
+    #[serde(default = "default_diagnostics_log_max_bytes")]
+    pub diagnostics_log_max_bytes: u64,
 }
 
 fn default_stream_a_name() -> String {
@@ -38,6 +44,18 @@ fn default_stream_idle_timeout_seconds() -> u64 {
     30
 }
 
+fn default_connection_timeout_seconds() -> u64 {
+    15
+}
+
+fn default_diagnostics_log_path() -> String {
+    "./monitor-diagnostics.log".to_string()
+}
+
+fn default_diagnostics_log_max_bytes() -> u64 {
+    1048576
+}
+
 impl Settings {
     pub fn load() -> Result<Self> {
         dotenvy::dotenv().ok();
@@ -50,6 +68,18 @@ impl Settings {
             .set_default(
                 "stream_idle_timeout_seconds",
                 default_stream_idle_timeout_seconds(),
+            )?
+            .set_default(
+                "connection_timeout_seconds",
+                default_connection_timeout_seconds(),
+            )?
+            .set_default(
+                "diagnostics_log_path",
+                default_diagnostics_log_path(),
+            )?
+            .set_default(
+                "diagnostics_log_max_bytes",
+                default_diagnostics_log_max_bytes(),
             )?
             .add_source(config::Environment::default())
             .build()?;

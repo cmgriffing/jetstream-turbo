@@ -1,6 +1,7 @@
 use anyhow::Result;
 use jetstream_monitor::{
     config::Settings,
+    diagnostics::DiagnosticLogger,
     stats::{
         AvailabilitySnapshot, StatsAggregator, StreamStatsInternal, UptimeDetailedStats,
         UptimeMetricsSnapshot, UptimeTracker,
@@ -260,15 +261,29 @@ async fn main() -> Result<()> {
     let broadcast_tx = Arc::new(aggregator.sender());
 
     let stream_idle_timeout = Duration::from_secs(settings.stream_idle_timeout_seconds.max(1));
+    let connect_timeout = Duration::from_secs(settings.connection_timeout_seconds.max(1));
+
+    let diagnostics = Arc::new(DiagnosticLogger::new(
+        settings.diagnostics_log_path.clone(),
+        settings.diagnostics_log_max_bytes,
+    ));
 
     let client_a = StreamClient::new(settings.stream_a_url.clone(), StreamId::A)
-        .with_idle_timeout(stream_idle_timeout);
+        .with_idle_timeout(stream_idle_timeout)
+        .with_connect_timeout(connect_timeout)
+        .with_diagnostics(Arc::clone(&diagnostics));
     let client_b = StreamClient::new(settings.stream_b_url.clone(), StreamId::B)
-        .with_idle_timeout(stream_idle_timeout);
+        .with_idle_timeout(stream_idle_timeout)
+        .with_connect_timeout(connect_timeout)
+        .with_diagnostics(Arc::clone(&diagnostics));
     let client_baseline_1 = StreamClient::new(BASELINE_1_URL.to_string(), StreamId::Baseline1)
-        .with_idle_timeout(stream_idle_timeout);
+        .with_idle_timeout(stream_idle_timeout)
+        .with_connect_timeout(connect_timeout)
+        .with_diagnostics(Arc::clone(&diagnostics));
     let client_baseline_2 = StreamClient::new(BASELINE_2_URL.to_string(), StreamId::Baseline2)
-        .with_idle_timeout(stream_idle_timeout);
+        .with_idle_timeout(stream_idle_timeout)
+        .with_connect_timeout(connect_timeout)
+        .with_diagnostics(Arc::clone(&diagnostics));
 
     let stats_for_stream = Arc::clone(&stats_internal);
     let uptime_for_status: Arc<std::sync::RwLock<UptimeTracker>> = Arc::clone(&uptime_tracker);

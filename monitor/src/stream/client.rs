@@ -1,6 +1,7 @@
 use chrono::Utc;
 use futures::{SinkExt, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
@@ -8,9 +9,12 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
+use crate::diagnostics::{DiagnosticEvent, DiagnosticLogger};
+
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StreamId {
     A,
     B,
@@ -26,13 +30,14 @@ pub enum ReconnectReason {
     SocketRead,
     SocketWrite,
     PeerClose,
+    ConnectTimeout,
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ConnectionStatus, ReconnectReason, StreamClient, StreamId};
     use futures::{SinkExt, StreamExt};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio::net::TcpListener;
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
@@ -85,6 +90,45 @@ mod tests {
         );
         assert!(disconnected.client_recovery);
     }
+
+    #[tokio::test]
+    async fn hanging_connection_times_out_within_configured_duration() {
+        // Bind a TCP listener that accepts connections but never responds —
+        // simulating a server where the TLS/WebSocket handshake stalls.
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("read listener address");
+
+        tokio::spawn(async move {
+            // Accept the TCP connection but never send any data, so the
+            // WebSocket handshake hangs indefinitely. Hold the stream open
+            // so the client doesn't get a connection reset.
+            let (_stream, _) = listener.accept().await.expect("accept");
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+
+        let client =
+            StreamClient::new(format!("ws://{}", addr), StreamId::A)
+                .with_connect_timeout(Duration::from_millis(200));
+        let (_messages, mut statuses) = client.stream_with_status();
+
+        let start = Instant::now();
+        let status = next_status(&mut statuses).await;
+        let elapsed = start.elapsed();
+
+        assert!(!status.connected);
+        assert_eq!(
+            status.reconnect_reason,
+            Some(ReconnectReason::ConnectTimeout)
+        );
+        // Should time out well within 2 seconds (configured at 200ms).
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "took {:?} to time out — expected ~200ms",
+            elapsed
+        );
+    }
 }
 
 #[derive(Deserialize)]
@@ -122,6 +166,8 @@ pub struct StreamClient {
     stream_id: StreamId,
     reconnect_delay: Duration,
     idle_timeout: Duration,
+    connect_timeout: Duration,
+    diagnostics: Option<Arc<DiagnosticLogger>>,
 }
 
 impl StreamClient {
@@ -131,11 +177,23 @@ impl StreamClient {
             stream_id,
             reconnect_delay: Duration::from_secs(5),
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
+            connect_timeout: Duration::from_secs(15),
+            diagnostics: None,
         }
     }
 
     pub fn with_idle_timeout(mut self, idle_timeout: Duration) -> Self {
         self.idle_timeout = idle_timeout;
+        self
+    }
+
+    pub fn with_connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.connect_timeout = connect_timeout;
+        self
+    }
+
+    pub fn with_diagnostics(mut self, diagnostics: Arc<DiagnosticLogger>) -> Self {
+        self.diagnostics = Some(diagnostics);
         self
     }
 
@@ -145,16 +203,40 @@ impl StreamClient {
         let stream_id = self.stream_id;
         let reconnect_delay = self.reconnect_delay;
         let idle_timeout = self.idle_timeout;
+        let connect_timeout = self.connect_timeout;
+        let diagnostics = self.diagnostics.clone();
 
         tokio::spawn(async move {
             let mut cumulative_count: u64 = 0;
+            let mut attempt_number: u64 = 0;
+            let mut disconnect_start: Option<Instant> = None;
 
             loop {
                 info!(stream = ?stream_id, "Connecting to {}", url);
+                let connect_start = Instant::now();
 
-                match connect_async(&url).await {
-                    Ok((ws_stream, _)) => {
-                        info!(stream = ?stream_id, "Connected successfully");
+                match tokio::time::timeout(connect_timeout, connect_async(&url)).await {
+                    Ok(Ok((ws_stream, _))) => {
+                        let connect_time_ms = connect_start.elapsed().as_millis() as u64;
+                        info!(stream = ?stream_id, "Connected successfully in {}ms", connect_time_ms);
+
+                        if attempt_number > 0 {
+                            let downtime = disconnect_start
+                                .map(|s| s.elapsed().as_secs())
+                                .unwrap_or(0);
+                            if let Some(ref diag) = diagnostics {
+                                diag.log(&DiagnosticEvent::Recovered {
+                                    stream_id,
+                                    url: url.clone(),
+                                    timestamp: Utc::now(),
+                                    downtime_seconds: downtime,
+                                    attempt_count: attempt_number,
+                                });
+                            }
+                            attempt_number = 0;
+                            disconnect_start = None;
+                        }
+
                         let (mut write, mut read) = ws_stream.split();
                         let mut count: u64 = 0;
                         let mut last_send = Instant::now();
@@ -187,6 +269,17 @@ impl StreamClient {
                                 }
                                 Ok(Message::Close(_)) => {
                                     info!(stream = ?stream_id, "Connection closed by server");
+                                    if disconnect_start.is_none() {
+                                        disconnect_start = Some(Instant::now());
+                                    }
+                                    if let Some(ref diag) = diagnostics {
+                                        diag.log(&DiagnosticEvent::Disconnected {
+                                            stream_id,
+                                            url: url.clone(),
+                                            timestamp: Utc::now(),
+                                            reconnect_reason: "peer_close".to_string(),
+                                        });
+                                    }
                                     break;
                                 }
                                 Ok(Message::Ping(payload)) => {
@@ -201,6 +294,17 @@ impl StreamClient {
                                 }
                                 Err(e) => {
                                     error!(stream = ?stream_id, "WebSocket error: {}", e);
+                                    if disconnect_start.is_none() {
+                                        disconnect_start = Some(Instant::now());
+                                    }
+                                    if let Some(ref diag) = diagnostics {
+                                        diag.log(&DiagnosticEvent::Disconnected {
+                                            stream_id,
+                                            url: url.clone(),
+                                            timestamp: Utc::now(),
+                                            reconnect_reason: "socket_error".to_string(),
+                                        });
+                                    }
                                     break;
                                 }
                                 _ => {
@@ -225,8 +329,50 @@ impl StreamClient {
                             return;
                         }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         error!(stream = ?stream_id, "Connection failed: {}", e);
+                        attempt_number += 1;
+                        if disconnect_start.is_none() {
+                            disconnect_start = Some(Instant::now());
+                        }
+                        if let Some(ref diag) = diagnostics {
+                            diag.log(&DiagnosticEvent::ConnectionAttemptFailed {
+                                stream_id,
+                                url: url.clone(),
+                                timestamp: Utc::now(),
+                                error_type: "connect_error".to_string(),
+                                error_message: e.to_string(),
+                                elapsed_ms: connect_start.elapsed().as_millis() as u64,
+                                timeout_seconds: connect_timeout.as_secs(),
+                                attempt_number,
+                            });
+                        }
+                    }
+                    Err(_elapsed) => {
+                        error!(
+                            stream = ?stream_id,
+                            "Connection timed out after {:?}",
+                            connect_timeout
+                        );
+                        attempt_number += 1;
+                        if disconnect_start.is_none() {
+                            disconnect_start = Some(Instant::now());
+                        }
+                        if let Some(ref diag) = diagnostics {
+                            diag.log(&DiagnosticEvent::ConnectionAttemptFailed {
+                                stream_id,
+                                url: url.clone(),
+                                timestamp: Utc::now(),
+                                error_type: "timeout".to_string(),
+                                error_message: format!(
+                                    "connection timed out after {}s",
+                                    connect_timeout.as_secs()
+                                ),
+                                elapsed_ms: connect_timeout.as_millis() as u64,
+                                timeout_seconds: connect_timeout.as_secs(),
+                                attempt_number,
+                            });
+                        }
                     }
                 }
 
@@ -250,18 +396,39 @@ impl StreamClient {
         let stream_id = self.stream_id;
         let reconnect_delay = self.reconnect_delay;
         let idle_timeout = self.idle_timeout;
+        let connect_timeout = self.connect_timeout;
+        let diagnostics = self.diagnostics.clone();
 
         tokio::spawn(async move {
             let mut cumulative_count: u64 = 0;
+            let mut attempt_number: u64 = 0;
+            let mut disconnect_start: Option<Instant> = None;
 
             loop {
                 info!(stream = ?stream_id, "Connecting to {}", url);
                 let connect_start = Instant::now();
 
-                match connect_async(&url).await {
-                    Ok((ws_stream, _)) => {
+                match tokio::time::timeout(connect_timeout, connect_async(&url)).await {
+                    Ok(Ok((ws_stream, _))) => {
                         let connect_time_ms = connect_start.elapsed().as_millis() as u64;
                         info!(stream = ?stream_id, "Connected successfully in {}ms", connect_time_ms);
+
+                        if attempt_number > 0 {
+                            let downtime = disconnect_start
+                                .map(|s| s.elapsed().as_secs())
+                                .unwrap_or(0);
+                            if let Some(ref diag) = diagnostics {
+                                diag.log(&DiagnosticEvent::Recovered {
+                                    stream_id,
+                                    url: url.clone(),
+                                    timestamp: Utc::now(),
+                                    downtime_seconds: downtime,
+                                    attempt_count: attempt_number,
+                                });
+                            }
+                            attempt_number = 0;
+                            disconnect_start = None;
+                        }
 
                         let _ = tx_status.send(ConnectionStatus {
                             stream_id,
@@ -320,27 +487,82 @@ impl StreamClient {
                                 Ok(Message::Close(_)) => {
                                     reconnect_reason = ReconnectReason::PeerClose;
                                     info!(stream = ?stream_id, "Connection closed by server");
+                                    if disconnect_start.is_none() {
+                                        disconnect_start = Some(Instant::now());
+                                    }
+                                    if let Some(ref diag) = diagnostics {
+                                        diag.log(&DiagnosticEvent::Disconnected {
+                                            stream_id,
+                                            url: url.clone(),
+                                            timestamp: Utc::now(),
+                                            reconnect_reason: "peer_close".to_string(),
+                                        });
+                                    }
                                     break;
                                 }
                                 Ok(Message::Ping(payload)) => {
                                     if let Err(e) = write.send(Message::Pong(payload)).await {
                                         reconnect_reason = ReconnectReason::SocketWrite;
                                         error!(stream = ?stream_id, "Failed to send WebSocket pong: {}", e);
+                                        if disconnect_start.is_none() {
+                                            disconnect_start = Some(Instant::now());
+                                        }
+                                        if let Some(ref diag) = diagnostics {
+                                            diag.log(&DiagnosticEvent::Disconnected {
+                                                stream_id,
+                                                url: url.clone(),
+                                                timestamp: Utc::now(),
+                                                reconnect_reason: "socket_write".to_string(),
+                                            });
+                                        }
                                         break;
                                     }
                                     if last_message.elapsed() >= idle_timeout {
                                         warn!(stream = ?stream_id, "No data messages received for {:?}; reconnecting", idle_timeout);
+                                        if disconnect_start.is_none() {
+                                            disconnect_start = Some(Instant::now());
+                                        }
+                                        if let Some(ref diag) = diagnostics {
+                                            diag.log(&DiagnosticEvent::Disconnected {
+                                                stream_id,
+                                                url: url.clone(),
+                                                timestamp: Utc::now(),
+                                                reconnect_reason: "data_idle_timeout".to_string(),
+                                            });
+                                        }
                                         break;
                                     }
                                 }
                                 Err(e) => {
                                     reconnect_reason = ReconnectReason::SocketRead;
                                     error!(stream = ?stream_id, "WebSocket error: {}", e);
+                                    if disconnect_start.is_none() {
+                                        disconnect_start = Some(Instant::now());
+                                    }
+                                    if let Some(ref diag) = diagnostics {
+                                        diag.log(&DiagnosticEvent::Disconnected {
+                                            stream_id,
+                                            url: url.clone(),
+                                            timestamp: Utc::now(),
+                                            reconnect_reason: "socket_error".to_string(),
+                                        });
+                                    }
                                     break;
                                 }
                                 _ => {
                                     if last_message.elapsed() >= idle_timeout {
                                         warn!(stream = ?stream_id, "No data messages received for {:?}; reconnecting", idle_timeout);
+                                        if disconnect_start.is_none() {
+                                            disconnect_start = Some(Instant::now());
+                                        }
+                                        if let Some(ref diag) = diagnostics {
+                                            diag.log(&DiagnosticEvent::Disconnected {
+                                                stream_id,
+                                                url: url.clone(),
+                                                timestamp: Utc::now(),
+                                                reconnect_reason: "data_idle_timeout".to_string(),
+                                            });
+                                        }
                                         break;
                                     }
                                 }
@@ -370,8 +592,24 @@ impl StreamClient {
                             client_recovery: reconnect_reason == ReconnectReason::DataIdleTimeout,
                         });
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         error!(stream = ?stream_id, "Connection failed: {}", e);
+                        attempt_number += 1;
+                        if disconnect_start.is_none() {
+                            disconnect_start = Some(Instant::now());
+                        }
+                        if let Some(ref diag) = diagnostics {
+                            diag.log(&DiagnosticEvent::ConnectionAttemptFailed {
+                                stream_id,
+                                url: url.clone(),
+                                timestamp: Utc::now(),
+                                error_type: "connect_error".to_string(),
+                                error_message: e.to_string(),
+                                elapsed_ms: connect_start.elapsed().as_millis() as u64,
+                                timeout_seconds: connect_timeout.as_secs(),
+                                attempt_number,
+                            });
+                        }
                         let _ = tx_status.send(ConnectionStatus {
                             stream_id,
                             connected: false,
@@ -379,6 +617,41 @@ impl StreamClient {
                             connect_time_ms: None,
                             delivery_available: false,
                             reconnect_reason: Some(ReconnectReason::HandshakeFailure),
+                            client_recovery: false,
+                        });
+                    }
+                    Err(_elapsed) => {
+                        error!(
+                            stream = ?stream_id,
+                            "Connection timed out after {:?}",
+                            connect_timeout
+                        );
+                        attempt_number += 1;
+                        if disconnect_start.is_none() {
+                            disconnect_start = Some(Instant::now());
+                        }
+                        if let Some(ref diag) = diagnostics {
+                            diag.log(&DiagnosticEvent::ConnectionAttemptFailed {
+                                stream_id,
+                                url: url.clone(),
+                                timestamp: Utc::now(),
+                                error_type: "timeout".to_string(),
+                                error_message: format!(
+                                    "connection timed out after {}s",
+                                    connect_timeout.as_secs()
+                                ),
+                                elapsed_ms: connect_timeout.as_millis() as u64,
+                                timeout_seconds: connect_timeout.as_secs(),
+                                attempt_number,
+                            });
+                        }
+                        let _ = tx_status.send(ConnectionStatus {
+                            stream_id,
+                            connected: false,
+                            connected_at: None,
+                            connect_time_ms: None,
+                            delivery_available: false,
+                            reconnect_reason: Some(ReconnectReason::ConnectTimeout),
                             client_recovery: false,
                         });
                     }

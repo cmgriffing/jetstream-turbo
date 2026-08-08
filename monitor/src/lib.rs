@@ -1,4 +1,5 @@
 pub mod config;
+pub mod diagnostics;
 pub mod stats;
 pub mod storage;
 pub mod stream;
