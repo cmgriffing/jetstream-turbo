@@ -915,10 +915,7 @@ mod tests {
             std::task::Poll::Ready(Ok(()))
         }
 
-        fn start_send(
-            self: std::pin::Pin<&mut Self>,
-            message: Message,
-        ) -> Result<(), Self::Error> {
+        fn start_send(self: std::pin::Pin<&mut Self>, message: Message) -> Result<(), Self::Error> {
             self.get_mut().0.lock().unwrap().push(message);
             Ok(())
         }
