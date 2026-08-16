@@ -313,6 +313,15 @@ function ChartStateOverlay({ state }: { state: ChartRenderState }) {
   return <div className={`monitor-state-overlay monitor-state-overlay--${state}`}>{message}</div>;
 }
 
+function BaselineIdentityNote({ baseline1Name, baseline2Name }: { baseline1Name: string; baseline2Name: string }) {
+  return (
+    <p className="monitor-chart-identities">
+      <span><strong>Baseline 1:</strong> {baseline1Name}</span>
+      <span><strong>Baseline 2:</strong> {baseline2Name}</span>
+    </p>
+  );
+}
+
 export function UptimeChart24h({
   data,
   streamAName,
@@ -399,7 +408,7 @@ export function UptimeChart24h({
             borderSkipped: false,
           },
           {
-            label: `${baseline1Name} transport`,
+            label: "Baseline 1 transport",
             data: uptimeBaseline1,
             backgroundColor: palette.baseline,
             borderColor: palette.baseline,
@@ -408,7 +417,7 @@ export function UptimeChart24h({
             borderSkipped: false,
           },
           {
-            label: `${baseline2Name} transport`,
+            label: "Baseline 2 transport",
             data: uptimeBaseline2,
             backgroundColor: palette.baselineBg,
             borderColor: palette.baseline,
@@ -418,8 +427,8 @@ export function UptimeChart24h({
           },
           { label: `${streamAName} delivery`, data: deliveryA, backgroundColor: `${palette.streamA}66`, borderColor: palette.streamA, borderWidth: 1, borderRadius: 0, borderSkipped: false },
           { label: `${streamBName} delivery`, data: deliveryB, backgroundColor: `${palette.streamB}66`, borderColor: palette.streamB, borderWidth: 1, borderRadius: 0, borderSkipped: false },
-          { label: `${baseline1Name} delivery`, data: deliveryBaseline1, backgroundColor: `${palette.baseline}66`, borderColor: palette.baseline, borderWidth: 1, borderRadius: 0, borderSkipped: false },
-          { label: `${baseline2Name} delivery`, data: deliveryBaseline2, backgroundColor: `${palette.baselineBg}66`, borderColor: palette.baseline, borderWidth: 1, borderRadius: 0, borderSkipped: false },
+          { label: "Baseline 1 delivery", data: deliveryBaseline1, backgroundColor: `${palette.baseline}66`, borderColor: palette.baseline, borderWidth: 1, borderRadius: 0, borderSkipped: false },
+          { label: "Baseline 2 delivery", data: deliveryBaseline2, backgroundColor: `${palette.baselineBg}66`, borderColor: palette.baseline, borderWidth: 1, borderRadius: 0, borderSkipped: false },
         ],
       },
       options: {
@@ -481,6 +490,7 @@ export function UptimeChart24h({
       body={
         <>
           <ChartStateOverlay state={renderState} />
+          <BaselineIdentityNote baseline1Name={baseline1Name} baseline2Name={baseline2Name} />
           <div className="monitor-chart-frame relative h-[288px] w-full">
             <Suspense fallback={<ChartLoader />}>
               <Bar data={chartContent.chartData} options={chartContent.options} />
@@ -587,7 +597,7 @@ export function RateChart({
             pointHoverBorderWidth: 2,
           },
           {
-            label: baseline1Name,
+            label: "Baseline 1",
             data: rateBaseline1,
             borderColor: palette.baseline,
             backgroundColor: "transparent",
@@ -599,7 +609,7 @@ export function RateChart({
             pointHoverBorderWidth: 2,
           },
           {
-            label: baseline2Name,
+            label: "Baseline 2",
             data: rateBaseline2,
             borderColor: palette.baseline,
             backgroundColor: "transparent",
@@ -676,6 +686,7 @@ export function RateChart({
       body={
         <>
           <ChartStateOverlay state={renderState} />
+          <BaselineIdentityNote baseline1Name={baseline1Name} baseline2Name={baseline2Name} />
           <div className="monitor-chart-frame relative h-[236px] w-full">
             <Suspense fallback={<ChartLoader />}>
               <Line data={chartContent.chartData} options={chartContent.options} />

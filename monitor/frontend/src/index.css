@@ -1629,3 +1629,324 @@
     padding: 0;
   }
 }
+
+/* Monitor comparison hierarchy and dynamic-content containment */
+.monitor-app,
+.monitor-shell,
+.monitor-main,
+.monitor-section,
+.monitor-health-row,
+.monitor-feed-region,
+.monitor-stream-grid,
+.monitor-stream-card,
+.monitor-table-card,
+.monitor-table-card-content {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.monitor-health-row {
+  gap: 1rem;
+}
+
+.monitor-delta-card--unavailable {
+  border-color: rgba(201, 211, 232, 0.54);
+}
+
+.monitor-delta-value--unavailable {
+  color: var(--monitor-text-dim);
+  font-size: clamp(1.2rem, 3vw, 1.8rem);
+}
+
+.monitor-baseline-comparison {
+  position: relative;
+  z-index: 1;
+  margin-top: 0.9rem;
+  padding-top: 0.8rem;
+  border-top: 2px solid rgba(120, 149, 196, 0.28);
+  display: grid;
+  gap: 0.65rem;
+}
+
+.monitor-baseline-comparison-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem 1rem;
+  flex-wrap: wrap;
+  color: var(--monitor-text-faint);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.58rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.monitor-baseline-comparison-head p {
+  margin: 0;
+}
+
+.monitor-baseline-matrix {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.monitor-baseline-result {
+  min-width: 0;
+  padding: 0.55rem 0.6rem;
+  border-left: 2px solid var(--monitor-border);
+  background: rgba(201, 211, 232, 0.035);
+}
+
+.monitor-baseline-result--ahead {
+  border-left-color: var(--monitor-accent-a);
+}
+
+.monitor-baseline-result--behind {
+  border-left-color: var(--monitor-accent-warn);
+}
+
+.monitor-baseline-result-label,
+.monitor-baseline-result-value,
+.monitor-baseline-result-state {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.monitor-baseline-result-label,
+.monitor-baseline-result-state {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.56rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--monitor-text-faint);
+}
+
+.monitor-baseline-result-label span:first-child {
+  color: var(--monitor-text-faint);
+}
+
+.monitor-baseline-result-value {
+  margin-block: 0.18rem;
+  font-family: "Archivo", sans-serif;
+  font-size: clamp(1rem, 2vw, 1.3rem);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--monitor-text);
+}
+
+.monitor-baseline-result--ahead .monitor-baseline-result-state {
+  color: var(--monitor-accent-a);
+}
+
+.monitor-baseline-result--behind .monitor-baseline-result-state {
+  color: var(--monitor-accent-warn);
+}
+
+.monitor-feed-region {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.monitor-feed-region--baseline {
+  padding-top: 0.85rem;
+  border-top: 1px solid rgba(201, 211, 232, 0.3);
+}
+
+.monitor-feed-region-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.4rem 1rem;
+  flex-wrap: wrap;
+  align-items: baseline;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.6rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--monitor-text-faint);
+}
+
+.monitor-feed-region-head p {
+  margin: 0;
+}
+
+.monitor-stream-grid,
+.monitor-stream-grid--primary,
+.monitor-stream-grid--baseline {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.monitor-stream-grid--baseline {
+  opacity: 0.84;
+}
+
+.monitor-stream-card--baseline {
+  padding-block: 0.78rem;
+}
+
+.monitor-stream-top {
+  flex-wrap: wrap;
+}
+
+.monitor-stream-identity,
+.monitor-stream-name,
+.monitor-stream-full-name,
+.monitor-stream-main,
+.monitor-stream-metric,
+.monitor-stream-metric-label,
+.monitor-stream-metric-value {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.monitor-stream-name,
+.monitor-stream-full-name,
+.monitor-stream-started,
+.monitor-stream-metric-label,
+.monitor-stream-metric-value,
+.monitor-stream-metric-unit {
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+.monitor-stream-full-name {
+  margin: 0;
+  max-width: 56ch;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.54rem;
+  line-height: 1.35;
+  letter-spacing: 0.035em;
+  color: var(--monitor-text-faint);
+}
+
+.monitor-stream-metrics {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.monitor-stream-metric-value {
+  flex-wrap: wrap;
+}
+
+.monitor-stream-metric--detail {
+  grid-column: 1 / -1;
+}
+
+.monitor-stream-metric--detail .monitor-stream-metric-value {
+  display: grid;
+  gap: 0.24rem;
+  white-space: normal;
+}
+
+.monitor-chart-identities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.2rem;
+  margin: 0 0 0.55rem;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.56rem;
+  line-height: 1.45;
+  color: var(--monitor-text-faint);
+  overflow-wrap: anywhere;
+}
+
+.monitor-chart-identities span {
+  min-width: 0;
+}
+
+.monitor-recovery-summary {
+  margin-bottom: 0.7rem;
+  padding: 0.7rem 0.75rem;
+  border-left: 2px solid var(--monitor-accent-warn);
+  background: rgba(255, 199, 90, 0.055);
+  display: grid;
+  grid-template-columns: minmax(8rem, 0.35fr) minmax(0, 1fr);
+  gap: 0.45rem 1rem;
+  align-items: start;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.61rem;
+  color: var(--monitor-text-faint);
+}
+
+.monitor-recovery-summary p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.monitor-recovery-summary-value {
+  color: var(--monitor-text);
+}
+
+.monitor-table-viewport {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-gutter: stable;
+}
+
+.monitor-metrics-table {
+  min-width: 46rem;
+}
+
+.monitor-status-indicator {
+  position: static;
+  inset: auto;
+  z-index: auto;
+  justify-self: end;
+  max-width: 100%;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  padding-block: 0.25rem;
+}
+
+@media (max-width: 900px) {
+  .monitor-baseline-matrix {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .monitor-stream-grid,
+  .monitor-stream-grid--primary,
+  .monitor-stream-grid--baseline,
+  .monitor-baseline-matrix,
+  .monitor-recovery-summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .monitor-delta-comparison {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .monitor-stream-status {
+    white-space: normal;
+  }
+
+  .monitor-chart-identities {
+    display: grid;
+  }
+}
+
+@media (max-width: 380px) {
+  .monitor-shell {
+    padding-inline: 0.45rem;
+  }
+
+  .monitor-shell-rail {
+    padding-inline: 0.4rem;
+  }
+
+  .monitor-stream-metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .monitor-stream-metric--detail {
+    grid-column: auto;
+  }
+
+  .monitor-status-indicator {
+    justify-self: stretch;
+    justify-content: flex-start;
+  }
+}

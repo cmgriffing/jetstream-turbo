@@ -6,7 +6,8 @@ import { formatUptimePercent } from "@/lib/uptime";
 interface StreamCardProps {
   streamId: "a" | "b" | "baseline-1" | "baseline-2";
   name: string;
-  count: number;
+  fullName?: string;
+  count?: number;
   countingStartedAt?: string;
   rate: number;
   streak?: number;
@@ -50,6 +51,7 @@ function formatCountingStartedAt(timestamp?: string): string {
 export const StreamCard = memo(function StreamCard({
   streamId,
   name,
+  fullName,
   count,
   countingStartedAt,
   rate,
@@ -63,6 +65,8 @@ export const StreamCard = memo(function StreamCard({
   dataIdleReconnects,
   clientRecoveryMs,
 }: StreamCardProps) {
+  const isBaseline = streamId === "baseline-1" || streamId === "baseline-2";
+  const completeIdentity = fullName || name;
   const streamVariantClass =
     streamId === "a"
       ? "monitor-stream-card--a"
@@ -74,8 +78,11 @@ export const StreamCard = memo(function StreamCard({
     <article className={cn("monitor-stream-card", streamVariantClass)}>
       <div className="monitor-stream-top">
         <div className="monitor-stream-identity">
-          <p className="monitor-eyebrow">Stream</p>
-          <p className="monitor-stream-name">{name}</p>
+          <p className="monitor-eyebrow">{isBaseline ? "Reference feed" : "Primary feed"}</p>
+          <p className="monitor-stream-name" title={completeIdentity}>{name}</p>
+          {completeIdentity !== name ? (
+            <p className="monitor-stream-full-name">{completeIdentity}</p>
+          ) : null}
         </div>
         <span
           className={cn(
@@ -91,7 +98,7 @@ export const StreamCard = memo(function StreamCard({
       </div>
 
       <div className="monitor-stream-main">
-        <p className="monitor-stream-count">{count.toLocaleString()}</p>
+        <p className="monitor-stream-count">{count?.toLocaleString() ?? "—"}</p>
         <p className="monitor-stream-subtext">
           <Zap className="mr-1 inline h-3 w-3" aria-hidden="true" />
           Total messages
@@ -162,12 +169,12 @@ export const StreamCard = memo(function StreamCard({
           <p className="monitor-stream-metric-label">Delivery state</p>
           <p className="monitor-stream-metric-value">{deliveryAvailable === undefined ? "Unknown" : deliveryAvailable ? "Delivering" : "Stale"}</p>
         </div>
-        <div className="monitor-stream-metric">
+        <div className="monitor-stream-metric monitor-stream-metric--detail">
           <p className="monitor-stream-metric-label">Recovery / cause</p>
           <p className="monitor-stream-metric-value">
             {reconnectReason ? reconnectReason.replace(/_/g, " ") : "--"}
-            {dataIdleReconnects ? <span className="monitor-stream-metric-unit"> ×{dataIdleReconnects}</span> : null}
-            {clientRecoveryMs ? <span className="monitor-stream-metric-unit"> {formatDuration(clientRecoveryMs)}</span> : null}
+            {dataIdleReconnects !== undefined ? <span className="monitor-stream-metric-unit">Idle reconnects {dataIdleReconnects}</span> : null}
+            {clientRecoveryMs !== undefined ? <span className="monitor-stream-metric-unit">Client recovery {formatDuration(clientRecoveryMs)}</span> : null}
           </p>
         </div>
       </div>

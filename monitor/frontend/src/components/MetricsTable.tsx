@@ -256,7 +256,20 @@ export function MetricsTable({
           </div>
         )}
 
-        <Table className="monitor-metrics-table">
+        <section className="monitor-recovery-summary" aria-labelledby="recovery-summary-title">
+          <div>
+            <p className="monitor-eyebrow" id="recovery-summary-title">Window recovery summary</p>
+            <p>Aggregate reconnect causes across all feeds</p>
+          </div>
+          <p className="monitor-recovery-summary-value">
+            {Object.keys(stats.reasonTotals).length
+              ? Object.entries(stats.reasonTotals).map(([reason, count]) => `${reason.replace(/_/g, " ")}: ${count}`).join(" · ")
+              : "No reconnect causes reported"}
+            {stats.clientRecoveryMs > 0 ? ` · ${formatDurationLong(stats.clientRecoveryMs / 1000)} client recovery` : " · No client recovery time reported"}
+          </p>
+        </section>
+
+        <Table className="monitor-metrics-table" containerClassName="monitor-table-viewport" aria-label="Historical feed metrics">
           <TableHeader>
             <TableRow className="monitor-metrics-head-row hover:bg-transparent">
               <TableHead className="monitor-table-head whitespace-normal">Metric</TableHead>
@@ -267,10 +280,10 @@ export function MetricsTable({
                 {streamBName}
               </TableHead>
               <TableHead className="monitor-table-head text-right whitespace-normal break-words">
-                {baseline1Name}
+                <span title={baseline1Name} aria-label={`Baseline 1, ${baseline1Name}`}>Baseline 1</span>
               </TableHead>
               <TableHead className="monitor-table-head text-right whitespace-normal break-words">
-                {baseline2Name}
+                <span title={baseline2Name} aria-label={`Baseline 2, ${baseline2Name}`}>Baseline 2</span>
               </TableHead>
             </TableRow>
           </TableHeader>
@@ -326,14 +339,6 @@ export function MetricsTable({
               <TableCell className="monitor-table-label whitespace-normal">Reliability coverage</TableCell>
               <TableCell colSpan={4} className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
                 {stats.reliabilityCoverage.toFixed(1)}% {stats.reliabilityCoverage < 100 ? "(legacy / unknown intervals present)" : ""}
-              </TableCell>
-            </TableRow>
-
-            <TableRow className="monitor-metrics-row">
-              <TableCell className="monitor-table-label whitespace-normal">Reconnect causes / client recovery</TableCell>
-              <TableCell colSpan={4} className="monitor-table-value text-right whitespace-normal">
-                {Object.keys(stats.reasonTotals).length ? Object.entries(stats.reasonTotals).map(([reason, count]) => `${reason}: ${count}`).join(", ") : "Unknown"}
-                {stats.clientRecoveryMs > 0 ? ` · ${formatDurationLong(stats.clientRecoveryMs / 1000)} client recovery` : ""}
               </TableCell>
             </TableRow>
 

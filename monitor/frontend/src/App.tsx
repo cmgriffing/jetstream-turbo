@@ -6,6 +6,7 @@ import { StatusIndicator } from "@/components/StatusIndicator";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
 import { UptimeChart24h, RateChart } from "@/components/Charts";
 import { DeltaCard } from "@/components/DeltaCard";
+import { compareCounts } from "@/lib/comparison";
 import {
   StreamStats,
   useWebSocket,
@@ -116,7 +117,33 @@ function App() {
     lastUpdatedAt,
   } = useUptimeHistory(historyHours);
 
-  const currentDiff = (stats.stream_a || 0) - (stats.stream_b || 0);
+  const primaryComparison = compareCounts(stats.stream_a, stats.stream_b);
+  const baselineComparisons = [
+    {
+      subjectLabel: "Messijo",
+      baselineLabel: "Baseline 1",
+      baselineIdentity: stats.baseline_1_name || "Baseline 1",
+      comparison: compareCounts(stats.stream_a, stats.baseline_1),
+    },
+    {
+      subjectLabel: "Messijo",
+      baselineLabel: "Baseline 2",
+      baselineIdentity: stats.baseline_2_name || "Baseline 2",
+      comparison: compareCounts(stats.stream_a, stats.baseline_2),
+    },
+    {
+      subjectLabel: "Graze",
+      baselineLabel: "Baseline 1",
+      baselineIdentity: stats.baseline_1_name || "Baseline 1",
+      comparison: compareCounts(stats.stream_b, stats.baseline_1),
+    },
+    {
+      subjectLabel: "Graze",
+      baselineLabel: "Baseline 2",
+      baselineIdentity: stats.baseline_2_name || "Baseline 2",
+      comparison: compareCounts(stats.stream_b, stats.baseline_2),
+    },
+  ];
   const transportConnected = connectionStatus === "connected";
   const streamAName = stats.stream_a_name || "Stream A";
   const streamBName = stats.stream_b_name || "Stream B";
@@ -180,21 +207,27 @@ function App() {
 
             <div className="monitor-health-row">
               <DeltaCard
-                delta={currentDiff}
+                primaryComparison={primaryComparison}
                 streamAName={stats.stream_a_name || "STREAM_A"}
                 streamBName={stats.stream_b_name || "STREAM_B"}
+                baselineComparisons={baselineComparisons}
               />
 
-              <div className="monitor-stream-grid">
+              <div className="monitor-feed-region monitor-feed-region--primary">
+                <div className="monitor-feed-region-head">
+                  <p className="monitor-eyebrow">Primary feeds</p>
+                  <p>Messijo and Graze operational detail</p>
+                </div>
+                <div className="monitor-stream-grid monitor-stream-grid--primary">
                 <StreamCard
                   streamId="a"
                   name={stats.stream_a_name || "STREAM_A"}
-                  count={stats.stream_a || 0}
+                  count={stats.stream_a}
                   countingStartedAt={stats.counting_started_at}
-                  rate={stats.rate_a || 0}
+                  rate={stats.rate_a ?? 0}
                   streak={stats.current_streak_a}
                   uptimeAllTime={stats.uptime_a_all_time}
-                  connected={stats.connected_a || false}
+                  connected={stats.connected_a ?? false}
                   deliveryAvailable={stats.delivery_available_a}
                   transportUptime={stats.transport_uptime_a_all_time}
                   deliveryUptime={stats.delivery_uptime_a_all_time}
@@ -205,12 +238,12 @@ function App() {
                 <StreamCard
                   streamId="b"
                   name={stats.stream_b_name || "STREAM_B"}
-                  count={stats.stream_b || 0}
+                  count={stats.stream_b}
                   countingStartedAt={stats.counting_started_at}
-                  rate={stats.rate_b || 0}
+                  rate={stats.rate_b ?? 0}
                   streak={stats.current_streak_b}
                   uptimeAllTime={stats.uptime_b_all_time}
-                  connected={stats.connected_b || false}
+                  connected={stats.connected_b ?? false}
                   deliveryAvailable={stats.delivery_available_b}
                   transportUptime={stats.transport_uptime_b_all_time}
                   deliveryUptime={stats.delivery_uptime_b_all_time}
@@ -218,15 +251,25 @@ function App() {
                   dataIdleReconnects={stats.data_idle_reconnects_b}
                   clientRecoveryMs={stats.client_recovery_b_ms}
                 />
+                </div>
+              </div>
+
+              <div className="monitor-feed-region monitor-feed-region--baseline">
+                <div className="monitor-feed-region-head">
+                  <p className="monitor-eyebrow">Baseline references</p>
+                  <p>Supporting feeds for directional context</p>
+                </div>
+                <div className="monitor-stream-grid monitor-stream-grid--baseline">
                 <StreamCard
                   streamId="baseline-1"
-                  name={stats.baseline_1_name || "BASELINE_1"}
-                  count={stats.baseline_1 || 0}
+                  name="Baseline 1"
+                  fullName={stats.baseline_1_name || "Baseline 1"}
+                  count={stats.baseline_1}
                   countingStartedAt={stats.counting_started_at}
-                  rate={stats.rate_baseline_1 || 0}
+                  rate={stats.rate_baseline_1 ?? 0}
                   streak={stats.current_streak_baseline_1}
                   uptimeAllTime={stats.uptime_baseline_1_all_time}
-                  connected={stats.connected_baseline_1 || false}
+                  connected={stats.connected_baseline_1 ?? false}
                   deliveryAvailable={stats.delivery_available_baseline_1}
                   transportUptime={stats.transport_uptime_baseline_1_all_time}
                   deliveryUptime={stats.delivery_uptime_baseline_1_all_time}
@@ -236,13 +279,14 @@ function App() {
                 />
                 <StreamCard
                   streamId="baseline-2"
-                  name={stats.baseline_2_name || "BASELINE_2"}
-                  count={stats.baseline_2 || 0}
+                  name="Baseline 2"
+                  fullName={stats.baseline_2_name || "Baseline 2"}
+                  count={stats.baseline_2}
                   countingStartedAt={stats.counting_started_at}
-                  rate={stats.rate_baseline_2 || 0}
+                  rate={stats.rate_baseline_2 ?? 0}
                   streak={stats.current_streak_baseline_2}
                   uptimeAllTime={stats.uptime_baseline_2_all_time}
-                  connected={stats.connected_baseline_2 || false}
+                  connected={stats.connected_baseline_2 ?? false}
                   deliveryAvailable={stats.delivery_available_baseline_2}
                   transportUptime={stats.transport_uptime_baseline_2_all_time}
                   deliveryUptime={stats.delivery_uptime_baseline_2_all_time}
@@ -250,6 +294,7 @@ function App() {
                   dataIdleReconnects={stats.data_idle_reconnects_baseline_2}
                   clientRecoveryMs={stats.client_recovery_baseline_2_ms}
                 />
+                </div>
               </div>
             </div>
           </section>
