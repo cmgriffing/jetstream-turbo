@@ -13,14 +13,14 @@ use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::broadcast;
-use tokio::time::{interval, timeout, Instant, MissedTickBehavior};
+use tokio::sync::{broadcast, mpsc};
+use tokio::time::{interval, Instant, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
 const MONITOR_WS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 const MONITOR_WS_PEER_TIMEOUT: Duration = Duration::from_secs(75);
-const MONITOR_WS_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const MONITOR_WS_LAG_LOG_INTERVAL: Duration = Duration::from_secs(30);
+const MONITOR_WS_OUTGOING_CHANNEL_CAPACITY: usize = 1000;
 
 #[derive(Deserialize)]
 pub struct StatsQuery {
@@ -93,42 +93,103 @@ async fn ws_handler(
 
 async fn handle_websocket(
     socket: WebSocket,
-    mut broadcast_rx: broadcast::Receiver<crate::models::enriched::EnrichedRecord>,
+    broadcast_rx: broadcast::Receiver<crate::models::enriched::EnrichedRecord>,
 ) {
-    let (mut sender, mut socket_rx) = socket.split();
+    let (sender, socket_rx) = socket.split();
     let connection_id = uuid::Uuid::new_v4();
-    let mut heartbeat_interval = interval(MONITOR_WS_HEARTBEAT_INTERVAL);
+    let (outgoing_tx, outgoing_rx) = mpsc::channel(MONITOR_WS_OUTGOING_CHANNEL_CAPACITY);
+
+    // The receive task checks peer timeout on the same 20s cadence the old
+    // single-task loop used (its heartbeat tick). The heartbeat itself now
+    // lives in the send task; only the timeout *check* happens here.
+    let mut peer_timeout_interval = interval(MONITOR_WS_HEARTBEAT_INTERVAL);
     let mut lag_log_interval = interval(MONITOR_WS_LAG_LOG_INTERVAL);
+    let mut heartbeat_interval = interval(MONITOR_WS_HEARTBEAT_INTERVAL);
+    peer_timeout_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    lag_log_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    heartbeat_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    peer_timeout_interval.tick().await;
+    lag_log_interval.tick().await;
+    heartbeat_interval.tick().await;
+
+    info!(%connection_id, "Monitor WebSocket connected");
+
+    let receive_task = tokio::spawn(monitor_receive_loop(
+        connection_id,
+        socket_rx,
+        broadcast_rx,
+        outgoing_tx,
+        peer_timeout_interval,
+        lag_log_interval,
+    ));
+    let send_task = tokio::spawn(monitor_send_loop(
+        connection_id,
+        sender,
+        outgoing_rx,
+        heartbeat_interval,
+    ));
+
+    let (receive_result, send_result) = tokio::join!(receive_task, send_task);
+
+    let (lagged_total, dropped_total) = match receive_result {
+        Ok(stats) => stats,
+        Err(error) => {
+            warn!(%connection_id, %error, "Monitor WebSocket receive task panicked");
+            (0, 0)
+        }
+    };
+    let sent_total = match send_result {
+        Ok(stats) => stats,
+        Err(error) => {
+            warn!(%connection_id, %error, "Monitor WebSocket send task panicked");
+            0
+        }
+    };
+
+    debug!(
+        %connection_id,
+        sent_total,
+        lagged_total,
+        dropped_total,
+        "Monitor WebSocket handler stopped"
+    );
+}
+
+/// Drains the broadcast channel and forwards owned `EnrichedRecord` values into
+/// the outgoing channel without ever blocking on the WebSocket sender. Exits on
+/// peer timeout, socket error, Close frame, peer disconnect, or broadcast close.
+async fn monitor_receive_loop<Stream, StreamError>(
+    connection_id: uuid::Uuid,
+    mut socket_rx: Stream,
+    mut broadcast_rx: broadcast::Receiver<crate::models::enriched::EnrichedRecord>,
+    outgoing_tx: mpsc::Sender<crate::models::enriched::EnrichedRecord>,
+    mut peer_timeout_interval: tokio::time::Interval,
+    mut lag_log_interval: tokio::time::Interval,
+) -> (u64, u64)
+where
+    Stream: futures::Stream<Item = Result<Message, StreamError>> + Unpin,
+    StreamError: std::fmt::Display,
+{
     let mut last_peer_message = Instant::now();
     let mut lagged_since_last_log: u64 = 0;
     let mut lagged_total: u64 = 0;
-    let mut sent_total: u64 = 0;
-
-    heartbeat_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    lag_log_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    heartbeat_interval.tick().await;
-    lag_log_interval.tick().await;
-
-    info!(%connection_id, "Monitor WebSocket connected");
+    let mut dropped_total: u64 = 0;
 
     loop {
         tokio::select! {
             msg = broadcast_rx.recv() => {
                 match msg {
                     Ok(record) => {
-                        if let Ok(json) = serde_json::to_string(&record) {
-                            if send_monitor_message(
-                                &mut sender,
-                                Message::Text(json),
-                                connection_id,
-                                "record",
-                            )
-                            .await
-                            .is_err()
-                            {
+                        match outgoing_tx.try_send(record) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                metrics::counter!("monitor_ws_outgoing_dropped").increment(1);
+                                dropped_total += 1;
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                // Send task exited; connection teardown is in progress.
                                 break;
                             }
-                            sent_total += 1;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -137,7 +198,7 @@ async fn handle_websocket(
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        warn!(%connection_id, sent_total, lagged_total, "Monitor WebSocket broadcast channel closed");
+                        warn!(%connection_id, lagged_total, dropped_total, "Monitor WebSocket broadcast channel closed");
                         break;
                     }
                 }
@@ -145,7 +206,7 @@ async fn handle_websocket(
             msg = socket_rx.next() => {
                 match msg {
                     Some(Ok(Message::Close(frame))) => {
-                        info!(%connection_id, ?frame, sent_total, lagged_total, "Monitor WebSocket closed by peer");
+                        info!(%connection_id, ?frame, lagged_total, dropped_total, "Monitor WebSocket closed by peer");
                         break;
                     }
                     Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
@@ -155,44 +216,25 @@ async fn handle_websocket(
                         last_peer_message = Instant::now();
                     }
                     Some(Err(error)) => {
-                        warn!(%connection_id, %error, sent_total, lagged_total, "Monitor WebSocket receive failed");
+                        warn!(%connection_id, %error, lagged_total, dropped_total, "Monitor WebSocket receive failed");
                         break;
                     }
                     None => {
-                        info!(%connection_id, sent_total, lagged_total, "Monitor WebSocket peer disconnected");
+                        info!(%connection_id, lagged_total, dropped_total, "Monitor WebSocket peer disconnected");
                         break;
                     }
                 }
             }
-            _ = heartbeat_interval.tick() => {
+            _ = peer_timeout_interval.tick() => {
                 let idle_for = last_peer_message.elapsed();
                 if idle_for >= MONITOR_WS_PEER_TIMEOUT {
                     warn!(
                         %connection_id,
-                        sent_total,
                         lagged_total,
+                        dropped_total,
                         idle_for_ms = idle_for.as_millis() as u64,
                         "Monitor WebSocket peer timed out"
                     );
-                    let _ = send_monitor_message(
-                        &mut sender,
-                        Message::Close(None),
-                        connection_id,
-                        "timeout_close",
-                    )
-                    .await;
-                    break;
-                }
-
-                if send_monitor_message(
-                    &mut sender,
-                    Message::Ping(b"jetstream-turbo".to_vec()),
-                    connection_id,
-                    "heartbeat",
-                )
-                .await
-                .is_err()
-                {
                     break;
                 }
             }
@@ -202,7 +244,7 @@ async fn handle_websocket(
                         %connection_id,
                         lagged_since_last_log,
                         lagged_total,
-                        sent_total,
+                        dropped_total,
                         "Monitor WebSocket receiver lagged behind broadcast ring"
                     );
                     lagged_since_last_log = 0;
@@ -211,36 +253,65 @@ async fn handle_websocket(
         }
     }
 
-    debug!(%connection_id, sent_total, lagged_total, "Monitor WebSocket handler stopped");
+    (lagged_total, dropped_total)
 }
 
-async fn send_monitor_message(
-    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
-    message: Message,
+/// Owns the WebSocket sender, serializes `EnrichedRecord` values, and sends
+/// heartbeats with biased priority. There is no send timeout: sends block
+/// naturally while the monitor is slow, and the bounded outgoing channel
+/// absorbs short stalls. Exits when the outgoing channel closes (receive task
+/// gone) or a send fails.
+async fn monitor_send_loop<Sink, SinkError>(
     connection_id: uuid::Uuid,
-    message_kind: &'static str,
-) -> Result<(), ()> {
-    match timeout(MONITOR_WS_SEND_TIMEOUT, sender.send(message)).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => {
-            warn!(
-                %connection_id,
-                %error,
-                message_kind,
-                "Monitor WebSocket send failed"
-            );
-            Err(())
-        }
-        Err(_) => {
-            warn!(
-                %connection_id,
-                message_kind,
-                timeout_ms = MONITOR_WS_SEND_TIMEOUT.as_millis() as u64,
-                "Monitor WebSocket send timed out"
-            );
-            Err(())
+    mut sender: Sink,
+    mut outgoing_rx: mpsc::Receiver<crate::models::enriched::EnrichedRecord>,
+    mut heartbeat_interval: tokio::time::Interval,
+) -> u64
+where
+    Sink: futures::Sink<Message, Error = SinkError> + Unpin,
+    SinkError: std::fmt::Display,
+{
+    let mut sent_total: u64 = 0;
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = heartbeat_interval.tick() => {
+                if sender
+                    .send(Message::Ping(b"jetstream-turbo".to_vec()))
+                    .await
+                    .is_err()
+                {
+                    warn!(%connection_id, sent_total, "Monitor WebSocket heartbeat send failed");
+                    break;
+                }
+            }
+            record = outgoing_rx.recv() => {
+                match record {
+                    Some(record) => {
+                        let json = match serde_json::to_string(&record) {
+                            Ok(json) => json,
+                            Err(error) => {
+                                warn!(%connection_id, %error, "Monitor WebSocket record serialization failed");
+                                continue;
+                            }
+                        };
+                        if sender.send(Message::Text(json)).await.is_err() {
+                            warn!(%connection_id, sent_total, "Monitor WebSocket send failed");
+                            break;
+                        }
+                        sent_total += 1;
+                    }
+                    None => {
+                        info!(%connection_id, sent_total, "Monitor WebSocket outgoing channel closed");
+                        break;
+                    }
+                }
+            }
         }
     }
+
+    sent_total
 }
 
 pub async fn create_server(
@@ -588,15 +659,25 @@ fn optional_usize_metric_value(value: Option<usize>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{health_http_response, prometheus_metrics_from_diagnostics, readiness_http_status};
+    use super::{
+        health_http_response, monitor_receive_loop, monitor_send_loop,
+        prometheus_metrics_from_diagnostics, readiness_http_status,
+    };
+    use crate::models::enriched::EnrichedRecord;
+    use crate::models::jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType};
     use crate::turbocharger::{
         CacheStateDiagnostics, HealthDiagnostics, HealthStatus, MemoryPeakDiagnostics,
         NotRedisStateDiagnostics, PipelineProgress, PipelineReadinessState,
         ProcessMemoryDiagnostics, ProgressThresholds, ReadinessDiagnostics, SQLiteStateDiagnostics,
     };
+    use axum::extract::ws::Message;
     use axum::http::StatusCode;
+    use futures::stream;
     use serde_json::Value;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
+    use tokio::sync::{broadcast, mpsc};
+    use tokio::time::{interval, MissedTickBehavior};
 
     fn sample_diagnostics() -> HealthDiagnostics {
         let progress = PipelineProgress::new(6, 10_000);
@@ -782,5 +863,234 @@ mod tests {
         assert!(output.contains("jetstream_turbo_sqlite_db_size_bytes NaN"));
         assert!(output.contains("jetstream_turbo_not_redis_stream_length NaN"));
         assert!(output.contains("jetstream_turbo_not_redis_configured_max_length NaN"));
+    }
+
+    fn sample_record() -> EnrichedRecord {
+        EnrichedRecord::new(JetstreamMessage {
+            did: "did:plc:test".to_string(),
+            time_us: Some(1640995200000000),
+            seq: Some(1),
+            kind: MessageKind::Commit,
+            commit: Some(CommitData {
+                rev: Some("rev-1".to_string()),
+                operation_type: OperationType::Create,
+                collection: Some("app.bsky.feed.post".to_string()),
+                rkey: Some("rkey-1".to_string()),
+                record: Some(serde_json::json!({ "text": "hello" })),
+                cid: Some("bafyrei".to_string()),
+            }),
+        })
+    }
+
+    /// Consumes the interval's immediate first tick so the next tick fires after
+    /// one full period, mirroring how `handle_websocket` primes its intervals.
+    async fn primed_interval(period: Duration) -> tokio::time::Interval {
+        let mut interval = interval(period);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        interval.tick().await;
+        interval
+    }
+
+    /// A test sink that records every message it is asked to send and never
+    /// blocks, standing in for the WebSocket sender in `monitor_send_loop`.
+    #[derive(Clone)]
+    struct RecordingSink(Arc<Mutex<Vec<Message>>>);
+
+    #[derive(Debug)]
+    struct TestSinkError;
+
+    impl std::fmt::Display for TestSinkError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "test sink error")
+        }
+    }
+
+    impl futures::Sink<Message> for RecordingSink {
+        type Error = TestSinkError;
+
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn start_send(
+            self: std::pin::Pin<&mut Self>,
+            message: Message,
+        ) -> Result<(), Self::Error> {
+            self.get_mut().0.lock().unwrap().push(message);
+            Ok(())
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn receive_loop_never_blocks_when_send_side_is_stalled() {
+        let connection_id = uuid::Uuid::new_v4();
+        let (broadcast_tx, broadcast_rx) = broadcast::channel(16);
+        // The receiver side is never read, so the outgoing channel fills up and
+        // stays full - the receive loop must drop instead of blocking.
+        let (outgoing_tx, _stalled_outgoing_rx) = mpsc::channel::<EnrichedRecord>(2);
+        let socket_rx = stream::pending::<Result<Message, std::io::Error>>();
+        let peer_timeout_interval = primed_interval(Duration::from_secs(3600)).await;
+        let lag_log_interval = primed_interval(Duration::from_secs(3600)).await;
+
+        let task = tokio::spawn(monitor_receive_loop(
+            connection_id,
+            socket_rx,
+            broadcast_rx,
+            outgoing_tx,
+            peer_timeout_interval,
+            lag_log_interval,
+        ));
+
+        for _ in 0..10 {
+            broadcast_tx.send(sample_record()).unwrap();
+        }
+        drop(broadcast_tx);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("receive loop must not block on a stalled consumer")
+            .unwrap();
+        // All 10 messages were drained from the broadcast: 2 buffered, 8 dropped.
+        assert_eq!(result, (0, 8));
+    }
+
+    #[tokio::test]
+    async fn try_send_failure_increments_drop_total_without_closing_connection() {
+        let connection_id = uuid::Uuid::new_v4();
+        let (broadcast_tx, broadcast_rx) = broadcast::channel(16);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<EnrichedRecord>(1);
+        let socket_rx = stream::pending::<Result<Message, std::io::Error>>();
+        let peer_timeout_interval = primed_interval(Duration::from_secs(3600)).await;
+        let lag_log_interval = primed_interval(Duration::from_secs(3600)).await;
+
+        let task = tokio::spawn(monitor_receive_loop(
+            connection_id,
+            socket_rx,
+            broadcast_rx,
+            outgoing_tx,
+            peer_timeout_interval,
+            lag_log_interval,
+        ));
+
+        // First record fills the outgoing channel.
+        broadcast_tx.send(sample_record()).unwrap();
+        let first = outgoing_rx.recv().await.expect("first record buffered");
+        assert_eq!(first.get_did(), "did:plc:test");
+
+        // Two more records arrive while the channel is full: both are dropped,
+        // but the connection must stay alive (no break, no close).
+        broadcast_tx.send(sample_record()).unwrap();
+        broadcast_tx.send(sample_record()).unwrap();
+        broadcast_tx.send(sample_record()).unwrap();
+        tokio::task::yield_now().await;
+        assert!(
+            !task.is_finished(),
+            "receive loop must survive try_send failures"
+        );
+
+        // Free a slot; the loop must keep processing rather than having exited.
+        let second = outgoing_rx.recv().await.expect("second record buffered");
+        assert_eq!(second.get_did(), "did:plc:test");
+        broadcast_tx.send(sample_record()).unwrap();
+        drop(broadcast_tx);
+
+        let (_, dropped_total) = task.await.unwrap();
+        assert_eq!(dropped_total, 2);
+
+        // The message sent after recovery was buffered, proving the connection
+        // stayed alive through the drops.
+        let recovered = outgoing_rx.recv().await.expect("recovered record buffered");
+        assert_eq!(recovered.get_did(), "did:plc:test");
+    }
+
+    #[tokio::test]
+    async fn send_loop_exits_when_outgoing_channel_sender_is_dropped() {
+        let connection_id = uuid::Uuid::new_v4();
+        let (outgoing_tx, outgoing_rx) = mpsc::channel::<EnrichedRecord>(4);
+        // Dropping the sender is the only shutdown signal the send loop needs.
+        drop(outgoing_tx);
+
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let sink = RecordingSink(recorded.clone());
+        let heartbeat_interval = primed_interval(Duration::from_secs(3600)).await;
+
+        let task = tokio::spawn(monitor_send_loop(
+            connection_id,
+            sink,
+            outgoing_rx,
+            heartbeat_interval,
+        ));
+
+        let sent = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("send loop must exit when the outgoing channel closes")
+            .unwrap();
+        assert_eq!(sent, 0);
+        assert!(recorded.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn heartbeat_fires_with_biased_priority_under_full_outgoing_channel() {
+        let connection_id = uuid::Uuid::new_v4();
+        let (outgoing_tx, outgoing_rx) = mpsc::channel::<EnrichedRecord>(8);
+        for _ in 0..3 {
+            outgoing_tx.send(sample_record()).await.unwrap();
+        }
+        drop(outgoing_tx);
+
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let sink = RecordingSink(recorded.clone());
+
+        // Prime the interval so its next tick is already due when the loop
+        // starts: with biased selection the heartbeat must win over the
+        // backlogged data messages.
+        let heartbeat_interval = primed_interval(Duration::from_millis(1)).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let task = tokio::spawn(monitor_send_loop(
+            connection_id,
+            sink,
+            outgoing_rx,
+            heartbeat_interval,
+        ));
+
+        let sent = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("send loop must drain a prefilled outgoing channel")
+            .unwrap();
+        assert_eq!(sent, 3);
+
+        let messages = recorded.lock().unwrap();
+        assert_eq!(
+            messages[0],
+            Message::Ping(b"jetstream-turbo".to_vec()),
+            "biased select must let the heartbeat fire before backlogged data"
+        );
+        assert!(
+            messages.iter().any(|m| matches!(m, Message::Ping(_))),
+            "at least one heartbeat must be sent"
+        );
+        let data_count = messages
+            .iter()
+            .filter(|m| matches!(m, Message::Text(_)))
+            .count();
+        assert_eq!(data_count, 3);
     }
 }
