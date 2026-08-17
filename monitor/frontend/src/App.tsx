@@ -7,6 +7,8 @@ import { ConnectionBanner } from "@/components/ConnectionBanner";
 import { UptimeChart24h, RateChart } from "@/components/Charts";
 import { DeltaCard } from "@/components/DeltaCard";
 import { compareCounts } from "@/lib/comparison";
+import { decodeWindowParam, encodeWindowParam, WINDOW_PARAM_OPTIONS } from "@/lib/windowParam";
+import { useUrlParam } from "@/hooks/useUrlParam";
 import {
   StreamStats,
   useWebSocket,
@@ -23,18 +25,9 @@ type HistoryRenderState =
 
 type PillTone = "good" | "info" | "warn" | "bad" | "neutral";
 
-const HISTORY_WINDOWS = [
-  { label: "24H", hours: 24 },
-  { label: "7D", hours: 24 * 7 },
-  { label: "28D", hours: 24 * 28 },
-] as const;
-
 function formatWindowLabel(hours: number): string {
-  if (hours % 24 === 0) {
-    const days = hours / 24;
-    return days === 1 ? "24H" : `${days}D`;
-  }
-  return `${hours}H`;
+  const option = WINDOW_PARAM_OPTIONS.find((o) => o.hours === hours);
+  return option ? option.label : `${hours}H`;
 }
 
 function getHistoryStateLabel(state: HistoryRenderState): string {
@@ -95,7 +88,12 @@ function App() {
   const [stats, setStats] = useState<StreamStats>({});
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
-  const [historyHours, setHistoryHours] = useState(24);
+  const [historyHours, setHistoryHours] = useUrlParam({
+    key: "window",
+    defaultValue: 24,
+    encode: encodeWindowParam,
+    decode: decodeWindowParam,
+  });
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
 
   const handleMessage = useCallback((newStats: StreamStats) => {
@@ -317,7 +315,7 @@ function App() {
             <div className="monitor-window-controls" role="group" aria-label="Analytics window">
               <p className="monitor-window-label">Analytics window</p>
               <div className="monitor-window-list">
-                {HISTORY_WINDOWS.map((window) => {
+                {WINDOW_PARAM_OPTIONS.map((window) => {
                   const selected = window.hours === historyHours;
                   return (
                     <button
