@@ -385,8 +385,8 @@ mod tests {
     #[test]
     fn test_jetstream_client_creation() {
         let endpoints = vec![
-            "jetstream1.us-east.bsky.network".to_string(),
-            "jetstream2.us-east.bsky.network".to_string(),
+            "jetstream.us-east.bsky.network".to_string(),
+            "jetstream.us-west.bsky.network".to_string(),
         ];
 
         let client = JetstreamClient::new(endpoints.clone(), "app.bsky.feed.post".to_string());
@@ -396,7 +396,7 @@ mod tests {
 
     #[test]
     fn test_jetstream_client_with_defaults() {
-        let endpoints = vec!["jetstream1.us-east.bsky.network".to_string()];
+        let endpoints = vec!["jetstream.us-east.bsky.network".to_string()];
         let client = JetstreamClient::with_defaults(endpoints);
         assert_eq!(client.wanted_collections, "app.bsky.feed.post");
     }

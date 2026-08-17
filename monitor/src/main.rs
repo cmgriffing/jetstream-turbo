@@ -18,11 +18,11 @@ const HOURLY_INTERVAL_SECONDS: u64 = 3600;
 const HOURLY_INTERVAL_SECONDS_I64: i64 = 3600;
 const HOURLY_UPTIME_CONTRACT_VERSION: i64 = 2;
 const BASELINE_1_URL: &str =
-    "wss://jetstream1.us-west.bsky.network/subscribe?wantedCollections=app.bsky.feed.post";
+    "wss://jetstream.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post";
 const BASELINE_2_URL: &str =
-    "wss://jetstream2.us-west.bsky.network/subscribe?wantedCollections=app.bsky.feed.post";
-const BASELINE_1_NAME: &str = "Baseline 1 (jetstream1.us-west)";
-const BASELINE_2_NAME: &str = "Baseline 2 (jetstream2.us-west)";
+    "wss://jetstream.us-west.bsky.network/subscribe?wantedCollections=app.bsky.feed.post";
+const BASELINE_1_NAME: &str = "Baseline 1 (jetstream.us-east)";
+const BASELINE_2_NAME: &str = "Baseline 2 (jetstream.us-west)";
 
 #[derive(Debug, Clone, Copy)]
 struct HourlyIntervalMetrics {

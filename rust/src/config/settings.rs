@@ -366,12 +366,8 @@ impl Settings {
 
 fn default_jetstream_hosts() -> Vec<String> {
     vec![
-        "jetstream1.us-east.bsky.network".to_string(),
-        "jetstream2.us-east.bsky.network".to_string(),
-        "jetstream1.us-west.bsky.network".to_string(),
-        "jetstream2.us-west.bsky.network".to_string(),
-        "jetstream1.eu-west.bsky.network".to_string(),
-        "jetstream2.eu-west.bsky.network".to_string(),
+        "jetstream.us-west.bsky.network".to_string(),
+        "jetstream.us-east.bsky.network".to_string(),
     ]
 }
 
