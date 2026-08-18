@@ -166,7 +166,7 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
 
         // Initialize semaphore for concurrency control
         let semaphore = Arc::new(Semaphore::new(
-            settings.max_concurrent_requests.max(1) as usize
+            settings.max_concurrent_requests.max(1)
         ));
 
         // Initialize monitor broadcast channel
@@ -237,7 +237,7 @@ where
                             if buffer.len() >= BATCH_SIZE {
                                 batch_reporter.record(BatchFlushReason::Full, buffer.len());
                                 batch_buffer.clear();
-                                batch_buffer.extend(buffer.drain(..));
+                                batch_buffer.append(&mut buffer);
                                 self.spawn_batch_processing(
                                     ingress_batch(std::mem::take(&mut batch_buffer))?,
                                     &mut batch_tasks,
@@ -260,7 +260,7 @@ where
                         };
                         batch_reporter.record(flush_reason, buffer.len());
                         batch_buffer.clear();
-                        batch_buffer.extend(buffer.drain(..));
+                        batch_buffer.append(&mut buffer);
                         self.spawn_batch_processing(
                             ingress_batch(std::mem::take(&mut batch_buffer))?,
                             &mut batch_tasks,

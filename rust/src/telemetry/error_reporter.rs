@@ -243,7 +243,7 @@ impl ErrorReporter {
                 } else if error_str.contains("timeout") || error_str.contains("connection") {
                     Err("Network error - unable to reach host".to_string())
                 } else {
-                    Err(format!("Connection failed: {}", e))
+                    Err(format!("Connection failed: {e}"))
                 }
             }
         }

@@ -593,10 +593,7 @@ fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> Strin
         &mut output,
         "jetstream_turbo_pipeline_ready",
         "Whether progress is currently healthy (1 = healthy, 0 = otherwise).",
-        (diagnostics.pipeline_progress.readiness_state
-            == crate::turbocharger::PipelineReadinessState::Healthy)
-            .then_some("1")
-            .unwrap_or("0")
+        if diagnostics.pipeline_progress.readiness_state == crate::turbocharger::PipelineReadinessState::Healthy { "1" } else { "0" }
             .to_string(),
     );
     output.push_str("# HELP jetstream_turbo_reconnects_total Upstream reconnects grouped by initiating reason.\n");

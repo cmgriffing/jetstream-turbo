@@ -479,7 +479,7 @@ impl ProfileBatchCollector {
                                     e,
                                     &body[..body.len().min(500)]
                                 );
-                                TurboError::InvalidApiResponse(format!("Failed to decode: {}", e))
+                                TurboError::InvalidApiResponse(format!("Failed to decode: {e}"))
                             })?;
                         let mut result = vec![None; dids.len()];
                         for (i, profile) in profiles_response.profiles.into_iter().enumerate() {
@@ -503,8 +503,7 @@ impl ProfileBatchCollector {
                         error!("Unauthorized - session may be invalid, attempting refresh");
                         if let Err(e) = self.refresh_session_with_fallback().await {
                             return Err(TurboError::ExpiredToken(format!(
-                                "Session refresh failed: {}",
-                                e
+                                "Session refresh failed: {e}"
                             )));
                         }
                         session_string = self.get_session_string().await?;
@@ -523,8 +522,7 @@ impl ProfileBatchCollector {
                             error!("Token expired, full error: {}", error_text);
                             if let Err(e) = self.refresh_session_with_fallback().await {
                                 return Err(TurboError::ExpiredToken(format!(
-                                    "Session refresh failed: {}",
-                                    e
+                                    "Session refresh failed: {e}"
                                 )));
                             }
                             session_string = self.get_session_string().await?;
@@ -569,7 +567,7 @@ impl ProfileBatchCollector {
         let mut remaining: Vec<String> = dids.into_iter().collect();
 
         while !remaining.is_empty() {
-            self.pending.extend(remaining.drain(..));
+            self.pending.append(&mut remaining);
 
             while self.pending.len() >= self.config.batch_size {
                 let batch: Vec<String> = self.pending.drain(..self.config.batch_size).collect();
@@ -589,7 +587,7 @@ impl ProfileBatchCollector {
                 self.last_flush = Instant::now();
             }
 
-            if self.pending.len() > 0
+            if !self.pending.is_empty()
                 && self.last_flush.elapsed() >= Duration::from_millis(self.config.wait_ms)
             {
                 let batch: Vec<String> = std::mem::take(&mut self.pending);
@@ -812,7 +810,7 @@ impl PostBatchCollector {
                                     e,
                                     &body[..body.len().min(500)]
                                 );
-                                TurboError::InvalidApiResponse(format!("Failed to decode: {}", e))
+                                TurboError::InvalidApiResponse(format!("Failed to decode: {e}"))
                             })?;
 
                         let mut results = vec![None; uris.len()];
@@ -838,8 +836,7 @@ impl PostBatchCollector {
                         error!("Unauthorized - session may be invalid, attempting refresh");
                         if let Err(e) = self.refresh_session_with_fallback().await {
                             return Err(TurboError::ExpiredToken(format!(
-                                "Session refresh failed: {}",
-                                e
+                                "Session refresh failed: {e}"
                             )));
                         }
                         session_string = self.get_session_string().await?;
@@ -858,8 +855,7 @@ impl PostBatchCollector {
                             error!("Token expired, full error: {}", error_text);
                             if let Err(e) = self.refresh_session_with_fallback().await {
                                 return Err(TurboError::ExpiredToken(format!(
-                                    "Session refresh failed: {}",
-                                    e
+                                    "Session refresh failed: {e}"
                                 )));
                             }
                             session_string = self.get_session_string().await?;
@@ -904,7 +900,7 @@ impl PostBatchCollector {
         let mut remaining: Vec<String> = uris.into_iter().collect();
 
         while !remaining.is_empty() {
-            self.pending.extend(remaining.drain(..));
+            self.pending.append(&mut remaining);
 
             while self.pending.len() >= self.config.batch_size {
                 let batch: Vec<String> = self.pending.drain(..self.config.batch_size).collect();
@@ -924,7 +920,7 @@ impl PostBatchCollector {
                 self.last_flush = Instant::now();
             }
 
-            if self.pending.len() > 0
+            if !self.pending.is_empty()
                 && self.last_flush.elapsed() >= Duration::from_millis(self.config.wait_ms)
             {
                 let batch: Vec<String> = std::mem::take(&mut self.pending);

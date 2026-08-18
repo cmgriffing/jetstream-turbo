@@ -10,7 +10,7 @@ pub fn init_tracing(log_level: &str) -> Result<(), Box<dyn std::error::Error>> {
         .with(filter)
         .with(tracing_subscriber::fmt::layer().json())
         .try_init()
-        .map_err(|e| format!("Failed to initialize logging: {}", e))?;
+        .map_err(|e| format!("Failed to initialize logging: {e}"))?;
 
     info!("Logging initialized with level: {}", log_level);
     Ok(())

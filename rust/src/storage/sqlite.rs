@@ -686,8 +686,7 @@ impl RecordStore for SQLiteStore {
         for chunk in records.chunks(MAX_ROWS_PER_INSERT) {
             let mut tx = self.pool.begin().await?;
 
-            let placeholders: String = std::iter::repeat(SINGLE_ROW_PLACEHOLDER)
-                .take(chunk.len())
+            let placeholders: String = std::iter::repeat_n(SINGLE_ROW_PLACEHOLDER, chunk.len())
                 .collect::<Vec<_>>()
                 .join(", ");
 
@@ -696,11 +695,10 @@ impl RecordStore for SQLiteStore {
                     at_uri, did, time_us, source_event_id, message, message_metadata,
                     created_at, hydrated_at, hydration_time_ms,
                     api_calls_count, cache_hit_rate, cache_hits, cache_misses
-                ) VALUES {}
+                ) VALUES {placeholders}
                 ON CONFLICT DO UPDATE SET
                     source_event_id = excluded.source_event_id
-                RETURNING id"#,
-                placeholders
+                RETURNING id"#
             );
 
             let mut query = sqlx::query(&insert_sql);
