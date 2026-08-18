@@ -1,5 +1,6 @@
 use crate::client::{
-    BlueskyAuthClient, BlueskyClient, JetstreamClient, MessageSource, PostFetcher, ProfileFetcher,
+    BlueskyAuthClient, BlueskyClient, ContainmentPolicy, JetstreamClient, MessageSource,
+    PostFetcher, ProfileFetcher, RequestRetryPolicy,
 };
 use crate::config::Settings;
 use crate::hydration::{Hydrator, TurboCache};
@@ -21,6 +22,7 @@ use crate::turbocharger::progress::PipelineStage;
 use crate::turbocharger::progress::{
     PipelineProgressSnapshot, PipelineReadinessState, ProgressThresholds,
 };
+use crate::turbocharger::{FailureSupervisor, RecoveryDecision};
 use futures::StreamExt;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -29,7 +31,7 @@ use std::time::Duration;
 use tokio::sync::{broadcast, Mutex, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::{interval, sleep, timeout_at, Instant};
-use tracing::{error, info, trace};
+use tracing::{error, info, trace, warn};
 
 const BATCH_SIZE: usize = 25;
 const BATCH_REPORT_LOG_TARGET: &str = "jetstream_turbo.batch_report";
@@ -56,6 +58,7 @@ pub struct TurboCharger<M, P, Po, S, E> {
     diagnostics_collector: DiagnosticsCollector,
     progress: Arc<PipelineProgress>,
     completion_frontier: Arc<Mutex<CompletionFrontier>>,
+    failure_supervisor: Arc<FailureSupervisor>,
 }
 
 impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, RedisStore> {
@@ -111,13 +114,25 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             "Successfully authenticated with Bluesky as {}",
             settings.bluesky_handle
         );
-        let bluesky_client = Arc::new(BlueskyClient::new(
+        let containment_policy = ContainmentPolicy {
+            min_delay: settings.recovery_min_delay,
+            max_delay: settings.recovery_max_delay,
+            persistence_threshold: settings.recovery_persistence_threshold,
+            isolation_request_budget: settings.isolation_request_budget,
+        };
+        let bluesky_client = Arc::new(BlueskyClient::new_with_policies(
             vec![auth_response.access_jwt.clone()],
             Some(auth_client.clone()),
             settings.profile_batch_size,
             settings.post_batch_size,
             settings.profile_batch_wait_ms,
             settings.post_batch_wait_ms,
+            RequestRetryPolicy {
+                max_retries: settings.max_retries,
+                base_delay: settings.retry_base_delay,
+                max_delay: settings.retry_max_delay,
+            },
+            containment_policy,
         )?);
         bluesky_client
             .refresh_sessions(
@@ -187,6 +202,7 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             diagnostics_collector: DiagnosticsCollector::default(),
             progress,
             completion_frontier,
+            failure_supervisor: Arc::new(FailureSupervisor::new(containment_policy)),
         })
     }
 }
@@ -325,6 +341,54 @@ where
         Err(TurboError::Internal("Jetstream stream ended".to_string()))
     }
 
+    pub async fn record_run_failure(&self, error: &TurboError) -> RecoveryDecision {
+        let checkpoint_ordinal = match self.sqlite_store.load_ingestion_checkpoint().await {
+            Ok(checkpoint) => checkpoint.map(|checkpoint| checkpoint.ingress_ordinal),
+            Err(checkpoint_error) => {
+                error!(error = %checkpoint_error, "Could not load checkpoint while recording run failure");
+                None
+            }
+        };
+        let decision = self
+            .failure_supervisor
+            .record_failure(error, checkpoint_ordinal);
+        self.bluesky_client
+            .set_failure_recurrence(decision.recurrence);
+        let snapshot = self.failure_supervisor.snapshot();
+        metrics::gauge!("pipeline_failure_recurrence").set(decision.recurrence as f64);
+        metrics::gauge!("pipeline_recovery_delay_seconds").set(decision.delay.as_secs_f64());
+        metrics::gauge!("pipeline_failure_persistent").set(if decision.persistent {
+            1.0
+        } else {
+            0.0
+        });
+        if decision.log_terminal {
+            error!(
+                fingerprint = snapshot.fingerprint.as_deref(),
+                operation = snapshot.operation.as_deref(),
+                category = snapshot.category.as_deref(),
+                recurrence = decision.recurrence,
+                persistent = decision.persistent,
+                retryable = decision.retryable,
+                recovery_delay_ms = decision.delay.as_millis(),
+                isolation = ?snapshot.isolation,
+                "TurboCharger run failure entered containment"
+            );
+        } else {
+            warn!(
+                fingerprint = snapshot.fingerprint.as_deref(),
+                recurrence = decision.recurrence,
+                recovery_delay_ms = decision.delay.as_millis(),
+                "Repeated TurboCharger failure remains contained"
+            );
+        }
+        decision
+    }
+
+    pub fn minimum_recovery_delay(&self) -> Duration {
+        self.settings.recovery_min_delay
+    }
+
     async fn spawn_batch_processing(
         &self,
         batch: IngressBatch,
@@ -441,6 +505,23 @@ where
         )
         .await?
         {
+            if let Some(recovered) = self
+                .failure_supervisor
+                .observe_checkpoint(checkpoint.ingress_ordinal)
+            {
+                self.bluesky_client.set_failure_recurrence(0);
+                metrics::gauge!("pipeline_failure_recurrence").set(0.0);
+                metrics::gauge!("pipeline_failure_persistent").set(0.0);
+                info!(
+                    fingerprint = recovered.fingerprint.as_deref(),
+                    final_recurrence = recovered.recurrence,
+                    duration_ms = recovered
+                        .first_occurrence_unix_ms
+                        .zip(recovered.last_occurrence_unix_ms)
+                        .map(|(first, last)| last.saturating_sub(first)),
+                    "Durable checkpoint progress cleared failure containment"
+                );
+            }
             let became_live = self.progress.checkpoint_committed(
                 checkpoint.cursor.time_us,
                 Duration::from_secs(self.settings.jetstream_committed_lag_threshold_secs),
@@ -731,6 +812,7 @@ where
         let diagnostics = self
             .collect_health_diagnostics(redis_healthy, sqlite_available, pipeline_progress.clone())
             .await;
+        let containment = diagnostics.failure_containment.clone();
 
         let dependency_healthy = redis_healthy && sqlite_available && session_count > 0;
         let transport_connected = pipeline_progress.connected_endpoint.is_some();
@@ -750,6 +832,21 @@ where
                 state: PipelineReadinessState::Stale,
                 stage: Some(PipelineStage::Ingress),
                 reason: Some("input_drop_correctness_failure".to_string()),
+                transport_connected,
+                recovery_phase,
+                unrecoverable_gap: None,
+            }
+        } else if containment.persistent {
+            ReadinessDiagnostics {
+                state: PipelineReadinessState::Stale,
+                stage: Some(PipelineStage::Hydration),
+                reason: Some(format!(
+                    "persistent_{}",
+                    containment
+                        .category
+                        .as_deref()
+                        .unwrap_or("upstream_failure")
+                )),
                 transport_connected,
                 recovery_phase,
                 unrecoverable_gap: None,
@@ -790,7 +887,7 @@ where
                 session_count,
                 &pipeline_progress,
                 self.settings.pipeline_progress_readiness_enabled,
-            ),
+            ) && !containment.persistent,
             redis_connected: redis_healthy,
             sqlite_available,
             session_count,
@@ -901,6 +998,7 @@ where
             sqlite_state,
             not_redis_state,
             pipeline_progress,
+            self.failure_supervisor.snapshot(),
         )
     }
 
@@ -1173,6 +1271,9 @@ impl BatchReporter {
 mod tests {
     use super::*;
     use crate::client::ProfileFetcher;
+    use crate::client::{
+        BlueskyOperation, ContainmentPolicy, UpstreamFailureCategory, UpstreamHttpError,
+    };
     use crate::hydration::TurboCache;
     use crate::models::bluesky::BlueskyProfile;
     use crate::models::enriched::EnrichedRecord;
@@ -1276,6 +1377,106 @@ mod tests {
             start_cursor: cursor(start),
             end_cursor: cursor(end),
         }
+    }
+
+    fn replay_failure() -> TurboError {
+        UpstreamHttpError {
+            operation: BlueskyOperation::Profiles,
+            status: Some(502),
+            category: UpstreamFailureCategory::ServerError,
+            body_excerpt: None,
+            attempts: 2,
+            transient: true,
+            request_fingerprint: "safe-replayed-batch".to_string(),
+            isolation: None,
+        }
+        .into()
+    }
+
+    fn containment_policy() -> ContainmentPolicy {
+        ContainmentPolicy {
+            min_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(8),
+            persistence_threshold: 2,
+            isolation_request_budget: 4,
+        }
+    }
+
+    #[tokio::test]
+    async fn replayed_failure_increases_delay_and_keeps_checkpoint_blocked() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = SQLiteStore::new(
+            temp_dir.path().join("replay-failure.db"),
+            SQLitePragmaConfig {
+                cache_size_kib: 1024,
+                mmap_size_mb: 1,
+                journal_size_limit_mb: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let frontier = Mutex::new(CompletionFrontier::new(None));
+        let supervisor = FailureSupervisor::new(containment_policy());
+
+        let first = supervisor.record_failure(&replay_failure(), None);
+        let replay = supervisor.record_failure(&replay_failure(), None);
+        persist_batch_completion(
+            &frontier,
+            &store,
+            BatchCompletion {
+                processed_count: 2,
+                range: test_ingress_range(3, 4),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(replay.delay > first.delay);
+        assert!(
+            replay.persistent,
+            "persistent containment drives stale readiness"
+        );
+        assert_eq!(supervisor.snapshot().recurrence, 2);
+        assert_eq!(store.load_ingestion_checkpoint().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn replay_recovery_advances_checkpoint_and_resets_containment() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = SQLiteStore::new(
+            temp_dir.path().join("replay-recovery.db"),
+            SQLitePragmaConfig {
+                cache_size_kib: 1024,
+                mmap_size_mb: 1,
+                journal_size_limit_mb: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let frontier = Mutex::new(CompletionFrontier::new(None));
+        let supervisor = FailureSupervisor::new(containment_policy());
+        supervisor.record_failure(&replay_failure(), None);
+        supervisor.record_failure(&replay_failure(), None);
+
+        let checkpoint = persist_batch_completion(
+            &frontier,
+            &store,
+            BatchCompletion {
+                processed_count: 2,
+                range: test_ingress_range(1, 2),
+            },
+        )
+        .await
+        .unwrap()
+        .expect("formerly blocked replay should advance checkpoint");
+        assert!(supervisor
+            .observe_checkpoint(checkpoint.ingress_ordinal)
+            .is_some());
+        assert!(!supervisor.snapshot().active);
+
+        let next = supervisor.record_failure(&replay_failure(), Some(checkpoint.ingress_ordinal));
+        assert_eq!(next.recurrence, 1);
+        assert_eq!(next.delay, containment_policy().min_delay);
     }
 
     #[test]

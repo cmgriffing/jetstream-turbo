@@ -75,23 +75,18 @@ impl BlueskyAuthClient {
                 Ok(resp) => match resp.status() {
                     reqwest::StatusCode::OK => {
                         let body_text = resp.text().await?;
-                        trace!("Auth response body: {}", body_text);
-
                         let auth_response: AuthResponse = match serde_json::from_str(&body_text) {
                             Ok(r) => r,
                             Err(e) => {
-                                error!("Failed to parse auth response: {}. Body: {}", e, body_text);
+                                error!(error = %e, "Failed to parse Bluesky authentication response");
                                 return Err(TurboError::InvalidApiResponse(format!(
-                                    "Failed to parse auth response: {e}. Response: {body_text}"
+                                    "Failed to parse authentication response: {e}"
                                 )));
                             }
                         };
 
                         if auth_response.access_jwt.is_empty() {
-                            error!(
-                                "Auth response missing access_jwt. Full response: {:?}",
-                                auth_response
-                            );
+                            error!("Bluesky authentication response missing access token");
                             return Err(TurboError::InvalidApiResponse(
                                 "Auth response missing access_jwt field".to_string(),
                             ));
@@ -115,15 +110,17 @@ impl BlueskyAuthClient {
                         tokio::time::sleep(self.retry_delay * 2).await;
                     }
                     status => {
-                        let error_text = resp.text().await.unwrap_or_default();
-                        error!("Bluesky auth error {}: {}", status, error_text);
+                        error!(
+                            status = status.as_u16(),
+                            "Bluesky authentication request failed"
+                        );
                         return Err(TurboError::InvalidApiResponse(format!(
-                            "Status {status}: {error_text}"
+                            "Authentication request returned status {status}"
                         )));
                     }
                 },
                 Err(e) => {
-                    error!("HTTP request failed: {}", e);
+                    error!("Bluesky authentication transport request failed");
                     if attempt >= self.max_retries {
                         return Err(TurboError::HttpRequest(Box::new(e)));
                     }
@@ -171,21 +168,16 @@ impl BlueskyAuthClient {
         match response.status() {
             reqwest::StatusCode::OK => {
                 let body_text = response.text().await?;
-                trace!("Refresh response body: {}", body_text);
-
                 let auth_response: AuthResponse =
                     serde_json::from_str(&body_text).map_err(|e| {
-                        error!("Failed to parse refresh response: {}", e);
+                        error!(error = %e, "Failed to parse Bluesky session refresh response");
                         TurboError::InvalidApiResponse(format!(
-                            "Failed to parse refresh response: {e}. Response: {body_text}"
+                            "Failed to parse session refresh response: {e}"
                         ))
                     })?;
 
                 if auth_response.access_jwt.is_empty() {
-                    error!(
-                        "Refresh response missing access_jwt. Full response: {:?}",
-                        auth_response
-                    );
+                    error!("Bluesky session refresh response missing access token");
                     return Err(TurboError::InvalidApiResponse(
                         "Refresh response missing access_jwt field".to_string(),
                     ));
@@ -205,10 +197,12 @@ impl BlueskyAuthClient {
                 ))
             }
             status => {
-                let error_text = response.text().await.unwrap_or_default();
-                error!("Bluesky refresh error {}: {}", status, error_text);
+                error!(
+                    status = status.as_u16(),
+                    "Bluesky session refresh request failed"
+                );
                 Err(TurboError::InvalidApiResponse(format!(
-                    "Status {status}: {error_text}"
+                    "Session refresh request returned status {status}"
                 )))
             }
         }

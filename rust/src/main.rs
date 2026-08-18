@@ -114,25 +114,27 @@ async fn main() -> Result<()> {
     let turbocharger_clone = turbocharger.clone();
     let error_reporter_clone = error_reporter.clone();
     let turbocharger_handle = tokio::spawn(async move {
-        let restart_delay = Duration::from_secs(5);
-
         loop {
-            match turbocharger_clone.run().await {
+            let restart_delay = match turbocharger_clone.run().await {
                 Ok(()) => {
                     tracing::warn!("Turbocharger run loop ended unexpectedly; restarting");
+                    turbocharger_clone.minimum_recovery_delay()
                 }
                 Err(e) => {
-                    tracing::error!("Turbocharger failed: {}", e);
-                    let mut ctx = HashMap::new();
-                    ctx.insert("component", "main");
-                    ctx.insert("operation", "turbocharger_run");
-                    error_reporter_clone.capture_error(&e, ctx);
+                    let decision = turbocharger_clone.record_run_failure(&e).await;
+                    if decision.log_terminal {
+                        let mut ctx = HashMap::new();
+                        ctx.insert("component", "main");
+                        ctx.insert("operation", "turbocharger_run");
+                        error_reporter_clone.capture_error(&e, ctx);
+                    }
+                    decision.delay
                 }
-            }
+            };
 
             tracing::warn!(
-                "Restarting turbocharger run loop in {} seconds",
-                restart_delay.as_secs()
+                recovery_delay_ms = restart_delay.as_millis(),
+                "Restarting turbocharger run loop after containment delay"
             );
             tokio::time::sleep(restart_delay).await;
         }

@@ -1,6 +1,7 @@
 use crate::turbocharger::progress::{
     PipelineProgressSnapshot, PipelineReadinessState, PipelineStage,
 };
+use crate::turbocharger::FailureContainmentSnapshot;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::process::Command;
@@ -43,6 +44,7 @@ pub struct HealthDiagnostics {
     pub sqlite_state: SQLiteStateDiagnostics,
     pub not_redis_state: NotRedisStateDiagnostics,
     pub pipeline_progress: PipelineProgressSnapshot,
+    pub failure_containment: FailureContainmentSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -158,6 +160,7 @@ impl DiagnosticsCollector {
         sqlite_state: SQLiteStateDiagnostics,
         not_redis_state: NotRedisStateDiagnostics,
         pipeline_progress: PipelineProgressSnapshot,
+        failure_containment: FailureContainmentSnapshot,
     ) -> HealthDiagnostics {
         HealthDiagnostics {
             process_memory,
@@ -165,6 +168,7 @@ impl DiagnosticsCollector {
             sqlite_state,
             not_redis_state,
             pipeline_progress,
+            failure_containment,
         }
     }
 }

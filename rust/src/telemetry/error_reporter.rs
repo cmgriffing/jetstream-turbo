@@ -196,6 +196,7 @@ impl ErrorReporter {
             TurboError::NotFound(_) => "NotFound",
             TurboError::PermissionDenied(_) => "PermissionDenied",
             TurboError::ExpiredToken(_) => "ExpiredToken",
+            TurboError::BlueskyUpstream(_) => "BlueskyUpstream",
         }
         .to_string()
     }

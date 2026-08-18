@@ -586,10 +586,28 @@ Pipeline diagnostics are always present at `/api/v1/health`; that endpoint remai
 | `PIPELINE_DEADLINES_ENABLED` | `false` | Enables the legacy batch execution deadline only; it does not control Jetstream recovery safety. |
 | `PIPELINE_PROGRESS_READINESS_ENABLED` | `false` | Makes progress participate in `/ready`. |
 
+### Bluesky request resilience and replay containment
+
+| Environment variable | Default | Purpose |
+| --- | ---: | --- |
+| `BLUESKY_MAX_RETRIES` | `3` | Additional profile/post attempts after the initial request. `0` means one request total; classification and terminal telemetry remain enabled. |
+| `BLUESKY_RETRY_BASE_DELAY_MS` | `100` | Nonzero base for jittered exponential request backoff. |
+| `BLUESKY_RETRY_MAX_DELAY_MS` | `5000` | Request-delay cap, including valid delta-seconds `Retry-After` values on 429 and 503 responses. |
+| `BLUESKY_RECOVERY_MIN_DELAY_MS` | `5000` | Initial run-loop recovery delay after a contained failure. |
+| `BLUESKY_RECOVERY_MAX_DELAY_MS` | `300000` | Maximum run-loop recovery delay for a repeatedly replayed failure. |
+| `BLUESKY_RECOVERY_PERSISTENCE_THRESHOLD` | `3` | Matching failures required to mark readiness stale and enable bounded bulk isolation. Must be positive. |
+| `BLUESKY_ISOLATION_REQUEST_BUDGET` | `8` | Maximum split probes in one recovery cycle. Must be positive. |
+
+Transport errors, HTTP 408/429/5xx, and bounded authentication recovery share one request attempt counter. A request can therefore issue at most `BLUESKY_MAX_RETRIES + 1` HTTP calls. Permanent non-authentication 4xx responses and malformed successful bodies fail immediately. Valid `Retry-After` HTTP-date values are intentionally unsupported; only delta-seconds are accepted.
+
+After a matching failure recurs without durable checkpoint progress, the run-loop delay grows exponentially to its configured cap. At the persistence threshold, a failing bulk lookup can be split deterministically within the probe budget. Successful halves are retained for the next replay, but a broad outage, isolated singleton, or inconclusive budget exhaustion still fails the batch. No partially enriched event is published and the contiguous checkpoint cannot advance past the blocked batch. The configured batch execution deadline, when enabled, remains an additional outer bound across request retries, isolation, storage, and publication.
+
+Containment state, recurrence, safe fingerprint, first/last occurrence, isolation outcome, and current delay are exposed in health diagnostics. Logs and metric labels contain bounded categories and safe hashes rather than raw DIDs, AT URIs, query strings, response bodies, or session credentials. Durable checkpoint advancement beyond the blocked work clears containment and restores the minimum recovery delay.
+
 The health snapshot includes transport connectivity, recovery phase, received and committed cursor lag, endpoint attempts/failures, replay and duplicate totals, queue pressure, input drops, reconnect reasons, and any unrecoverable cursor gap. A connected transport can still be `Replaying` or `CatchingUp`; readiness reports recovery until committed lag converges. Any input drop or unrecoverable gap is a correctness failure.
 
 Alert on `UnrecoverableGap` immediately. Alert separately on non-converging committed lag, prolonged `Connecting`/`Replaying`/`CatchingUp`, exhausted endpoint sweeps, useful-data/connect timeouts, sustained blocked-send duration, duplicate spikes, and any nonzero input-drop counter. Page on committed lag and correctness failures; transport disconnects that fail over and reconverge can remain lower severity.
 
 For rollout, retain the defaults, deploy the additive SQLite schema first, and watch committed lag, duplicate rate, hydration pressure, and blocked-send duration while replay converges. Downstream consumers must deduplicate on `source_event_id`; Redis stream IDs are not stable across the publish-before-checkpoint crash boundary.
 
-For emergency rollback, set `JETSTREAM_CURSOR_REPLAY_ENABLED=false` to reconnect at the live tip and `JETSTREAM_RECOVERY_DEADLINES_ENABLED=false` to disable the dedicated connection/useful-data deadlines. The additive checkpoint and source-ID columns remain safe for older behavior to ignore. This rollback can skip uncommitted upstream traffic, so use it only with explicit incident authorization and retain the database for later reconciliation.
+For emergency rollback, set `JETSTREAM_CURSOR_REPLAY_ENABLED=false` to reconnect at the live tip and `JETSTREAM_RECOVERY_DEADLINES_ENABLED=false` to disable the dedicated connection/useful-data deadlines. The additive checkpoint and source-ID columns remain safe for older behavior to ignore. Disabling cursor replay is an unsafe incident-only escape hatch: it can skip the blocked event and other uncommitted upstream traffic. Use it only with explicit incident authorization and retain the database for later reconciliation.

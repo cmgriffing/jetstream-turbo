@@ -21,6 +21,9 @@ pub enum TurboError {
     #[error("Invalid response from API: {0}")]
     InvalidApiResponse(String),
 
+    #[error(transparent)]
+    BlueskyUpstream(#[from] crate::client::resilience::UpstreamHttpError),
+
     // Configuration errors
     #[error("Configuration error: {0}")]
     Configuration(#[source] Box<config::ConfigError>),
@@ -109,17 +112,18 @@ impl_boxed_from!(TaskJoin, tokio::task::JoinError);
 
 impl TurboError {
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
+        match self {
+            TurboError::BlueskyUpstream(error) => error.transient,
             TurboError::HttpRequest(_)
-                | TurboError::RateLimitExceeded
-                | TurboError::Database(_)
-                | TurboError::RedisOperation(_)
-                | TurboError::WebSocketConnection(_)
-                | TurboError::Timeout(_)
-                | TurboError::BatchStageTimeout { .. }
-                | TurboError::ExpiredToken(_)
-        )
+            | TurboError::RateLimitExceeded
+            | TurboError::Database(_)
+            | TurboError::RedisOperation(_)
+            | TurboError::WebSocketConnection(_)
+            | TurboError::Timeout(_)
+            | TurboError::BatchStageTimeout { .. }
+            | TurboError::ExpiredToken(_) => true,
+            _ => false,
+        }
     }
 
     pub fn is_critical(&self) -> bool {

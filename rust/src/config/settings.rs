@@ -79,6 +79,16 @@ pub struct Settings {
     pub max_retries: u32,
     #[serde(skip)]
     pub retry_base_delay: Duration,
+    #[serde(skip)]
+    pub retry_max_delay: Duration,
+
+    // Persistent Bluesky Failure Containment
+    #[serde(skip)]
+    pub recovery_min_delay: Duration,
+    #[serde(skip)]
+    pub recovery_max_delay: Duration,
+    pub recovery_persistence_threshold: u32,
+    pub isolation_request_budget: u32,
 
     // Metrics Configuration
     pub statsd_host: Option<String>,
@@ -143,6 +153,11 @@ impl Default for Settings {
             cache_size_posts: 40_000,
             max_retries: 3,
             retry_base_delay: Duration::from_millis(100),
+            retry_max_delay: Duration::from_secs(5),
+            recovery_min_delay: Duration::from_secs(5),
+            recovery_max_delay: Duration::from_secs(5 * 60),
+            recovery_persistence_threshold: 3,
+            isolation_request_budget: 8,
             statsd_host: None,
             statsd_port: None,
             posthog_api_key: None,
@@ -297,6 +312,16 @@ impl Settings {
             builder = builder.set_override("pipeline_deadlines_enabled", value)?;
         }
 
+        if let Ok(value) = std::env::var("BLUESKY_MAX_RETRIES") {
+            builder = builder.set_override("max_retries", value)?;
+        }
+        if let Ok(value) = std::env::var("BLUESKY_RECOVERY_PERSISTENCE_THRESHOLD") {
+            builder = builder.set_override("recovery_persistence_threshold", value)?;
+        }
+        if let Ok(value) = std::env::var("BLUESKY_ISOLATION_REQUEST_BUDGET") {
+            builder = builder.set_override("isolation_request_budget", value)?;
+        }
+
         if let Ok(trim_maxlen) = std::env::var("TRIM_MAXLEN") {
             builder = builder.set_override("trim_maxlen", trim_maxlen)?;
         }
@@ -311,6 +336,22 @@ impl Settings {
 
         let settings = builder.build()?;
         let mut settings: Settings = settings.try_deserialize()?;
+        settings.retry_base_delay = duration_from_env_ms(
+            "BLUESKY_RETRY_BASE_DELAY_MS",
+            Settings::default().retry_base_delay,
+        )?;
+        settings.retry_max_delay = duration_from_env_ms(
+            "BLUESKY_RETRY_MAX_DELAY_MS",
+            Settings::default().retry_max_delay,
+        )?;
+        settings.recovery_min_delay = duration_from_env_ms(
+            "BLUESKY_RECOVERY_MIN_DELAY_MS",
+            Settings::default().recovery_min_delay,
+        )?;
+        settings.recovery_max_delay = duration_from_env_ms(
+            "BLUESKY_RECOVERY_MAX_DELAY_MS",
+            Settings::default().recovery_max_delay,
+        )?;
         settings.posthog_api_key = normalize_optional_setting(settings.posthog_api_key);
         settings.posthog_host = normalize_optional_setting(settings.posthog_host);
 
@@ -403,6 +444,27 @@ impl Settings {
             anyhow::bail!("readiness_recovery_successes must be greater than 0");
         }
 
+        if self.retry_base_delay.is_zero() {
+            anyhow::bail!("BLUESKY_RETRY_BASE_DELAY_MS must be greater than 0");
+        }
+        if self.retry_base_delay > self.retry_max_delay {
+            anyhow::bail!("BLUESKY_RETRY_BASE_DELAY_MS must not exceed BLUESKY_RETRY_MAX_DELAY_MS");
+        }
+        if self.recovery_min_delay.is_zero() {
+            anyhow::bail!("BLUESKY_RECOVERY_MIN_DELAY_MS must be greater than 0");
+        }
+        if self.recovery_min_delay > self.recovery_max_delay {
+            anyhow::bail!(
+                "BLUESKY_RECOVERY_MIN_DELAY_MS must not exceed BLUESKY_RECOVERY_MAX_DELAY_MS"
+            );
+        }
+        if self.recovery_persistence_threshold == 0 {
+            anyhow::bail!("BLUESKY_RECOVERY_PERSISTENCE_THRESHOLD must be greater than 0");
+        }
+        if self.isolation_request_budget == 0 {
+            anyhow::bail!("BLUESKY_ISOLATION_REQUEST_BUDGET must be greater than 0");
+        }
+
         if self.cache_size_users == 0 || self.cache_size_posts == 0 {
             anyhow::bail!("cache_size_users and cache_size_posts must be greater than 0");
         }
@@ -457,6 +519,19 @@ fn normalize_optional_setting(value: Option<String>) -> Option<String> {
     })
 }
 
+fn duration_from_env_ms(name: &str, default: Duration) -> Result<Duration> {
+    match std::env::var(name) {
+        Ok(value) => {
+            let millis = value.parse::<u64>().map_err(|error| {
+                anyhow::anyhow!("{name} must be an integer number of milliseconds: {error}")
+            })?;
+            Ok(Duration::from_millis(millis))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(anyhow::anyhow!("failed to read {name}: {error}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,6 +568,13 @@ mod tests {
         assert_eq!(settings.sqlite_cache_size_kib, 64 * 1024);
         assert_eq!(settings.sqlite_mmap_size_mb, 256);
         assert_eq!(settings.sqlite_journal_size_limit_mb, 512);
+        assert_eq!(settings.max_retries, 3);
+        assert_eq!(settings.retry_base_delay, Duration::from_millis(100));
+        assert_eq!(settings.retry_max_delay, Duration::from_secs(5));
+        assert_eq!(settings.recovery_min_delay, Duration::from_secs(5));
+        assert_eq!(settings.recovery_max_delay, Duration::from_secs(300));
+        assert_eq!(settings.recovery_persistence_threshold, 3);
+        assert_eq!(settings.isolation_request_budget, 8);
     }
 
     #[test]
@@ -564,6 +646,24 @@ mod tests {
         assert!(settings.validate().is_err());
         settings.readiness_recovery_successes = 1;
         assert!(settings.validate().is_ok());
+
+        settings.retry_base_delay = Duration::ZERO;
+        assert!(settings.validate().is_err());
+        settings.retry_base_delay = Duration::from_millis(100);
+        settings.retry_max_delay = Duration::from_millis(99);
+        assert!(settings.validate().is_err());
+        settings.retry_max_delay = Duration::from_millis(100);
+        settings.recovery_min_delay = Duration::ZERO;
+        assert!(settings.validate().is_err());
+        settings.recovery_min_delay = Duration::from_secs(1);
+        settings.recovery_max_delay = Duration::from_millis(999);
+        assert!(settings.validate().is_err());
+        settings.recovery_max_delay = Duration::from_secs(1);
+        settings.recovery_persistence_threshold = 0;
+        assert!(settings.validate().is_err());
+        settings.recovery_persistence_threshold = 1;
+        settings.isolation_request_budget = 0;
+        assert!(settings.validate().is_err());
     }
 
     #[test]
@@ -587,6 +687,13 @@ mod tests {
             ("READINESS_RECOVERY_SUCCESSES", "5"),
             ("PIPELINE_PROGRESS_READINESS_ENABLED", "true"),
             ("PIPELINE_DEADLINES_ENABLED", "false"),
+            ("BLUESKY_MAX_RETRIES", "0"),
+            ("BLUESKY_RETRY_BASE_DELAY_MS", "25"),
+            ("BLUESKY_RETRY_MAX_DELAY_MS", "250"),
+            ("BLUESKY_RECOVERY_MIN_DELAY_MS", "1000"),
+            ("BLUESKY_RECOVERY_MAX_DELAY_MS", "9000"),
+            ("BLUESKY_RECOVERY_PERSISTENCE_THRESHOLD", "4"),
+            ("BLUESKY_ISOLATION_REQUEST_BUDGET", "6"),
         ];
         for (key, value) in values {
             std::env::set_var(key, value);
@@ -611,5 +718,12 @@ mod tests {
         assert_eq!(settings.readiness_recovery_successes, 5);
         assert!(settings.pipeline_progress_readiness_enabled);
         assert!(!settings.pipeline_deadlines_enabled);
+        assert_eq!(settings.max_retries, 0);
+        assert_eq!(settings.retry_base_delay, Duration::from_millis(25));
+        assert_eq!(settings.retry_max_delay, Duration::from_millis(250));
+        assert_eq!(settings.recovery_min_delay, Duration::from_secs(1));
+        assert_eq!(settings.recovery_max_delay, Duration::from_secs(9));
+        assert_eq!(settings.recovery_persistence_threshold, 4);
+        assert_eq!(settings.isolation_request_budget, 6);
     }
 }

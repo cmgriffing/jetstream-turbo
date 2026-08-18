@@ -1,3 +1,8 @@
+use crate::client::resilience::{
+    bounded_body_excerpt, bounded_exponential_jitter, retry_after_delta,
+    stable_identifier_fingerprint, transient_category, BlueskyOperation, ContainmentPolicy,
+    RequestRetryPolicy, UpstreamFailureCategory, UpstreamHttpError,
+};
 use crate::client::BlueskyAuthClient;
 use crate::models::{
     bluesky::{BlueskyPost, BlueskyProfile, GetPostsBulkResponse, GetProfilesResponse},
@@ -6,12 +11,13 @@ use crate::models::{
 use crate::utils::serde_utils::string_utils::is_valid_at_uri;
 use governor::{Quota, RateLimiter};
 use reqwest::{Client, StatusCode};
+use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::{error, info, instrument, trace, warn};
+use tracing::{error, info, instrument, warn};
 
 pub trait ProfileFetcher {
     fn bulk_fetch_profiles(
@@ -34,8 +40,7 @@ pub struct BlueskyClient {
     refresh_jwt: Arc<RwLock<Option<String>>>,
     expires_at: Arc<RwLock<Option<String>>>,
     auth_client: Option<Arc<BlueskyAuthClient>>,
-    #[allow(dead_code)]
-    retry_delay_ms: u64,
+    isolation_recurrence: Arc<AtomicU32>,
     profile_batch_collector: Arc<RwLock<ProfileBatchCollector>>,
     post_batch_collector: Arc<RwLock<PostBatchCollector>>,
 }
@@ -58,8 +63,9 @@ struct BatchCollectorDeps {
         >,
     >,
     api_base_url: String,
-    max_retries: u32,
-    retry_delay: Duration,
+    retry_policy: RequestRetryPolicy,
+    containment_policy: ContainmentPolicy,
+    isolation_recurrence: Arc<AtomicU32>,
     auth_client: Option<Arc<BlueskyAuthClient>>,
     refresh_jwt: Arc<RwLock<Option<String>>>,
     expires_at: Arc<RwLock<Option<String>>>,
@@ -79,13 +85,15 @@ struct ProfileBatchCollector {
         >,
     >,
     api_base_url: String,
-    max_retries: u32,
-    retry_delay: Duration,
+    retry_policy: RequestRetryPolicy,
+    containment_policy: ContainmentPolicy,
+    isolation_recurrence: Arc<AtomicU32>,
     auth_client: Option<Arc<BlueskyAuthClient>>,
     refresh_jwt: Arc<RwLock<Option<String>>>,
     expires_at: Arc<RwLock<Option<String>>>,
     batches_total: AtomicU64,
     batches_partial: AtomicU64,
+    isolation_cache: HashMap<String, Option<BlueskyProfile>>,
 }
 
 struct PostBatchCollector {
@@ -102,34 +110,142 @@ struct PostBatchCollector {
         >,
     >,
     api_base_url: String,
-    max_retries: u32,
-    retry_delay: Duration,
+    retry_policy: RequestRetryPolicy,
+    containment_policy: ContainmentPolicy,
+    isolation_recurrence: Arc<AtomicU32>,
     auth_client: Option<Arc<BlueskyAuthClient>>,
     refresh_jwt: Arc<RwLock<Option<String>>>,
     expires_at: Arc<RwLock<Option<String>>>,
     batches_total: AtomicU64,
     batches_partial: AtomicU64,
+    isolation_cache: HashMap<String, Option<BlueskyPost>>,
 }
 
-async fn handle_rate_limit_response(
-    response: &reqwest::Response,
-    attempt: u32,
-    retry_delay: Duration,
-) -> Option<Duration> {
-    if let Some(retry_after) = response.headers().get("retry-after") {
-        if let Ok(value) = retry_after.to_str() {
-            if let Ok(seconds) = value.parse::<u64>() {
-                trace!(
-                    "Rate limited: Retry-After header suggests {} seconds",
-                    seconds
-                );
-                return Some(Duration::from_secs(seconds));
-            }
+fn retry_entropy(fingerprint: &str, attempt: u32) -> u64 {
+    fingerprint.bytes().fold(attempt as u64, |state, byte| {
+        state.wrapping_mul(1099511628211) ^ byte as u64
+    })
+}
+
+fn retry_delay(
+    response: Option<&reqwest::Response>,
+    status: Option<StatusCode>,
+    retry_ordinal: u32,
+    policy: RequestRetryPolicy,
+    fingerprint: &str,
+) -> Duration {
+    if matches!(
+        status,
+        Some(StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE)
+    ) {
+        if let Some(delay) = retry_after_delta(
+            response.and_then(|response| response.headers().get("retry-after")),
+            policy.max_delay,
+        ) {
+            return delay;
         }
     }
+    bounded_exponential_jitter(
+        policy.base_delay,
+        policy.max_delay,
+        retry_ordinal,
+        retry_entropy(fingerprint, retry_ordinal),
+    )
+}
 
-    let backoff_ms = retry_delay.as_millis() as u64 * (2u64.pow(attempt.min(5)));
-    Some(Duration::from_millis(backoff_ms))
+fn upstream_error(
+    operation: BlueskyOperation,
+    identifiers: &[String],
+    status: Option<StatusCode>,
+    category: UpstreamFailureCategory,
+    body: Option<&str>,
+    attempts: u32,
+    transient: bool,
+) -> TurboError {
+    UpstreamHttpError {
+        operation,
+        status: status.map(|status| status.as_u16()),
+        category,
+        body_excerpt: body.map(bounded_body_excerpt),
+        attempts,
+        transient,
+        request_fingerprint: stable_identifier_fingerprint(identifiers),
+        isolation: None,
+    }
+    .into()
+}
+
+fn record_request_retry(
+    operation: BlueskyOperation,
+    category: UpstreamFailureCategory,
+    retry_ordinal: u32,
+    policy: RequestRetryPolicy,
+    delay: Duration,
+) {
+    metrics::counter!(
+        "bluesky_request_retries_total",
+        "operation" => operation.as_str(),
+        "category" => category.as_str(),
+        "retry_ordinal" => retry_ordinal.to_string(),
+        "retry_limit" => policy.max_retries.to_string(),
+    )
+    .increment(1);
+    metrics::histogram!(
+        "bluesky_request_retry_delay_seconds",
+        "operation" => operation.as_str(),
+        "category" => category.as_str(),
+    )
+    .record(delay.as_secs_f64());
+    warn!(
+        operation = operation.as_str(),
+        category = category.as_str(),
+        retry_ordinal,
+        retry_limit = policy.max_retries,
+        delay_ms = delay.as_millis(),
+        "Scheduling bounded Bluesky request retry"
+    );
+}
+
+fn record_request_exhaustion(
+    operation: BlueskyOperation,
+    category: UpstreamFailureCategory,
+    attempts: u32,
+    request_fingerprint: &str,
+) {
+    metrics::counter!(
+        "bluesky_request_exhaustions_total",
+        "operation" => operation.as_str(),
+        "category" => category.as_str(),
+        "attempts" => attempts.to_string(),
+    )
+    .increment(1);
+    error!(
+        operation = operation.as_str(),
+        category = category.as_str(),
+        attempts,
+        request_fingerprint,
+        "Bluesky request retry budget exhausted"
+    );
+}
+
+fn transient_upstream_category(error: &TurboError) -> Option<UpstreamFailureCategory> {
+    match error {
+        TurboError::BlueskyUpstream(error) if error.transient => Some(error.category),
+        _ => None,
+    }
+}
+
+fn with_isolation_outcome(
+    error: TurboError,
+    outcome: crate::client::IsolationOutcome,
+) -> TurboError {
+    match error {
+        TurboError::BlueskyUpstream(mut upstream) => {
+            upstream.isolation = Some(outcome);
+            TurboError::BlueskyUpstream(upstream)
+        }
+        other => other,
+    }
 }
 
 impl BlueskyClient {
@@ -140,6 +256,29 @@ impl BlueskyClient {
         post_batch_size: usize,
         profile_batch_wait_ms: u64,
         post_batch_wait_ms: u64,
+    ) -> TurboResult<Self> {
+        Self::new_with_policies(
+            session_strings,
+            auth_client,
+            profile_batch_size,
+            post_batch_size,
+            profile_batch_wait_ms,
+            post_batch_wait_ms,
+            RequestRetryPolicy::default(),
+            ContainmentPolicy::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_policies(
+        session_strings: Vec<String>,
+        auth_client: Option<Arc<BlueskyAuthClient>>,
+        profile_batch_size: usize,
+        post_batch_size: usize,
+        profile_batch_wait_ms: u64,
+        post_batch_wait_ms: u64,
+        retry_policy: RequestRetryPolicy,
+        containment_policy: ContainmentPolicy,
     ) -> TurboResult<Self> {
         let quota = Quota::with_period(Duration::from_millis(REQUESTS_PER_SECOND_MS))
             .expect("Valid quota")
@@ -160,16 +299,16 @@ impl BlueskyClient {
         let expires_at = Arc::new(RwLock::new(None));
         let rate_limiter = Arc::new(RateLimiter::direct(quota));
         let api_base_url = "https://bsky.social/xrpc".to_string();
-        let max_retries = 3;
-        let retry_delay = Duration::from_millis(200);
+        let isolation_recurrence = Arc::new(AtomicU32::new(0));
 
         let collector_deps = BatchCollectorDeps {
             http_client: http_client.clone(),
             session_strings: session_strings.clone(),
             rate_limiter: rate_limiter.clone(),
             api_base_url: api_base_url.clone(),
-            max_retries,
-            retry_delay,
+            retry_policy,
+            containment_policy,
+            isolation_recurrence: Arc::clone(&isolation_recurrence),
             auth_client: auth_client.clone(),
             refresh_jwt: refresh_jwt.clone(),
             expires_at: expires_at.clone(),
@@ -196,10 +335,15 @@ impl BlueskyClient {
             refresh_jwt,
             expires_at,
             auth_client,
-            retry_delay_ms: 200,
+            isolation_recurrence,
             profile_batch_collector,
             post_batch_collector,
         })
+    }
+
+    pub fn set_failure_recurrence(&self, recurrence: u32) {
+        self.isolation_recurrence
+            .store(recurrence, Ordering::Release);
     }
 
     pub async fn refresh_sessions(
@@ -258,7 +402,7 @@ impl BlueskyClient {
                         warn!("Refresh token expired, re-authenticating with credentials");
                     }
                     Err(e) => {
-                        error!("Session refresh failed: {}", e);
+                        error!("Bluesky session refresh failed");
                         return Err(e);
                     }
                 }
@@ -276,7 +420,7 @@ impl BlueskyClient {
                     Ok(())
                 }
                 Err(e) => {
-                    error!("Re-authentication failed: {}", e);
+                    error!("Bluesky re-authentication failed");
                     Err(e)
                 }
             }
@@ -342,12 +486,6 @@ impl PostFetcher for BlueskyClient {
                 filtered_count,
                 uris.len()
             );
-            trace!(
-                "Invalid URIs: {:?}",
-                uris.iter()
-                    .filter(|u| !is_valid_at_uri(u))
-                    .collect::<Vec<_>>()
-            );
         }
 
         if valid_uris.is_empty() {
@@ -369,8 +507,9 @@ impl ProfileBatchCollector {
             session_strings,
             rate_limiter,
             api_base_url,
-            max_retries,
-            retry_delay,
+            retry_policy,
+            containment_policy,
+            isolation_recurrence,
             auth_client,
             refresh_jwt,
             expires_at,
@@ -383,13 +522,15 @@ impl ProfileBatchCollector {
             session_strings,
             rate_limiter,
             api_base_url,
-            max_retries,
-            retry_delay,
+            retry_policy,
+            containment_policy,
+            isolation_recurrence,
             auth_client,
             refresh_jwt,
             expires_at,
             batches_total: AtomicU64::new(0),
             batches_partial: AtomicU64::new(0),
+            isolation_cache: HashMap::new(),
         }
     }
 
@@ -424,7 +565,7 @@ impl ProfileBatchCollector {
                         warn!("Refresh token expired, re-authenticating with credentials");
                     }
                     Err(e) => {
-                        error!("Session refresh failed: {}", e);
+                        error!("Bluesky session refresh failed");
                         return Err(e);
                     }
                 }
@@ -444,7 +585,7 @@ impl ProfileBatchCollector {
                     Ok(())
                 }
                 Err(e) => {
-                    error!("Re-authentication failed: {}", e);
+                    error!("Bluesky re-authentication failed");
                     Err(e)
                 }
             }
@@ -455,12 +596,18 @@ impl ProfileBatchCollector {
         }
     }
 
-    async fn fetch_batch(&self, dids: &[String]) -> TurboResult<Vec<Option<BlueskyProfile>>> {
+    async fn fetch_batch_with_retry(
+        &self,
+        dids: &[String],
+    ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
         let url = format!("{}/app.bsky.actor.getProfiles", self.api_base_url);
         let mut session_string = self.get_session_string().await?;
-        let mut attempt = 0;
+        let mut attempts = 0u32;
+        let operation = BlueskyOperation::Profiles;
+        let request_fingerprint = stable_identifier_fingerprint(dids);
 
         loop {
+            attempts = attempts.saturating_add(1);
             self.rate_limiter.until_ready().await;
 
             let mut query_params: Vec<(&str, &str)> = Vec::new();
@@ -480,14 +627,9 @@ impl ProfileBatchCollector {
                 Ok(resp) => match resp.status() {
                     StatusCode::OK => {
                         let body = resp.text().await?;
-                        trace!("Profiles response: {}", &body[..body.len().min(500)]);
                         let profiles_response: GetProfilesResponse = serde_json::from_str(&body)
                             .map_err(|e| {
-                                error!(
-                                    "Failed to parse profiles: {} - body: {}",
-                                    e,
-                                    &body[..body.len().min(500)]
-                                );
+                                error!(operation = operation.as_str(), error = %e, "Failed to decode Bluesky response");
                                 TurboError::InvalidApiResponse(format!("Failed to decode: {e}"))
                             })?;
                         let mut result = vec![None; dids.len()];
@@ -498,74 +640,269 @@ impl ProfileBatchCollector {
                         }
                         return Ok(result);
                     }
-                    StatusCode::TOO_MANY_REQUESTS => {
-                        warn!("Rate limited (profiles), waiting before retry");
-                        if let Some(wait_time) =
-                            handle_rate_limit_response(&resp, attempt, self.retry_delay).await
-                        {
-                            tokio::time::sleep(wait_time).await;
-                            continue;
-                        }
-                        tokio::time::sleep(self.retry_delay * 2).await;
-                    }
                     StatusCode::UNAUTHORIZED => {
-                        error!("Unauthorized - session may be invalid, attempting refresh");
-                        if let Err(e) = self.refresh_session_with_fallback().await {
-                            return Err(TurboError::ExpiredToken(format!(
-                                "Session refresh failed: {e}"
-                            )));
+                        if attempts > self.retry_policy.max_retries {
+                            return Err(upstream_error(
+                                operation,
+                                dids,
+                                Some(StatusCode::UNAUTHORIZED),
+                                UpstreamFailureCategory::Authentication,
+                                None,
+                                attempts,
+                                false,
+                            ));
+                        }
+                        if self.refresh_session_with_fallback().await.is_err() {
+                            return Err(TurboError::ExpiredToken(
+                                "Bluesky session recovery failed".to_string(),
+                            ));
                         }
                         session_string = self.get_session_string().await?;
-                        if attempt < self.max_retries {
-                            attempt += 1;
-                            continue;
-                        }
-                        return Err(TurboError::PermissionDenied(
-                            "Invalid session token".to_string(),
-                        ));
+                        continue;
                     }
                     StatusCode::BAD_REQUEST => {
                         let error_text = resp.text().await.unwrap_or_default();
                         let is_expired = error_text.contains("ExpiredToken");
                         if is_expired {
-                            error!("Token expired, full error: {}", error_text);
-                            if let Err(e) = self.refresh_session_with_fallback().await {
-                                return Err(TurboError::ExpiredToken(format!(
-                                    "Session refresh failed: {e}"
-                                )));
+                            if attempts > self.retry_policy.max_retries {
+                                return Err(upstream_error(
+                                    operation,
+                                    dids,
+                                    Some(StatusCode::BAD_REQUEST),
+                                    UpstreamFailureCategory::Authentication,
+                                    Some(&error_text),
+                                    attempts,
+                                    false,
+                                ));
+                            }
+                            if self.refresh_session_with_fallback().await.is_err() {
+                                return Err(TurboError::ExpiredToken(
+                                    "Bluesky session recovery failed".to_string(),
+                                ));
                             }
                             session_string = self.get_session_string().await?;
-                            if attempt < self.max_retries {
-                                attempt += 1;
-                                continue;
-                            }
+                            continue;
                         }
-                        error!("API error 400: {}", error_text);
-                        return Err(TurboError::InvalidApiResponse(format!(
-                            "Status 400: {error_text}"
-                        )));
+                        return Err(upstream_error(
+                            operation,
+                            dids,
+                            Some(StatusCode::BAD_REQUEST),
+                            UpstreamFailureCategory::PermanentResponse,
+                            Some(&error_text),
+                            attempts,
+                            false,
+                        ));
                     }
                     status => {
-                        let error_text = resp.text().await.unwrap_or_default();
-                        error!("API error {}: {}", status, error_text);
-                        return Err(TurboError::InvalidApiResponse(format!(
-                            "Status {status}: {error_text}"
-                        )));
+                        if let Some(category) = transient_category(status) {
+                            if attempts <= self.retry_policy.max_retries {
+                                let delay = retry_delay(
+                                    Some(&resp),
+                                    Some(status),
+                                    attempts,
+                                    self.retry_policy,
+                                    &request_fingerprint,
+                                );
+                                record_request_retry(
+                                    operation,
+                                    category,
+                                    attempts,
+                                    self.retry_policy,
+                                    delay,
+                                );
+                                tokio::time::sleep(delay).await;
+                                continue;
+                            }
+                            let body = resp.text().await.unwrap_or_default();
+                            let error = upstream_error(
+                                operation,
+                                dids,
+                                Some(status),
+                                category,
+                                Some(&body),
+                                attempts,
+                                true,
+                            );
+                            record_request_exhaustion(
+                                operation,
+                                category,
+                                attempts,
+                                &request_fingerprint,
+                            );
+                            return Err(error);
+                        }
+                        let body = resp.text().await.unwrap_or_default();
+                        return Err(upstream_error(
+                            operation,
+                            dids,
+                            Some(status),
+                            if status == StatusCode::FORBIDDEN {
+                                UpstreamFailureCategory::Permission
+                            } else {
+                                UpstreamFailureCategory::PermanentResponse
+                            },
+                            Some(&body),
+                            attempts,
+                            false,
+                        ));
                     }
                 },
-                Err(e) => {
-                    error!("HTTP request failed: {}", e);
-                    if attempt >= self.max_retries {
-                        return Err(TurboError::HttpRequest(Box::new(e)));
+                Err(_error) => {
+                    let category = UpstreamFailureCategory::Transport;
+                    if attempts > self.retry_policy.max_retries {
+                        record_request_exhaustion(
+                            operation,
+                            category,
+                            attempts,
+                            &request_fingerprint,
+                        );
+                        return Err(upstream_error(
+                            operation, dids, None, category, None, attempts, true,
+                        ));
+                    }
+                    let delay = retry_delay(
+                        None,
+                        None,
+                        attempts,
+                        self.retry_policy,
+                        &request_fingerprint,
+                    );
+                    record_request_retry(operation, category, attempts, self.retry_policy, delay);
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    async fn fetch_batch(&mut self, dids: &[String]) -> TurboResult<Vec<Option<BlueskyProfile>>> {
+        let unresolved = dids
+            .iter()
+            .filter(|did| !self.isolation_cache.contains_key(*did))
+            .cloned()
+            .collect::<Vec<_>>();
+        if unresolved.is_empty() {
+            return Ok(dids
+                .iter()
+                .map(|did| self.isolation_cache.get(did).cloned().unwrap_or(None))
+                .collect());
+        }
+
+        match self.fetch_batch_with_retry(&unresolved).await {
+            Ok(fetched) => {
+                let by_identifier = unresolved
+                    .into_iter()
+                    .zip(fetched)
+                    .collect::<HashMap<_, _>>();
+                Ok(dids
+                    .iter()
+                    .map(|did| {
+                        self.isolation_cache
+                            .get(did)
+                            .cloned()
+                            .unwrap_or_else(|| by_identifier.get(did).cloned().unwrap_or(None))
+                    })
+                    .collect())
+            }
+            Err(error)
+                if transient_upstream_category(&error).is_some()
+                    && unresolved.len() > 1
+                    && self.isolation_recurrence.load(Ordering::Acquire)
+                        >= self.containment_policy.persistence_threshold =>
+            {
+                self.isolate_profiles(unresolved, error).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn isolate_profiles(
+        &mut self,
+        mut identifiers: Vec<String>,
+        root_error: TurboError,
+    ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
+        let requested = identifiers.clone();
+        identifiers.sort_unstable();
+        let mut remaining_budget = self.containment_policy.isolation_request_budget;
+        let midpoint = identifiers.len() / 2;
+        let first_halves = vec![
+            identifiers[..midpoint].to_vec(),
+            identifiers[midpoint..].to_vec(),
+        ];
+        let mut failures = VecDeque::new();
+        let mut first_categories = Vec::new();
+        let mut last_error = root_error;
+
+        info!(
+            operation = BlueskyOperation::Profiles.as_str(),
+            request_fingerprint = %stable_identifier_fingerprint(&identifiers),
+            request_budget = remaining_budget,
+            "Starting bounded Bluesky request isolation"
+        );
+
+        for half in first_halves {
+            if remaining_budget == 0 {
+                return Err(with_isolation_outcome(
+                    last_error,
+                    crate::client::IsolationOutcome::BudgetExhausted,
+                ));
+            }
+            remaining_budget -= 1;
+            match self.fetch_batch_with_retry(&half).await {
+                Ok(results) => {
+                    self.isolation_cache.extend(half.into_iter().zip(results));
+                }
+                Err(error) => {
+                    first_categories.push(transient_upstream_category(&error));
+                    last_error = error;
+                    failures.push_back(half);
+                }
+            }
+        }
+
+        if failures.len() == 2
+            && first_categories[0].is_some()
+            && first_categories[0] == first_categories[1]
+        {
+            return Err(with_isolation_outcome(
+                last_error,
+                crate::client::IsolationOutcome::BroadOutage {
+                    category: first_categories[0].expect("category checked"),
+                },
+            ));
+        }
+
+        while let Some(failing) = failures.pop_front() {
+            if failing.len() == 1 {
+                return Err(with_isolation_outcome(
+                    last_error,
+                    crate::client::IsolationOutcome::SingletonPoison {
+                        request_fingerprint: stable_identifier_fingerprint(&failing),
+                    },
+                ));
+            }
+            let midpoint = failing.len() / 2;
+            for subset in [failing[..midpoint].to_vec(), failing[midpoint..].to_vec()] {
+                if remaining_budget == 0 {
+                    return Err(with_isolation_outcome(
+                        last_error,
+                        crate::client::IsolationOutcome::BudgetExhausted,
+                    ));
+                }
+                remaining_budget -= 1;
+                match self.fetch_batch_with_retry(&subset).await {
+                    Ok(results) => self.isolation_cache.extend(subset.into_iter().zip(results)),
+                    Err(error) => {
+                        last_error = error;
+                        failures.push_back(subset);
                     }
                 }
             }
-
-            attempt += 1;
-            if attempt <= self.max_retries {
-                tokio::time::sleep(self.retry_delay * attempt).await;
-            }
         }
+
+        Ok(requested
+            .iter()
+            .map(|did| self.isolation_cache.get(did).cloned().unwrap_or(None))
+            .collect())
     }
 
     pub async fn add_and_fetch(
@@ -664,8 +1001,9 @@ impl PostBatchCollector {
             session_strings,
             rate_limiter,
             api_base_url,
-            max_retries,
-            retry_delay,
+            retry_policy,
+            containment_policy,
+            isolation_recurrence,
             auth_client,
             refresh_jwt,
             expires_at,
@@ -678,13 +1016,15 @@ impl PostBatchCollector {
             session_strings,
             rate_limiter,
             api_base_url,
-            max_retries,
-            retry_delay,
+            retry_policy,
+            containment_policy,
+            isolation_recurrence,
             auth_client,
             refresh_jwt,
             expires_at,
             batches_total: AtomicU64::new(0),
             batches_partial: AtomicU64::new(0),
+            isolation_cache: HashMap::new(),
         }
     }
 
@@ -719,7 +1059,7 @@ impl PostBatchCollector {
                         warn!("Refresh token expired, re-authenticating with credentials");
                     }
                     Err(e) => {
-                        error!("Session refresh failed: {}", e);
+                        error!("Bluesky session refresh failed");
                         return Err(e);
                     }
                 }
@@ -739,7 +1079,7 @@ impl PostBatchCollector {
                     Ok(())
                 }
                 Err(e) => {
-                    error!("Re-authentication failed: {}", e);
+                    error!("Bluesky re-authentication failed");
                     Err(e)
                 }
             }
@@ -778,12 +1118,18 @@ impl PostBatchCollector {
         }
     }
 
-    async fn fetch_batch(&self, uris: &[String]) -> TurboResult<Vec<Option<BlueskyPost>>> {
+    async fn fetch_batch_with_retry(
+        &self,
+        uris: &[String],
+    ) -> TurboResult<Vec<Option<BlueskyPost>>> {
         let url = format!("{}/app.bsky.feed.getPosts", self.api_base_url);
         let mut session_string = self.get_session_string().await?;
-        let mut attempt = 0;
+        let mut attempts = 0u32;
+        let operation = BlueskyOperation::Posts;
+        let request_fingerprint = stable_identifier_fingerprint(uris);
 
         loop {
+            attempts = attempts.saturating_add(1);
             self.rate_limiter.until_ready().await;
 
             let mut query_params: Vec<(&str, &str)> = Vec::new();
@@ -799,20 +1145,13 @@ impl PostBatchCollector {
                 .send()
                 .await;
 
-            trace!("Fetching posts for URIs: {:?}", uris);
-
             match response {
                 Ok(resp) => match resp.status() {
                     StatusCode::OK => {
                         let body = resp.text().await?;
-                        trace!("Posts response: {}", &body[..body.len().min(500)]);
                         let posts_response: GetPostsBulkResponse = serde_json::from_str(&body)
                             .map_err(|e| {
-                                error!(
-                                    "Failed to parse posts: {} - body: {}",
-                                    e,
-                                    &body[..body.len().min(500)]
-                                );
+                                error!(operation = operation.as_str(), error = %e, "Failed to decode Bluesky response");
                                 TurboError::InvalidApiResponse(format!("Failed to decode: {e}"))
                             })?;
 
@@ -825,74 +1164,267 @@ impl PostBatchCollector {
 
                         return Ok(results);
                     }
-                    StatusCode::TOO_MANY_REQUESTS => {
-                        warn!("Rate limited (posts), waiting before retry");
-                        if let Some(wait_time) =
-                            handle_rate_limit_response(&resp, attempt, self.retry_delay).await
-                        {
-                            tokio::time::sleep(wait_time).await;
-                            continue;
-                        }
-                        tokio::time::sleep(self.retry_delay * 2).await;
-                    }
                     StatusCode::UNAUTHORIZED => {
-                        error!("Unauthorized - session may be invalid, attempting refresh");
-                        if let Err(e) = self.refresh_session_with_fallback().await {
-                            return Err(TurboError::ExpiredToken(format!(
-                                "Session refresh failed: {e}"
-                            )));
+                        if attempts > self.retry_policy.max_retries {
+                            return Err(upstream_error(
+                                operation,
+                                uris,
+                                Some(StatusCode::UNAUTHORIZED),
+                                UpstreamFailureCategory::Authentication,
+                                None,
+                                attempts,
+                                false,
+                            ));
+                        }
+                        if self.refresh_session_with_fallback().await.is_err() {
+                            return Err(TurboError::ExpiredToken(
+                                "Bluesky session recovery failed".to_string(),
+                            ));
                         }
                         session_string = self.get_session_string().await?;
-                        if attempt < self.max_retries {
-                            attempt += 1;
-                            continue;
-                        }
-                        return Err(TurboError::PermissionDenied(
-                            "Invalid session token".to_string(),
-                        ));
+                        continue;
                     }
                     StatusCode::BAD_REQUEST => {
                         let error_text = resp.text().await.unwrap_or_default();
                         let is_expired = error_text.contains("ExpiredToken");
                         if is_expired {
-                            error!("Token expired, full error: {}", error_text);
-                            if let Err(e) = self.refresh_session_with_fallback().await {
-                                return Err(TurboError::ExpiredToken(format!(
-                                    "Session refresh failed: {e}"
-                                )));
+                            if attempts > self.retry_policy.max_retries {
+                                return Err(upstream_error(
+                                    operation,
+                                    uris,
+                                    Some(StatusCode::BAD_REQUEST),
+                                    UpstreamFailureCategory::Authentication,
+                                    Some(&error_text),
+                                    attempts,
+                                    false,
+                                ));
+                            }
+                            if self.refresh_session_with_fallback().await.is_err() {
+                                return Err(TurboError::ExpiredToken(
+                                    "Bluesky session recovery failed".to_string(),
+                                ));
                             }
                             session_string = self.get_session_string().await?;
-                            if attempt < self.max_retries {
-                                attempt += 1;
-                                continue;
-                            }
+                            continue;
                         }
-                        error!("API error 400: {}", error_text);
-                        return Err(TurboError::InvalidApiResponse(format!(
-                            "Status 400: {error_text}"
-                        )));
+                        return Err(upstream_error(
+                            operation,
+                            uris,
+                            Some(StatusCode::BAD_REQUEST),
+                            UpstreamFailureCategory::PermanentResponse,
+                            Some(&error_text),
+                            attempts,
+                            false,
+                        ));
                     }
                     status => {
-                        let error_text = resp.text().await.unwrap_or_default();
-                        error!("API error {}: {}", status, error_text);
-                        return Err(TurboError::InvalidApiResponse(format!(
-                            "Status {status}: {error_text}"
-                        )));
+                        if let Some(category) = transient_category(status) {
+                            if attempts <= self.retry_policy.max_retries {
+                                let delay = retry_delay(
+                                    Some(&resp),
+                                    Some(status),
+                                    attempts,
+                                    self.retry_policy,
+                                    &request_fingerprint,
+                                );
+                                record_request_retry(
+                                    operation,
+                                    category,
+                                    attempts,
+                                    self.retry_policy,
+                                    delay,
+                                );
+                                tokio::time::sleep(delay).await;
+                                continue;
+                            }
+                            let body = resp.text().await.unwrap_or_default();
+                            let error = upstream_error(
+                                operation,
+                                uris,
+                                Some(status),
+                                category,
+                                Some(&body),
+                                attempts,
+                                true,
+                            );
+                            record_request_exhaustion(
+                                operation,
+                                category,
+                                attempts,
+                                &request_fingerprint,
+                            );
+                            return Err(error);
+                        }
+                        let body = resp.text().await.unwrap_or_default();
+                        return Err(upstream_error(
+                            operation,
+                            uris,
+                            Some(status),
+                            if status == StatusCode::FORBIDDEN {
+                                UpstreamFailureCategory::Permission
+                            } else {
+                                UpstreamFailureCategory::PermanentResponse
+                            },
+                            Some(&body),
+                            attempts,
+                            false,
+                        ));
                     }
                 },
-                Err(e) => {
-                    error!("HTTP request failed: {}", e);
-                    if attempt >= self.max_retries {
-                        return Err(TurboError::HttpRequest(Box::new(e)));
+                Err(_error) => {
+                    let category = UpstreamFailureCategory::Transport;
+                    if attempts > self.retry_policy.max_retries {
+                        record_request_exhaustion(
+                            operation,
+                            category,
+                            attempts,
+                            &request_fingerprint,
+                        );
+                        return Err(upstream_error(
+                            operation, uris, None, category, None, attempts, true,
+                        ));
+                    }
+                    let delay = retry_delay(
+                        None,
+                        None,
+                        attempts,
+                        self.retry_policy,
+                        &request_fingerprint,
+                    );
+                    record_request_retry(operation, category, attempts, self.retry_policy, delay);
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    async fn fetch_batch(&mut self, uris: &[String]) -> TurboResult<Vec<Option<BlueskyPost>>> {
+        let unresolved = uris
+            .iter()
+            .filter(|uri| !self.isolation_cache.contains_key(*uri))
+            .cloned()
+            .collect::<Vec<_>>();
+        if unresolved.is_empty() {
+            return Ok(uris
+                .iter()
+                .map(|uri| self.isolation_cache.get(uri).cloned().unwrap_or(None))
+                .collect());
+        }
+
+        match self.fetch_batch_with_retry(&unresolved).await {
+            Ok(fetched) => {
+                let by_identifier = unresolved
+                    .into_iter()
+                    .zip(fetched)
+                    .collect::<HashMap<_, _>>();
+                Ok(uris
+                    .iter()
+                    .map(|uri| {
+                        self.isolation_cache
+                            .get(uri)
+                            .cloned()
+                            .unwrap_or_else(|| by_identifier.get(uri).cloned().unwrap_or(None))
+                    })
+                    .collect())
+            }
+            Err(error)
+                if transient_upstream_category(&error).is_some()
+                    && unresolved.len() > 1
+                    && self.isolation_recurrence.load(Ordering::Acquire)
+                        >= self.containment_policy.persistence_threshold =>
+            {
+                self.isolate_posts(unresolved, error).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn isolate_posts(
+        &mut self,
+        mut identifiers: Vec<String>,
+        root_error: TurboError,
+    ) -> TurboResult<Vec<Option<BlueskyPost>>> {
+        let requested = identifiers.clone();
+        identifiers.sort_unstable();
+        let mut remaining_budget = self.containment_policy.isolation_request_budget;
+        let midpoint = identifiers.len() / 2;
+        let first_halves = vec![
+            identifiers[..midpoint].to_vec(),
+            identifiers[midpoint..].to_vec(),
+        ];
+        let mut failures = VecDeque::new();
+        let mut first_categories = Vec::new();
+        let mut last_error = root_error;
+
+        info!(
+            operation = BlueskyOperation::Posts.as_str(),
+            request_fingerprint = %stable_identifier_fingerprint(&identifiers),
+            request_budget = remaining_budget,
+            "Starting bounded Bluesky request isolation"
+        );
+
+        for half in first_halves {
+            if remaining_budget == 0 {
+                return Err(with_isolation_outcome(
+                    last_error,
+                    crate::client::IsolationOutcome::BudgetExhausted,
+                ));
+            }
+            remaining_budget -= 1;
+            match self.fetch_batch_with_retry(&half).await {
+                Ok(results) => self.isolation_cache.extend(half.into_iter().zip(results)),
+                Err(error) => {
+                    first_categories.push(transient_upstream_category(&error));
+                    last_error = error;
+                    failures.push_back(half);
+                }
+            }
+        }
+
+        if failures.len() == 2
+            && first_categories[0].is_some()
+            && first_categories[0] == first_categories[1]
+        {
+            return Err(with_isolation_outcome(
+                last_error,
+                crate::client::IsolationOutcome::BroadOutage {
+                    category: first_categories[0].expect("category checked"),
+                },
+            ));
+        }
+
+        while let Some(failing) = failures.pop_front() {
+            if failing.len() == 1 {
+                return Err(with_isolation_outcome(
+                    last_error,
+                    crate::client::IsolationOutcome::SingletonPoison {
+                        request_fingerprint: stable_identifier_fingerprint(&failing),
+                    },
+                ));
+            }
+            let midpoint = failing.len() / 2;
+            for subset in [failing[..midpoint].to_vec(), failing[midpoint..].to_vec()] {
+                if remaining_budget == 0 {
+                    return Err(with_isolation_outcome(
+                        last_error,
+                        crate::client::IsolationOutcome::BudgetExhausted,
+                    ));
+                }
+                remaining_budget -= 1;
+                match self.fetch_batch_with_retry(&subset).await {
+                    Ok(results) => self.isolation_cache.extend(subset.into_iter().zip(results)),
+                    Err(error) => {
+                        last_error = error;
+                        failures.push_back(subset);
                     }
                 }
             }
-
-            attempt += 1;
-            if attempt <= self.max_retries {
-                tokio::time::sleep(self.retry_delay * attempt).await;
-            }
         }
+
+        Ok(requested
+            .iter()
+            .map(|uri| self.isolation_cache.get(uri).cloned().unwrap_or(None))
+            .collect())
     }
 
     pub async fn add_and_fetch(
@@ -988,7 +1520,321 @@ impl PostBatchCollector {
 mod tests {
     use super::*;
     use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    #[derive(Clone)]
+    struct SequenceResponder {
+        calls: Arc<AtomicU32>,
+        first: ResponseTemplate,
+        later: ResponseTemplate,
+    }
+
+    #[derive(Clone)]
+    enum PoisonMode {
+        One(String),
+        All,
+        SplitCategories,
+    }
+
+    #[derive(Clone)]
+    struct PoisonResponder {
+        mode: PoisonMode,
+    }
+
+    impl Respond for PoisonResponder {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let identifiers = request
+                .url
+                .query_pairs()
+                .filter(|(key, _)| key == "actors" || key == "uris")
+                .map(|(_, value)| value.into_owned())
+                .collect::<Vec<_>>();
+            let status = match &self.mode {
+                PoisonMode::All => Some(502),
+                PoisonMode::One(bad) if identifiers.iter().any(|value| value == bad) => Some(502),
+                PoisonMode::SplitCategories if identifiers.iter().any(|value| value == "a") => {
+                    Some(502)
+                }
+                PoisonMode::SplitCategories => Some(429),
+                PoisonMode::One(_) => None,
+            };
+            if let Some(status) = status {
+                return ResponseTemplate::new(status);
+            }
+            if request.url.path().ends_with("getProfiles") {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "profiles": identifiers
+                        .iter()
+                        .map(|did| serde_json::json!({"did": did, "handle": "ok.bsky.social"}))
+                        .collect::<Vec<_>>()
+                }))
+            } else {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "posts": identifiers
+                        .iter()
+                        .map(|uri| post_body(uri)["posts"][0].clone())
+                        .collect::<Vec<_>>()
+                }))
+            }
+        }
+    }
+
+    impl Respond for SequenceResponder {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.first.clone()
+            } else {
+                self.later.clone()
+            }
+        }
+    }
+
+    fn fast_policy(max_retries: u32) -> RequestRetryPolicy {
+        RequestRetryPolicy {
+            max_retries,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+        }
+    }
+
+    async fn client_for_server(
+        server: &MockServer,
+        max_retries: u32,
+        containment_policy: ContainmentPolicy,
+    ) -> BlueskyClient {
+        let client = BlueskyClient::new_with_policies(
+            vec!["test-session".to_string()],
+            None,
+            25,
+            25,
+            0,
+            0,
+            fast_policy(max_retries),
+            containment_policy,
+        )
+        .unwrap();
+        client.profile_batch_collector.write().await.api_base_url = server.uri();
+        client.post_batch_collector.write().await.api_base_url = server.uri();
+        client
+    }
+
+    fn profile_body(did: &str) -> serde_json::Value {
+        serde_json::json!({"profiles": [{"did": did, "handle": "test.bsky.social"}]})
+    }
+
+    fn post_body(uri: &str) -> serde_json::Value {
+        serde_json::json!({
+            "posts": [{
+                "uri": uri,
+                "cid": "cid",
+                "author": {"did": "did:plc:author", "handle": "author.bsky.social"},
+                "record": {"text": "hello"},
+                "embed": null,
+                "reply": null,
+                "labels": null,
+                "like_count": 0,
+                "repost_count": 0,
+                "reply_count": 0
+            }]
+        })
+    }
+
+    #[tokio::test]
+    async fn profile_request_recovers_from_502_then_200() {
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicU32::new(0));
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.actor.getProfiles"))
+            .respond_with(SequenceResponder {
+                calls: Arc::clone(&calls),
+                first: ResponseTemplate::new(502),
+                later: ResponseTemplate::new(200).set_body_json(profile_body("did:plc:test")),
+            })
+            .mount(&server)
+            .await;
+        let client = client_for_server(&server, 1, ContainmentPolicy::default()).await;
+        let result = client
+            .bulk_fetch_profiles(&["did:plc:test".to_string()])
+            .await
+            .unwrap();
+        assert!(result[0].is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn post_request_recovers_from_502_then_200() {
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicU32::new(0));
+        let uri = "at://did:plc:test/app.bsky.feed.post/one";
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.feed.getPosts"))
+            .respond_with(SequenceResponder {
+                calls: Arc::clone(&calls),
+                first: ResponseTemplate::new(502),
+                later: ResponseTemplate::new(200).set_body_json(post_body(uri)),
+            })
+            .mount(&server)
+            .await;
+        let client = client_for_server(&server, 1, ContainmentPolicy::default()).await;
+        let result = client.bulk_fetch_posts(&[uri.to_string()]).await.unwrap();
+        assert!(result[0].is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retryable_statuses_stop_at_max_retries_plus_one() {
+        for (status, max_retries) in [(502, 2), (429, 2), (502, 0), (429, 0)] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/app.bsky.actor.getProfiles"))
+                .respond_with(ResponseTemplate::new(status))
+                .expect((max_retries + 1) as u64)
+                .mount(&server)
+                .await;
+            let client =
+                client_for_server(&server, max_retries, ContainmentPolicy::default()).await;
+            let error = client
+                .bulk_fetch_profiles(&["did:plc:test".to_string()])
+                .await
+                .unwrap_err();
+            let TurboError::BlueskyUpstream(error) = error else {
+                panic!("expected typed upstream error");
+            };
+            assert_eq!(error.attempts, max_retries + 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn permanent_4xx_and_malformed_success_are_not_retried() {
+        for response in [
+            ResponseTemplate::new(404).set_body_string("not found"),
+            ResponseTemplate::new(200).set_body_string("not-json"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/app.bsky.actor.getProfiles"))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+            let client = client_for_server(&server, 3, ContainmentPolicy::default()).await;
+            assert!(client
+                .bulk_fetch_profiles(&["did:plc:test".to_string()])
+                .await
+                .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_isolation_identifies_singleton_and_reuses_successful_half() {
+        let server = MockServer::start().await;
+        let good = "did:plc:good".to_string();
+        let bad = "did:plc:poison".to_string();
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.actor.getProfiles"))
+            .respond_with(PoisonResponder {
+                mode: PoisonMode::One(bad.clone()),
+            })
+            .mount(&server)
+            .await;
+        let containment = ContainmentPolicy {
+            persistence_threshold: 1,
+            isolation_request_budget: 4,
+            ..ContainmentPolicy::default()
+        };
+        let client = client_for_server(&server, 0, containment).await;
+        client.set_failure_recurrence(1);
+        let error = client
+            .bulk_fetch_profiles(&[good.clone(), bad.clone()])
+            .await
+            .unwrap_err();
+        let TurboError::BlueskyUpstream(error) = error else {
+            panic!("expected typed upstream error");
+        };
+        assert!(matches!(
+            error.isolation,
+            Some(crate::client::IsolationOutcome::SingletonPoison { .. })
+        ));
+
+        let requests_before = server.received_requests().await.unwrap().len();
+        assert!(client
+            .bulk_fetch_profiles(&[good.clone(), bad.clone()])
+            .await
+            .is_err());
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), requests_before + 1);
+        let last_query = requests.last().unwrap().url.query().unwrap_or_default();
+        assert!(last_query.contains("did%3Aplc%3Apoison"));
+        assert!(!last_query.contains("did%3Aplc%3Agood"));
+    }
+
+    #[tokio::test]
+    async fn isolation_stops_early_for_broad_outage() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.feed.getPosts"))
+            .respond_with(PoisonResponder {
+                mode: PoisonMode::All,
+            })
+            .mount(&server)
+            .await;
+        let containment = ContainmentPolicy {
+            persistence_threshold: 1,
+            isolation_request_budget: 8,
+            ..ContainmentPolicy::default()
+        };
+        let client = client_for_server(&server, 0, containment).await;
+        client.set_failure_recurrence(1);
+        let uris = [
+            "at://did:plc:a/app.bsky.feed.post/one".to_string(),
+            "at://did:plc:b/app.bsky.feed.post/two".to_string(),
+        ];
+        let error = client.bulk_fetch_posts(&uris).await.unwrap_err();
+        let TurboError::BlueskyUpstream(error) = error else {
+            panic!("expected typed upstream error");
+        };
+        assert!(matches!(
+            error.isolation,
+            Some(crate::client::IsolationOutcome::BroadOutage { .. })
+        ));
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn isolation_honors_strict_probe_budget() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.actor.getProfiles"))
+            .respond_with(PoisonResponder {
+                mode: PoisonMode::SplitCategories,
+            })
+            .mount(&server)
+            .await;
+        let containment = ContainmentPolicy {
+            persistence_threshold: 1,
+            isolation_request_budget: 2,
+            ..ContainmentPolicy::default()
+        };
+        let client = client_for_server(&server, 0, containment).await;
+        client.set_failure_recurrence(1);
+        let error = client
+            .bulk_fetch_profiles(&[
+                "a".to_string(),
+                "b".to_string(),
+                "y".to_string(),
+                "z".to_string(),
+            ])
+            .await
+            .unwrap_err();
+        let TurboError::BlueskyUpstream(error) = error else {
+            panic!("expected typed upstream error");
+        };
+        assert_eq!(
+            error.isolation,
+            Some(crate::client::IsolationOutcome::BudgetExhausted)
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
 
     #[tokio::test]
     async fn test_bluesky_client_creation() {

@@ -602,6 +602,30 @@ fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> Strin
         }
         .to_string(),
     );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_failure_containment_active",
+        "Whether a run-loop failure incident is active (1 = yes, 0 = no).",
+        bool_metric_value(diagnostics.failure_containment.active),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_failure_containment_persistent",
+        "Whether an active incident crossed the persistence threshold (1 = yes, 0 = no).",
+        bool_metric_value(diagnostics.failure_containment.persistent),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_failure_containment_recurrence",
+        "Current recurrence count for the active safe failure fingerprint.",
+        diagnostics.failure_containment.recurrence.to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_failure_containment_delay_milliseconds",
+        "Current bounded run-loop recovery delay in milliseconds.",
+        optional_u64_metric_value(diagnostics.failure_containment.current_delay_ms),
+    );
     output.push_str("# HELP jetstream_turbo_reconnects_total Upstream reconnects grouped by initiating reason.\n");
     output.push_str("# TYPE jetstream_turbo_reconnects_total counter\n");
     let mut reconnect_reasons: Vec<_> = diagnostics
@@ -742,6 +766,7 @@ mod tests {
                 batch_execution: Duration::from_secs(10),
                 recovery_successes: 1,
             }),
+            failure_containment: Default::default(),
         }
     }
 

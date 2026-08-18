@@ -41,6 +41,7 @@ dotenvy = "0.15"
 # Error handling
 anyhow = "1.0"
 thiserror = "1.0"
+sha2 = "0.10"
 
 # Logging and tracing
 tracing = "0.1"
