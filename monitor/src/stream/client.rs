@@ -35,7 +35,7 @@ pub enum ReconnectReason {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConnectionStatus, ReconnectReason, StreamClient, StreamId};
+    use super::{observe_source_event, ConnectionStatus, ReconnectReason, StreamClient, StreamId};
     use futures::{SinkExt, StreamExt};
     use std::time::{Duration, Instant};
     use tokio::net::TcpListener;
@@ -48,6 +48,36 @@ mod tests {
             .await
             .expect("timed out waiting for status")
             .expect("status stream ended")
+    }
+
+    #[test]
+    fn parser_observes_raw_source_timestamp() {
+        let observation =
+            observe_source_event(r#"{"time_us":900}"#, 1_000).expect("raw timestamp should parse");
+        assert_eq!(observation.source_time_us, 900);
+        assert_eq!(observation.lag_us, 100);
+        assert_eq!(observation.clock_skew_us, 0);
+    }
+
+    #[test]
+    fn parser_observes_nested_enriched_source_timestamp() {
+        let observation = observe_source_event(r#"{"message":{"time_us":875}}"#, 1_000)
+            .expect("nested timestamp should parse");
+        assert_eq!(observation.source_time_us, 875);
+    }
+
+    #[test]
+    fn parser_keeps_timestamp_less_and_invalid_frames_uncovered() {
+        assert_eq!(observe_source_event(r#"{"kind":"commit"}"#, 1_000), None);
+        assert_eq!(observe_source_event("not-json", 1_000), None);
+    }
+
+    #[test]
+    fn parser_clamps_future_event_lag_and_bounds_clock_skew() {
+        let observation = observe_source_event(r#"{"time_us":999999999999}"#, 1_000)
+            .expect("future timestamp should parse");
+        assert_eq!(observation.lag_us, 0);
+        assert_eq!(observation.clock_skew_us, super::MAX_REPORTED_CLOCK_SKEW_US);
     }
 
     #[tokio::test]
@@ -108,9 +138,8 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(10)).await;
         });
 
-        let client =
-            StreamClient::new(format!("ws://{}", addr), StreamId::A)
-                .with_connect_timeout(Duration::from_millis(200));
+        let client = StreamClient::new(format!("ws://{}", addr), StreamId::A)
+            .with_connect_timeout(Duration::from_millis(200));
         let (_messages, mut statuses) = client.stream_with_status();
 
         let start = Instant::now();
@@ -129,18 +158,104 @@ mod tests {
             elapsed
         );
     }
+
+    #[tokio::test]
+    async fn replay_aware_fixture_counts_raw_nested_and_cursorless_frames() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind replay-aware websocket fixture");
+        let addr = listener.local_addr().expect("read listener address");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fixture client");
+            let mut websocket = accept_async(stream).await.expect("accept websocket");
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            websocket
+                .send(Message::Text(r#"{"time_us":100}"#.into()))
+                .await
+                .expect("send raw frame");
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            websocket
+                .send(Message::Text(r#"{"message":{"time_us":50}}"#.into()))
+                .await
+                .expect("send enriched replay frame");
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            websocket
+                .send(Message::Text(r#"{"kind":"commit"}"#.into()))
+                .await
+                .expect("send cursorless frame");
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        });
+
+        let client = StreamClient::new(format!("ws://{addr}"), StreamId::A)
+            .with_idle_timeout(Duration::from_secs(1));
+        let mut messages = Box::pin(client.stream_counts());
+        let raw = next_message(&mut messages).await;
+        let nested = next_message(&mut messages).await;
+        let cursorless = next_message(&mut messages).await;
+
+        assert_eq!(raw.count, 1);
+        assert_eq!(
+            raw.source_event.map(|event| event.source_time_us),
+            Some(100)
+        );
+        assert_eq!(nested.count, 2);
+        assert_eq!(
+            nested.source_event.map(|event| event.source_time_us),
+            Some(50)
+        );
+        assert_eq!(cursorless.count, 3);
+        assert_eq!(cursorless.source_event, None);
+    }
+
+    async fn next_message(
+        messages: &mut (impl futures::Stream<Item = super::StreamMessage> + Unpin),
+    ) -> super::StreamMessage {
+        tokio::time::timeout(Duration::from_secs(2), messages.next())
+            .await
+            .expect("timed out waiting for fixture message")
+            .expect("message stream ended")
+    }
+}
+
+const MAX_REPORTED_CLOCK_SKEW_US: u64 = 24 * 60 * 60 * 1_000_000;
+
+#[derive(Deserialize)]
+struct TimestampEnvelope {
+    time_us: Option<u64>,
+    message: Option<NestedTimestamp>,
 }
 
 #[derive(Deserialize)]
-struct TimeOnly {
+struct NestedTimestamp {
     time_us: Option<u64>,
 }
 
-fn extract_delivery_latency_us(text: &str) -> Option<u64> {
-    let parsed: TimeOnly = serde_json::from_str(text).ok()?;
-    let time_us = parsed.time_us?;
-    let now_us = Utc::now().timestamp_micros() as u64;
-    now_us.checked_sub(time_us)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceEventObservation {
+    pub source_time_us: u64,
+    pub observed_at_us: u64,
+    pub lag_us: u64,
+    pub clock_skew_us: u64,
+}
+
+fn observe_source_event(text: &str, observed_at_us: u64) -> Option<SourceEventObservation> {
+    let parsed: TimestampEnvelope = serde_json::from_str(text).ok()?;
+    let source_time_us = parsed
+        .time_us
+        .or_else(|| parsed.message.and_then(|message| message.time_us))?;
+    Some(SourceEventObservation {
+        source_time_us,
+        observed_at_us,
+        lag_us: observed_at_us.saturating_sub(source_time_us),
+        clock_skew_us: source_time_us
+            .saturating_sub(observed_at_us)
+            .min(MAX_REPORTED_CLOCK_SKEW_US),
+    })
+}
+
+fn observe_source_event_now(text: &str) -> Option<SourceEventObservation> {
+    let now_us = Utc::now().timestamp_micros().max(0) as u64;
+    observe_source_event(text, now_us)
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +263,7 @@ pub struct StreamMessage {
     pub stream_id: StreamId,
     pub count: u64,
     pub delivery_latency_us: Option<u64>,
+    pub source_event: Option<SourceEventObservation>,
 }
 
 #[derive(Debug, Clone)]
@@ -221,9 +337,8 @@ impl StreamClient {
                         info!(stream = ?stream_id, "Connected successfully in {}ms", connect_time_ms);
 
                         if attempt_number > 0 {
-                            let downtime = disconnect_start
-                                .map(|s| s.elapsed().as_secs())
-                                .unwrap_or(0);
+                            let downtime =
+                                disconnect_start.map(|s| s.elapsed().as_secs()).unwrap_or(0);
                             if let Some(ref diag) = diagnostics {
                                 diag.log(&DiagnosticEvent::Recovered {
                                     stream_id,
@@ -242,7 +357,7 @@ impl StreamClient {
                         let mut last_send = Instant::now();
                         let mut last_message = Instant::now();
                         let update_interval = Duration::from_millis(100);
-                        let mut last_delivery_latency_us: Option<u64> = None;
+                        let mut last_source_event: Option<SourceEventObservation> = None;
 
                         while let Ok(Some(msg_result)) =
                             tokio::time::timeout(idle_timeout, read.next()).await
@@ -251,13 +366,15 @@ impl StreamClient {
                                 Ok(Message::Text(text)) => {
                                     last_message = Instant::now();
                                     count += 1;
-                                    last_delivery_latency_us = extract_delivery_latency_us(&text);
+                                    last_source_event = observe_source_event_now(&text);
                                     if last_send.elapsed() >= update_interval {
                                         if tx
                                             .send(StreamMessage {
                                                 stream_id,
                                                 count: cumulative_count.saturating_add(count),
-                                                delivery_latency_us: last_delivery_latency_us,
+                                                delivery_latency_us: last_source_event
+                                                    .map(|event| event.lag_us),
+                                                source_event: last_source_event,
                                             })
                                             .is_err()
                                         {
@@ -322,7 +439,8 @@ impl StreamClient {
                             .send(StreamMessage {
                                 stream_id,
                                 count: cumulative_count,
-                                delivery_latency_us: last_delivery_latency_us,
+                                delivery_latency_us: last_source_event.map(|event| event.lag_us),
+                                source_event: last_source_event,
                             })
                             .is_err()
                         {
@@ -414,9 +532,8 @@ impl StreamClient {
                         info!(stream = ?stream_id, "Connected successfully in {}ms", connect_time_ms);
 
                         if attempt_number > 0 {
-                            let downtime = disconnect_start
-                                .map(|s| s.elapsed().as_secs())
-                                .unwrap_or(0);
+                            let downtime =
+                                disconnect_start.map(|s| s.elapsed().as_secs()).unwrap_or(0);
                             if let Some(ref diag) = diagnostics {
                                 diag.log(&DiagnosticEvent::Recovered {
                                     stream_id,
@@ -445,7 +562,7 @@ impl StreamClient {
                         let mut last_send = Instant::now();
                         let mut last_message = Instant::now();
                         let update_interval = Duration::from_millis(100);
-                        let mut last_delivery_latency_us: Option<u64> = None;
+                        let mut last_source_event: Option<SourceEventObservation> = None;
                         let mut delivery_available = false;
                         let mut reconnect_reason = ReconnectReason::DataIdleTimeout;
 
@@ -456,7 +573,7 @@ impl StreamClient {
                                 Ok(Message::Text(text)) => {
                                     last_message = Instant::now();
                                     count += 1;
-                                    last_delivery_latency_us = extract_delivery_latency_us(&text);
+                                    last_source_event = observe_source_event_now(&text);
                                     if !delivery_available {
                                         delivery_available = true;
                                         let _ = tx_status.send(ConnectionStatus {
@@ -474,7 +591,9 @@ impl StreamClient {
                                             .send(StreamMessage {
                                                 stream_id,
                                                 count: cumulative_count.saturating_add(count),
-                                                delivery_latency_us: last_delivery_latency_us,
+                                                delivery_latency_us: last_source_event
+                                                    .map(|event| event.lag_us),
+                                                source_event: last_source_event,
                                             })
                                             .is_err()
                                         {
@@ -575,7 +694,8 @@ impl StreamClient {
                             .send(StreamMessage {
                                 stream_id,
                                 count: cumulative_count,
-                                delivery_latency_us: last_delivery_latency_us,
+                                delivery_latency_us: last_source_event.map(|event| event.lag_us),
+                                source_event: last_source_event,
                             })
                             .is_err()
                         {

@@ -23,6 +23,17 @@ impl Serialize for MessageKind {
     }
 }
 
+impl MessageKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Commit => "commit",
+            Self::Identity => "identity",
+            Self::Account => "account",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

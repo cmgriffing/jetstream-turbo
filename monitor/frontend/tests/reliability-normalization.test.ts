@@ -2,6 +2,25 @@ import { describe, expect, it } from 'vitest'
 import { extractUptimeRows, normalizeUptimeRow } from '../src/hooks/useStream'
 
 describe('reliability history normalization', () => {
+  it('preserves event-time comparison context from versioned history', () => {
+    const row = normalizeUptimeRow({
+      hour: '2026-08-18 20:00:00',
+      reliability_json: JSON.stringify({
+        stream_a: {}, stream_b: {}, baseline_1: {}, baseline_2: {},
+        event_time: {
+          stream_a: { delivery_mode: 'live', source_watermark_us: 10, source_lag_us: 1, event_time_coverage: true, clock_skew_us: 0 },
+          stream_b: { delivery_mode: 'catching_up', source_watermark_us: 5, source_lag_us: 6, event_time_coverage: true, clock_skew_us: 0 },
+          baseline_1: { delivery_mode: 'unknown', source_watermark_us: null, source_lag_us: null, event_time_coverage: false, clock_skew_us: 0 },
+          baseline_2: { delivery_mode: 'unknown', source_watermark_us: null, source_lag_us: null, event_time_coverage: false, clock_skew_us: 0 },
+          comparison: { eligible: false, reason: 'catching_up', watermark_skew_us: null },
+        },
+      }),
+      reliability_classification: 'observed',
+    })
+
+    expect(row?.reliability?.event_time?.stream_b.delivery_mode).toBe('catching_up')
+    expect(row?.reliability?.event_time?.comparison.reason).toBe('catching_up')
+  })
   it('preserves prolonged delivery silence separately from transport availability', () => {
     const row = normalizeUptimeRow({
       hour: '2026-07-17 12:00:00',

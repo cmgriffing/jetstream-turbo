@@ -1,7 +1,7 @@
-use crate::models::recovery::RecoveryPhase;
+use crate::models::{jetstream::MessageKind, recovery::RecoveryPhase};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -31,6 +31,14 @@ pub struct ActiveBatchSnapshot {
     pub age_seconds: u64,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct RejectedIngressSnapshot {
+    pub reason: String,
+    pub message_kind: String,
+    pub rejected_at_unix_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PipelineProgressSnapshot {
@@ -55,9 +63,15 @@ pub struct PipelineProgressSnapshot {
     pub duplicate_events: u64,
     pub blocked_send_duration_ms: u64,
     pub ingress_messages: u64,
+    pub rejected_ingress: u64,
+    pub rejected_ingress_reasons: HashMap<String, u64>,
+    pub rejected_ingress_kinds: HashMap<String, u64>,
+    pub last_rejected_ingress: Option<RejectedIngressSnapshot>,
     pub completed_batches: u64,
     pub completed_records: u64,
+    pub failed_batches: u64,
     pub timed_out_batches: u64,
+    pub aborted_batches: u64,
     pub input_drops: u64,
     pub input_backpressured: bool,
     pub input_occupancy: usize,
@@ -123,9 +137,15 @@ struct ProgressState {
     last_store: Option<TimedEvent>,
     last_publication: Option<TimedEvent>,
     ingress_messages: u64,
+    rejected_ingress: u64,
+    rejected_ingress_reasons: HashMap<String, u64>,
+    rejected_ingress_kinds: HashMap<String, u64>,
+    last_rejected_ingress: Option<RejectedIngressSnapshot>,
     completed_batches: u64,
     completed_records: u64,
+    failed_batches: u64,
     timed_out_batches: u64,
+    aborted_batches: u64,
     input_drops: u64,
     input_backpressured: bool,
     input_occupancy: usize,
@@ -178,9 +198,15 @@ impl PipelineProgress {
                 last_store: None,
                 last_publication: None,
                 ingress_messages: 0,
+                rejected_ingress: 0,
+                rejected_ingress_reasons: HashMap::new(),
+                rejected_ingress_kinds: HashMap::new(),
+                last_rejected_ingress: None,
                 completed_batches: 0,
                 completed_records: 0,
+                failed_batches: 0,
                 timed_out_batches: 0,
+                aborted_batches: 0,
                 input_drops: 0,
                 input_backpressured: false,
                 input_occupancy: 0,
@@ -277,6 +303,25 @@ impl PipelineProgress {
 
     pub fn valid_ingress(&self) -> Option<u64> {
         self.valid_ingress_at(Instant::now(), SystemTime::now())
+    }
+
+    pub fn rejected_cursorless_ingress(&self, message_kind: MessageKind) -> u64 {
+        let mut state = self.state();
+        state.rejected_ingress = state.rejected_ingress.saturating_add(1);
+        *state
+            .rejected_ingress_reasons
+            .entry("missing_time_us".to_string())
+            .or_insert(0) += 1;
+        *state
+            .rejected_ingress_kinds
+            .entry(message_kind.as_str().to_string())
+            .or_insert(0) += 1;
+        state.last_rejected_ingress = Some(RejectedIngressSnapshot {
+            reason: "missing_time_us".to_string(),
+            message_kind: message_kind.as_str().to_string(),
+            rejected_at_unix_ms: unix_ms(SystemTime::now()),
+        });
+        state.rejected_ingress
     }
 
     pub fn valid_ingress_event(&self, event_time_us: u64) -> Option<u64> {
@@ -432,7 +477,9 @@ impl PipelineProgress {
 
     fn batch_completed_at(&self, batch_id: u64, records: usize, now: Instant, wall: SystemTime) {
         let mut state = self.state();
-        state.active_batches.remove(&batch_id);
+        if state.active_batches.remove(&batch_id).is_none() {
+            return;
+        }
         state.completed_batches += 1;
         state.completed_records += records as u64;
         state.last_completion = Some(TimedEvent {
@@ -443,12 +490,23 @@ impl PipelineProgress {
 
     pub fn batch_timed_out(&self, batch_id: u64) {
         let mut state = self.state();
-        state.active_batches.remove(&batch_id);
-        state.timed_out_batches += 1;
+        if state.active_batches.remove(&batch_id).is_some() {
+            state.timed_out_batches += 1;
+        }
     }
 
     pub fn batch_failed(&self, batch_id: u64) {
-        self.state().active_batches.remove(&batch_id);
+        let mut state = self.state();
+        if state.active_batches.remove(&batch_id).is_some() {
+            state.failed_batches += 1;
+        }
+    }
+
+    pub fn batch_aborted(&self, batch_id: u64) {
+        let mut state = self.state();
+        if state.active_batches.remove(&batch_id).is_some() {
+            state.aborted_batches += 1;
+        }
     }
 
     pub fn broadcast_state(&self, receivers: usize, successful_sends: usize) {
@@ -592,9 +650,15 @@ impl PipelineProgress {
             duplicate_events: state.duplicate_events,
             blocked_send_duration_ms: state.blocked_send_duration_ms,
             ingress_messages: state.ingress_messages,
+            rejected_ingress: state.rejected_ingress,
+            rejected_ingress_reasons: state.rejected_ingress_reasons.clone(),
+            rejected_ingress_kinds: state.rejected_ingress_kinds.clone(),
+            last_rejected_ingress: state.last_rejected_ingress.clone(),
             completed_batches: state.completed_batches,
             completed_records: state.completed_records,
+            failed_batches: state.failed_batches,
             timed_out_batches: state.timed_out_batches,
+            aborted_batches: state.aborted_batches,
             input_drops: state.input_drops,
             input_backpressured: state.input_backpressured,
             input_occupancy: state.input_occupancy,
@@ -614,6 +678,45 @@ impl PipelineProgress {
             completion_age_seconds: completion_age.map(|age| age.as_secs()),
             oldest_active_batch_age_seconds: oldest.map(|age| age.as_secs()),
             active_batches,
+        }
+    }
+}
+
+pub struct BatchLifecycle {
+    progress: Arc<PipelineProgress>,
+    batch_id: u64,
+    finalized: bool,
+}
+
+impl BatchLifecycle {
+    pub fn new(progress: Arc<PipelineProgress>, batch_id: u64) -> Self {
+        Self {
+            progress,
+            batch_id,
+            finalized: false,
+        }
+    }
+
+    pub fn completed(mut self, records: usize) {
+        self.progress.batch_completed(self.batch_id, records);
+        self.finalized = true;
+    }
+
+    pub fn failed(mut self) {
+        self.progress.batch_failed(self.batch_id);
+        self.finalized = true;
+    }
+
+    pub fn timed_out(mut self) {
+        self.progress.batch_timed_out(self.batch_id);
+        self.finalized = true;
+    }
+}
+
+impl Drop for BatchLifecycle {
+    fn drop(&mut self) {
+        if !self.finalized {
+            self.progress.batch_aborted(self.batch_id);
         }
     }
 }
@@ -651,6 +754,85 @@ mod tests {
             batch_execution: Duration::from_secs(20),
             recovery_successes: 1,
         }
+    }
+
+    #[test]
+    fn rejected_cursorless_ingress_is_bounded_and_privacy_safe() {
+        let progress = PipelineProgress::new(2, 10);
+
+        progress.rejected_cursorless_ingress(MessageKind::Commit);
+        progress.rejected_cursorless_ingress(MessageKind::Commit);
+        let snapshot = progress.snapshot(thresholds());
+
+        assert_eq!(snapshot.rejected_ingress, 2);
+        assert_eq!(snapshot.rejected_ingress_reasons.len(), 1);
+        assert_eq!(snapshot.rejected_ingress_kinds.len(), 1);
+        assert_eq!(
+            snapshot.last_rejected_ingress,
+            Some(RejectedIngressSnapshot {
+                reason: "missing_time_us".to_string(),
+                message_kind: "commit".to_string(),
+                rejected_at_unix_ms: snapshot
+                    .last_rejected_ingress
+                    .as_ref()
+                    .expect("rejection summary")
+                    .rejected_at_unix_ms,
+            })
+        );
+    }
+
+    #[test]
+    fn batch_terminal_transitions_are_idempotent() {
+        let progress = PipelineProgress::new(2, 10);
+        let batch_id = progress.batch_started();
+
+        progress.batch_completed(batch_id, 3);
+        progress.batch_failed(batch_id);
+        progress.batch_timed_out(batch_id);
+        progress.batch_aborted(batch_id);
+        let snapshot = progress.snapshot(thresholds());
+
+        assert_eq!(snapshot.completed_batches, 1);
+        assert_eq!(snapshot.completed_records, 3);
+        assert_eq!(snapshot.failed_batches, 0);
+        assert_eq!(snapshot.timed_out_batches, 0);
+        assert_eq!(snapshot.aborted_batches, 0);
+        assert_eq!(snapshot.active_permits, 0);
+        assert_eq!(snapshot.oldest_active_batch_age_seconds, None);
+    }
+
+    #[test]
+    fn dropping_batch_lifecycle_finalizes_it_as_aborted() {
+        let progress = Arc::new(PipelineProgress::new(2, 10));
+        let batch_id = progress.batch_started();
+
+        drop(BatchLifecycle::new(Arc::clone(&progress), batch_id));
+        let snapshot = progress.snapshot(thresholds());
+
+        assert_eq!(snapshot.aborted_batches, 1);
+        assert_eq!(snapshot.completed_records, 0);
+        assert_eq!(snapshot.active_permits, 0);
+        assert_eq!(snapshot.oldest_active_batch_age_seconds, None);
+    }
+
+    #[tokio::test]
+    async fn task_panic_drops_lifecycle_and_clears_active_batch() {
+        let progress = Arc::new(PipelineProgress::new(2, 10));
+        let batch_id = progress.batch_started();
+        let lifecycle = BatchLifecycle::new(Arc::clone(&progress), batch_id);
+
+        let join_error = tokio::spawn(async move {
+            let _lifecycle = lifecycle;
+            panic!("simulated batch panic");
+        })
+        .await
+        .expect_err("task should panic");
+        assert!(join_error.is_panic());
+
+        let snapshot = progress.snapshot(thresholds());
+        assert_eq!(snapshot.aborted_batches, 1);
+        assert_eq!(snapshot.active_permits, 0);
+        assert_eq!(snapshot.oldest_active_batch_age_seconds, None);
     }
 
     #[test]

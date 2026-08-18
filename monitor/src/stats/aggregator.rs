@@ -13,6 +13,62 @@ pub enum LiveLatencyMetric {
     ConnectionLatency,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryMode {
+    Live,
+    CatchingUp,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ComparisonIneligibilityReason {
+    CatchingUp,
+    UnknownMode,
+    MissingEventTimeCoverage,
+    WatermarkSkew,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StreamEventTimeSnapshot {
+    pub source_watermark_us: Option<u64>,
+    pub source_lag_us: Option<u64>,
+    pub delivery_mode: DeliveryMode,
+    pub event_time_coverage: bool,
+    pub clock_skew_us: u64,
+}
+
+impl Default for StreamEventTimeSnapshot {
+    fn default() -> Self {
+        Self {
+            source_watermark_us: None,
+            source_lag_us: None,
+            delivery_mode: DeliveryMode::Unknown,
+            event_time_coverage: false,
+            clock_skew_us: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ComparisonEligibility {
+    pub eligible: bool,
+    pub reason: Option<ComparisonIneligibilityReason>,
+    pub watermark_skew_us: Option<u64>,
+}
+
+impl Default for ComparisonEligibility {
+    fn default() -> Self {
+        Self {
+            eligible: false,
+            reason: Some(ComparisonIneligibilityReason::UnknownMode),
+            watermark_skew_us: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamStats {
     pub stream_a: u64,
@@ -79,6 +135,12 @@ pub struct StreamStats {
     pub client_recovery_b_ms: u64,
     pub client_recovery_baseline_1_ms: u64,
     pub client_recovery_baseline_2_ms: u64,
+    pub event_time_a: StreamEventTimeSnapshot,
+    pub event_time_b: StreamEventTimeSnapshot,
+    pub event_time_baseline_1: StreamEventTimeSnapshot,
+    pub event_time_baseline_2: StreamEventTimeSnapshot,
+    pub comparison: ComparisonEligibility,
+    pub watermark_skew_threshold_us: u64,
 }
 
 pub struct StatsAggregator {
@@ -169,6 +231,29 @@ impl StatsAggregator {
                 };
 
                 let (
+                    event_time_a,
+                    event_time_b,
+                    event_time_baseline_1,
+                    event_time_baseline_2,
+                    comparison,
+                ) = {
+                    let up = uptime.read().unwrap();
+                    let event_time_a = up.event_time_snapshot(StreamId::A);
+                    let event_time_b = up.event_time_snapshot(StreamId::B);
+                    (
+                        event_time_a,
+                        event_time_b,
+                        up.event_time_snapshot(StreamId::Baseline1),
+                        up.event_time_snapshot(StreamId::Baseline2),
+                        comparison_eligibility(
+                            &event_time_a,
+                            &event_time_b,
+                            up.watermark_skew_threshold,
+                        ),
+                    )
+                };
+
+                let (
                     uptime_a,
                     uptime_b,
                     streak_a,
@@ -235,7 +320,7 @@ impl StatsAggregator {
                 let stats_snapshot = StreamStats {
                     stream_a: internal.total_a,
                     stream_b: internal.total_b,
-                    counting_started_at: counting_started_at.clone(),
+                    counting_started_at,
                     delta: internal.total_a as i64 - internal.total_b as i64,
                     rate_a,
                     rate_b,
@@ -301,6 +386,14 @@ impl StatsAggregator {
                     client_recovery_b_ms: availability_b.client_recovery_ms,
                     client_recovery_baseline_1_ms: availability_baseline_1.client_recovery_ms,
                     client_recovery_baseline_2_ms: availability_baseline_2.client_recovery_ms,
+                    event_time_a,
+                    event_time_b,
+                    event_time_baseline_1,
+                    event_time_baseline_2,
+                    comparison,
+                    watermark_skew_threshold_us: duration_us(
+                        uptime.read().unwrap().watermark_skew_threshold,
+                    ),
                 };
 
                 let _ = tx.send(stats_snapshot);
@@ -382,6 +475,56 @@ fn percent(up: u64, down: u64) -> f64 {
         0.0
     } else {
         (up as f64 / observed as f64) * 100.0
+    }
+}
+
+fn duration_us(duration: Duration) -> u64 {
+    duration.as_micros().min(u64::MAX as u128) as u64
+}
+
+pub fn comparison_eligibility(
+    left: &StreamEventTimeSnapshot,
+    right: &StreamEventTimeSnapshot,
+    watermark_skew_threshold: Duration,
+) -> ComparisonEligibility {
+    if left.delivery_mode == DeliveryMode::CatchingUp
+        || right.delivery_mode == DeliveryMode::CatchingUp
+    {
+        return ComparisonEligibility {
+            eligible: false,
+            reason: Some(ComparisonIneligibilityReason::CatchingUp),
+            watermark_skew_us: None,
+        };
+    }
+    if left.delivery_mode == DeliveryMode::Unknown || right.delivery_mode == DeliveryMode::Unknown {
+        return ComparisonEligibility {
+            eligible: false,
+            reason: Some(ComparisonIneligibilityReason::UnknownMode),
+            watermark_skew_us: None,
+        };
+    }
+    if !left.event_time_coverage || !right.event_time_coverage {
+        return ComparisonEligibility {
+            eligible: false,
+            reason: Some(ComparisonIneligibilityReason::MissingEventTimeCoverage),
+            watermark_skew_us: None,
+        };
+    }
+    let watermark_skew_us = left
+        .source_watermark_us
+        .zip(right.source_watermark_us)
+        .map(|(left, right)| left.abs_diff(right));
+    if watermark_skew_us.is_none_or(|skew| skew > duration_us(watermark_skew_threshold)) {
+        return ComparisonEligibility {
+            eligible: false,
+            reason: Some(ComparisonIneligibilityReason::WatermarkSkew),
+            watermark_skew_us,
+        };
+    }
+    ComparisonEligibility {
+        eligible: true,
+        reason: None,
+        watermark_skew_us,
     }
 }
 
@@ -546,6 +689,21 @@ pub struct UptimeTracker {
     recovery_count_b: u64,
     pub baseline_1: BaselineStream,
     pub baseline_2: BaselineStream,
+    event_time_a: EventTimeState,
+    event_time_b: EventTimeState,
+    event_time_baseline_1: EventTimeState,
+    event_time_baseline_2: EventTimeState,
+    live_lag_threshold: Duration,
+    watermark_skew_threshold: Duration,
+    event_idle_threshold: Duration,
+}
+
+#[derive(Debug, Default)]
+struct EventTimeState {
+    source_watermark_us: Option<u64>,
+    last_timestamped_at: Option<Instant>,
+    coverage_samples: VecDeque<(Instant, bool)>,
+    clock_skew_us: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -616,6 +774,13 @@ impl Default for UptimeTracker {
             recovery_count_b: 0,
             baseline_1: BaselineStream::default(),
             baseline_2: BaselineStream::default(),
+            event_time_a: EventTimeState::default(),
+            event_time_b: EventTimeState::default(),
+            event_time_baseline_1: EventTimeState::default(),
+            event_time_baseline_2: EventTimeState::default(),
+            live_lag_threshold: Duration::from_secs(30),
+            watermark_skew_threshold: Duration::from_secs(30),
+            event_idle_threshold: Duration::from_secs(30),
         }
     }
 }
@@ -625,6 +790,19 @@ impl UptimeTracker {
 
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_event_time_thresholds(
+        live_lag_threshold: Duration,
+        watermark_skew_threshold: Duration,
+        event_idle_threshold: Duration,
+    ) -> Self {
+        Self {
+            live_lag_threshold,
+            watermark_skew_threshold,
+            event_idle_threshold,
+            ..Self::default()
+        }
     }
 
     pub fn handle_connection_status(&mut self, status: ConnectionStatus) {
@@ -772,6 +950,88 @@ impl UptimeTracker {
                 self.baseline_2.total_messages = total_count;
                 Self::record_sample(&mut self.baseline_2.message_samples, now, total_count);
             }
+        }
+    }
+
+    pub fn record_stream_message(&mut self, message: &StreamMessage) {
+        self.record_total_count(message.stream_id, message.count);
+        let now = Instant::now();
+        let state = match message.stream_id {
+            StreamId::A => &mut self.event_time_a,
+            StreamId::B => &mut self.event_time_b,
+            StreamId::Baseline1 => &mut self.event_time_baseline_1,
+            StreamId::Baseline2 => &mut self.event_time_baseline_2,
+        };
+        state
+            .coverage_samples
+            .push_back((now, message.source_event.is_some()));
+        while state
+            .coverage_samples
+            .front()
+            .is_some_and(|(observed_at, _)| now.duration_since(*observed_at) > Self::RATE_WINDOW)
+        {
+            state.coverage_samples.pop_front();
+        }
+        if let Some(observation) = message.source_event {
+            state.source_watermark_us = Some(
+                state
+                    .source_watermark_us
+                    .map_or(observation.source_time_us, |watermark| {
+                        watermark.max(observation.source_time_us)
+                    }),
+            );
+            state.last_timestamped_at = Some(now);
+            state.clock_skew_us = observation.clock_skew_us;
+        }
+    }
+
+    pub fn event_time_snapshot(&self, stream_id: StreamId) -> StreamEventTimeSnapshot {
+        let now = Instant::now();
+        let wall_us = Utc::now().timestamp_micros().max(0) as u64;
+        self.event_time_snapshot_at(stream_id, now, wall_us)
+    }
+
+    pub fn watermark_skew_threshold(&self) -> Duration {
+        self.watermark_skew_threshold
+    }
+
+    fn event_time_snapshot_at(
+        &self,
+        stream_id: StreamId,
+        now: Instant,
+        wall_us: u64,
+    ) -> StreamEventTimeSnapshot {
+        let (state, availability) = match stream_id {
+            StreamId::A => (&self.event_time_a, &self.availability_a),
+            StreamId::B => (&self.event_time_b, &self.availability_b),
+            StreamId::Baseline1 => (&self.event_time_baseline_1, &self.baseline_1.availability),
+            StreamId::Baseline2 => (&self.event_time_baseline_2, &self.baseline_2.availability),
+        };
+        let event_time_coverage = state.coverage_samples.iter().any(|(observed_at, covered)| {
+            *covered && now.duration_since(*observed_at) <= Self::RATE_WINDOW
+        });
+        let source_lag_us = state
+            .source_watermark_us
+            .map(|watermark| wall_us.saturating_sub(watermark));
+        let recent_timestamped_delivery = state.last_timestamped_at.is_some_and(|observed_at| {
+            now.duration_since(observed_at) <= self.event_idle_threshold
+        });
+        let delivery_mode = if !availability.transport_connected
+            || !availability.delivery_available
+            || !recent_timestamped_delivery
+        {
+            DeliveryMode::Unknown
+        } else if source_lag_us.is_some_and(|lag| lag <= duration_us(self.live_lag_threshold)) {
+            DeliveryMode::Live
+        } else {
+            DeliveryMode::CatchingUp
+        };
+        StreamEventTimeSnapshot {
+            source_watermark_us: state.source_watermark_us,
+            source_lag_us,
+            delivery_mode,
+            event_time_coverage,
+            clock_skew_us: state.clock_skew_us,
         }
     }
 
@@ -1340,8 +1600,14 @@ pub struct UptimeDetailedStats {
 
 #[cfg(test)]
 mod tests {
-    use super::UptimeTracker;
-    use crate::stream::{ConnectionStatus, ReconnectReason, StreamId};
+    use super::{
+        comparison_eligibility, ComparisonIneligibilityReason, DeliveryMode,
+        StreamEventTimeSnapshot, UptimeTracker,
+    };
+    use crate::stream::{
+        ConnectionStatus, ReconnectReason, SourceEventObservation, StreamId, StreamMessage,
+    };
+    use std::sync::{Arc, RwLock};
     use std::time::Duration;
 
     fn status(
@@ -1358,6 +1624,190 @@ mod tests {
             reconnect_reason: None,
             client_recovery: false,
         }
+    }
+
+    fn observed_message(stream_id: StreamId, source_time_us: u64, now_us: u64) -> StreamMessage {
+        StreamMessage {
+            stream_id,
+            count: 1,
+            delivery_latency_us: Some(now_us.saturating_sub(source_time_us)),
+            source_event: Some(SourceEventObservation {
+                source_time_us,
+                observed_at_us: now_us,
+                lag_us: now_us.saturating_sub(source_time_us),
+                clock_skew_us: source_time_us.saturating_sub(now_us),
+            }),
+        }
+    }
+
+    fn live_snapshot(watermark: u64) -> StreamEventTimeSnapshot {
+        StreamEventTimeSnapshot {
+            source_watermark_us: Some(watermark),
+            source_lag_us: Some(1_000),
+            delivery_mode: DeliveryMode::Live,
+            event_time_coverage: true,
+            clock_skew_us: 0,
+        }
+    }
+
+    #[test]
+    fn event_time_mode_is_live_for_recent_low_lag_delivery() {
+        let mut tracker = UptimeTracker::with_event_time_thresholds(
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+        );
+        tracker.handle_connection_status(status(StreamId::A, true, Some(1)));
+        let now_us = chrono::Utc::now().timestamp_micros() as u64;
+        tracker.record_stream_message(&observed_message(StreamId::A, now_us - 1_000, now_us));
+
+        assert_eq!(
+            tracker.event_time_snapshot(StreamId::A).delivery_mode,
+            DeliveryMode::Live
+        );
+    }
+
+    #[test]
+    fn event_time_mode_is_catching_up_for_old_watermark() {
+        let mut tracker = UptimeTracker::with_event_time_thresholds(
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+        );
+        tracker.handle_connection_status(status(StreamId::A, true, Some(1)));
+        let now_us = chrono::Utc::now().timestamp_micros() as u64;
+        tracker.record_stream_message(&observed_message(StreamId::A, now_us - 60_000_000, now_us));
+
+        assert_eq!(
+            tracker.event_time_snapshot(StreamId::A).delivery_mode,
+            DeliveryMode::CatchingUp
+        );
+    }
+
+    #[test]
+    fn event_time_mode_is_unknown_without_recent_covered_delivery() {
+        let tracker = UptimeTracker::new();
+        let snapshot = tracker.event_time_snapshot(StreamId::A);
+        assert_eq!(snapshot.delivery_mode, DeliveryMode::Unknown);
+        assert!(!snapshot.event_time_coverage);
+    }
+
+    #[test]
+    fn event_time_mode_returns_unknown_after_disconnect() {
+        let mut tracker = UptimeTracker::new();
+        tracker.handle_connection_status(status(StreamId::A, true, Some(1)));
+        let now_us = chrono::Utc::now().timestamp_micros() as u64;
+        tracker.record_stream_message(&observed_message(StreamId::A, now_us, now_us));
+        tracker.handle_connection_status(status(StreamId::A, false, None));
+
+        assert_eq!(
+            tracker.event_time_snapshot(StreamId::A).delivery_mode,
+            DeliveryMode::Unknown
+        );
+    }
+
+    #[test]
+    fn event_time_mode_returns_unknown_after_timestamped_delivery_idles() {
+        let mut tracker = UptimeTracker::with_event_time_thresholds(
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            Duration::ZERO,
+        );
+        tracker.handle_connection_status(status(StreamId::A, true, Some(1)));
+        let now_us = chrono::Utc::now().timestamp_micros() as u64;
+        tracker.record_stream_message(&observed_message(StreamId::A, now_us, now_us));
+        std::thread::sleep(Duration::from_millis(1));
+
+        assert_eq!(
+            tracker.event_time_snapshot(StreamId::A).delivery_mode,
+            DeliveryMode::Unknown
+        );
+    }
+
+    #[test]
+    fn comparison_is_eligible_for_overlapping_live_watermarks() {
+        let result = comparison_eligibility(
+            &live_snapshot(10_000_000),
+            &live_snapshot(12_000_000),
+            Duration::from_secs(5),
+        );
+        assert!(result.eligible);
+        assert_eq!(result.reason, None);
+    }
+
+    #[test]
+    fn comparison_reports_each_ineligibility_reason() {
+        let live = live_snapshot(10_000_000);
+        let catching_up = StreamEventTimeSnapshot {
+            delivery_mode: DeliveryMode::CatchingUp,
+            ..live
+        };
+        assert_eq!(
+            comparison_eligibility(&catching_up, &live, Duration::from_secs(5)).reason,
+            Some(ComparisonIneligibilityReason::CatchingUp)
+        );
+
+        let unknown = StreamEventTimeSnapshot {
+            delivery_mode: DeliveryMode::Unknown,
+            ..live
+        };
+        assert_eq!(
+            comparison_eligibility(&unknown, &live, Duration::from_secs(5)).reason,
+            Some(ComparisonIneligibilityReason::UnknownMode)
+        );
+
+        let uncovered = StreamEventTimeSnapshot {
+            event_time_coverage: false,
+            ..live
+        };
+        assert_eq!(
+            comparison_eligibility(&uncovered, &live, Duration::from_secs(5)).reason,
+            Some(ComparisonIneligibilityReason::MissingEventTimeCoverage)
+        );
+
+        assert_eq!(
+            comparison_eligibility(
+                &live_snapshot(1_000_000),
+                &live_snapshot(20_000_000),
+                Duration::from_secs(5),
+            )
+            .reason,
+            Some(ComparisonIneligibilityReason::WatermarkSkew)
+        );
+    }
+
+    #[tokio::test]
+    async fn live_snapshot_serialization_keeps_raw_fields_and_adds_event_time_context() {
+        let aggregator = super::StatsAggregator::new(
+            "A".to_string(),
+            "B".to_string(),
+            "Baseline 1".to_string(),
+            "Baseline 2".to_string(),
+        );
+        let mut receiver = aggregator.subscribe();
+        let stats = Arc::new(RwLock::new(super::StreamStatsInternal {
+            total_a: 10,
+            total_b: 8,
+        }));
+        let mut tracker = UptimeTracker::new();
+        tracker.handle_connection_status(status(StreamId::A, true, Some(1)));
+        tracker.handle_connection_status(status(StreamId::B, true, Some(1)));
+        let now_us = chrono::Utc::now().timestamp_micros() as u64;
+        tracker.record_stream_message(&observed_message(StreamId::A, now_us - 1_000, now_us));
+        tracker.record_stream_message(&observed_message(StreamId::B, now_us - 2_000, now_us));
+        let uptime = Arc::new(RwLock::new(tracker));
+
+        aggregator.process(&stats, &uptime);
+        let snapshot = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("snapshot timeout")
+            .expect("snapshot broadcast");
+        let json = serde_json::to_value(snapshot).expect("serialize live snapshot");
+
+        assert_eq!(json["stream_a"], 10);
+        assert!(json.get("rate_a").is_some());
+        assert_eq!(json["event_time_a"]["delivery_mode"], "live");
+        assert_eq!(json["comparison"]["eligible"], true);
     }
 
     #[test]

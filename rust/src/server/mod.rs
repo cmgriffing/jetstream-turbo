@@ -631,6 +631,12 @@ fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> Strin
     );
     append_gauge_metric(
         &mut output,
+        "jetstream_turbo_pipeline_rejected_ingress_total",
+        "Cursorless in-scope ingress events rejected before pipeline processing.",
+        diagnostics.pipeline_progress.rejected_ingress.to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
         "jetstream_turbo_pipeline_completed_records_total",
         "Records in successfully completed batches.",
         diagnostics.pipeline_progress.completed_records.to_string(),
@@ -640,6 +646,18 @@ fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> Strin
         "jetstream_turbo_pipeline_batch_timeouts_total",
         "Batches stopped by their execution deadline.",
         diagnostics.pipeline_progress.timed_out_batches.to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_pipeline_batch_failures_total",
+        "Batches finalized after a processing failure.",
+        diagnostics.pipeline_progress.failed_batches.to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_pipeline_batch_aborts_total",
+        "Batches finalized by cancellation or task abandonment.",
+        diagnostics.pipeline_progress.aborted_batches.to_string(),
     );
     append_gauge_metric(
         &mut output,
@@ -713,6 +731,19 @@ fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> Strin
     for (reason, count) in reconnect_reasons {
         output.push_str(&format!(
             "jetstream_turbo_reconnects_total{{reason=\"{reason}\"}} {count}\n"
+        ));
+    }
+    output.push_str("# HELP jetstream_turbo_ingress_rejections_total Rejected ingress events grouped by bounded reason and kind.\n");
+    output.push_str("# TYPE jetstream_turbo_ingress_rejections_total counter\n");
+    let mut kinds: Vec<_> = diagnostics
+        .pipeline_progress
+        .rejected_ingress_kinds
+        .iter()
+        .collect();
+    kinds.sort_by_key(|(kind, _)| kind.as_str());
+    for (kind, count) in kinds {
+        output.push_str(&format!(
+            "jetstream_turbo_ingress_rejections_total{{reason=\"missing_time_us\",kind=\"{kind}\"}} {count}\n"
         ));
     }
 

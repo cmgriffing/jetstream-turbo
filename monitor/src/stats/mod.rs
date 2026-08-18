@@ -1,6 +1,7 @@
 pub mod aggregator;
 
 pub use aggregator::{
-    AvailabilitySnapshot, StatsAggregator, StreamStats, StreamStatsInternal, UptimeDetailedStats,
-    UptimeMetricsSnapshot, UptimeTracker,
+    comparison_eligibility, AvailabilitySnapshot, ComparisonEligibility,
+    ComparisonIneligibilityReason, DeliveryMode, StatsAggregator, StreamEventTimeSnapshot,
+    StreamStats, StreamStatsInternal, UptimeDetailedStats, UptimeMetricsSnapshot, UptimeTracker,
 };

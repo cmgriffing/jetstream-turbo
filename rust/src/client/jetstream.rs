@@ -238,27 +238,28 @@ impl MessageSource for JetstreamClient {
                                     match parse_message(&text) {
                                         Ok(message) => {
                                             if is_in_scope(&message, &wanted_collections) {
-                                                let event_time_us = message.time_us.unwrap_or_default();
-                                                if let Some(timeout) = data_idle_timeout {
-                                                    useful_data_deadline.as_mut().reset(Instant::now() + timeout);
-                                                }
-                                                if let Some(progress) = &progress {
-                                                    if let Some(recovery_ms) = progress.valid_ingress_event(
-                                                        event_time_us
-                                                    ) {
-                                                        info!(endpoint, recovery_ms, "Jetstream useful-data delivery recovered");
-                                                        metrics::histogram!("jetstream_recovery_duration_seconds", "endpoint" => endpoint.clone()).record(recovery_ms as f64 / 1000.0);
+                                                if let Some(event_time_us) = message.time_us {
+                                                    if let Some(timeout) = data_idle_timeout {
+                                                        useful_data_deadline.as_mut().reset(Instant::now() + timeout);
                                                     }
+                                                    if let Some(progress) = &progress {
+                                                        if let Some(recovery_ms) = progress.valid_ingress_event(
+                                                            event_time_us
+                                                        ) {
+                                                            info!(endpoint, recovery_ms, "Jetstream useful-data delivery recovered");
+                                                            metrics::histogram!("jetstream_recovery_duration_seconds", "endpoint" => endpoint.clone()).record(recovery_ms as f64 / 1000.0);
+                                                        }
+                                                    }
+                                                    let now_us = SystemTime::now()
+                                                        .duration_since(UNIX_EPOCH)
+                                                        .unwrap_or_default()
+                                                        .as_micros()
+                                                        .min(u64::MAX as u128) as u64;
+                                                    metrics::gauge!("jetstream_last_received_event_time_us")
+                                                        .set(event_time_us as f64);
+                                                    metrics::gauge!("jetstream_received_lag_seconds")
+                                                        .set(now_us.saturating_sub(event_time_us) as f64 / 1_000_000.0);
                                                 }
-                                                let now_us = SystemTime::now()
-                                                    .duration_since(UNIX_EPOCH)
-                                                    .unwrap_or_default()
-                                                    .as_micros()
-                                                    .min(u64::MAX as u128) as u64;
-                                                metrics::gauge!("jetstream_last_received_event_time_us")
-                                                    .set(event_time_us as f64);
-                                                metrics::gauge!("jetstream_received_lag_seconds")
-                                                    .set(now_us.saturating_sub(event_time_us) as f64 / 1_000_000.0);
                                                 if checkpoint.is_some() {
                                                     metrics::counter!("jetstream_replayed_events_total").increment(1);
                                                     if let Some(progress) = &progress {

@@ -1,6 +1,22 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected'
+export type DeliveryMode = 'live' | 'catching_up' | 'unknown'
+export type ComparisonReason = 'catching_up' | 'unknown_mode' | 'missing_event_time_coverage' | 'watermark_skew'
+
+export interface StreamEventTime {
+  source_watermark_us: number | null
+  source_lag_us: number | null
+  delivery_mode: DeliveryMode
+  event_time_coverage: boolean
+  clock_skew_us: number
+}
+
+export interface ComparisonEligibility {
+  eligible: boolean
+  reason: ComparisonReason | null
+  watermark_skew_us: number | null
+}
 
 export interface StreamStats {
   stream_a?: number
@@ -57,6 +73,12 @@ export interface StreamStats {
   client_recovery_b_ms?: number
   client_recovery_baseline_1_ms?: number
   client_recovery_baseline_2_ms?: number
+  event_time_a?: StreamEventTime
+  event_time_b?: StreamEventTime
+  event_time_baseline_1?: StreamEventTime
+  event_time_baseline_2?: StreamEventTime
+  comparison?: ComparisonEligibility
+  watermark_skew_threshold_us?: number
 }
 
 export interface AvailabilityHistory {
@@ -74,6 +96,13 @@ export interface ReliabilityHistory {
   stream_b: AvailabilityHistory
   baseline_1: AvailabilityHistory
   baseline_2: AvailabilityHistory
+  event_time?: {
+    stream_a: StreamEventTime
+    stream_b: StreamEventTime
+    baseline_1: StreamEventTime
+    baseline_2: StreamEventTime
+    comparison: ComparisonEligibility
+  }
 }
 
 interface UptimeHistoryResponse {

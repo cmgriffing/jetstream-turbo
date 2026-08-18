@@ -2,6 +2,7 @@ import { memo } from "react";
 import { Info, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatUptimePercent } from "@/lib/uptime";
+import type { StreamEventTime } from "@/hooks/useStream";
 
 interface StreamCardProps {
   streamId: "a" | "b" | "baseline-1" | "baseline-2";
@@ -20,6 +21,7 @@ interface StreamCardProps {
   reconnectReason?: string;
   dataIdleReconnects?: number;
   clientRecoveryMs?: number;
+  eventTime?: StreamEventTime;
 }
 
 function formatDuration(ms: number): string {
@@ -64,6 +66,7 @@ export const StreamCard = memo(function StreamCard({
   reconnectReason,
   dataIdleReconnects,
   clientRecoveryMs,
+  eventTime,
 }: StreamCardProps) {
   const isBaseline = streamId === "baseline-1" || streamId === "baseline-2";
   const completeIdentity = fullName || name;
@@ -111,7 +114,7 @@ export const StreamCard = memo(function StreamCard({
       <div className="monitor-stream-metrics">
         <div className="monitor-stream-metric">
           <p className="monitor-stream-metric-label">
-            Rate
+            Observed arrival rate
             <button
               type="button"
               className="monitor-tooltip-trigger relative inline-flex cursor-pointer"
@@ -119,13 +122,36 @@ export const StreamCard = memo(function StreamCard({
             >
               <Info className="h-2.5 w-2.5" aria-hidden="true" />
               <span className="monitor-tooltip">
-                Messages per second over the last 10 seconds.
+                Raw frames per second over the last 10 seconds. Catch-up delivery can exceed live source throughput.
               </span>
             </button>
           </p>
           <p className="monitor-stream-metric-value">
             {rate.toFixed(0)}
             <span className="monitor-stream-metric-unit">/s</span>
+          </p>
+        </div>
+
+        <div className="monitor-stream-metric">
+          <p className="monitor-stream-metric-label">Source delivery mode</p>
+          <p className="monitor-stream-metric-value">
+            {eventTime?.delivery_mode === "catching_up"
+              ? "Catching up"
+              : eventTime?.delivery_mode === "live"
+                ? "Live"
+                : "Unknown"}
+            <span className="monitor-stream-metric-unit">
+              {eventTime?.source_lag_us !== null && eventTime?.source_lag_us !== undefined
+                ? `${(eventTime.source_lag_us / 1_000_000).toFixed(1)}s source lag`
+                : "No source watermark"}
+            </span>
+          </p>
+        </div>
+
+        <div className="monitor-stream-metric">
+          <p className="monitor-stream-metric-label">Event-time coverage</p>
+          <p className="monitor-stream-metric-value">
+            {eventTime?.event_time_coverage ? "Covered" : "Missing"}
           </p>
         </div>
 

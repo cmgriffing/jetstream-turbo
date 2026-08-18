@@ -6,7 +6,7 @@ import { StatusIndicator } from "@/components/StatusIndicator";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
 import { UptimeChart24h, RateChart } from "@/components/Charts";
 import { DeltaCard } from "@/components/DeltaCard";
-import { compareCounts } from "@/lib/comparison";
+import { compareCounts, getLiveComparisonEligibility } from "@/lib/comparison";
 import { decodeWindowParam, encodeWindowParam, WINDOW_PARAM_OPTIONS } from "@/lib/windowParam";
 import { useUrlParam } from "@/hooks/useUrlParam";
 import {
@@ -116,30 +116,40 @@ function App() {
   } = useUptimeHistory(historyHours);
 
   const primaryComparison = compareCounts(stats.stream_a, stats.stream_b);
+  const watermarkSkewThresholdUs = stats.watermark_skew_threshold_us ?? 30_000_000;
+  const primaryEligibility = stats.comparison ?? getLiveComparisonEligibility(
+    stats.event_time_a,
+    stats.event_time_b,
+    watermarkSkewThresholdUs,
+  );
   const baselineComparisons = [
     {
       subjectLabel: "Messijo",
       baselineLabel: "Baseline 1",
       baselineIdentity: stats.baseline_1_name || "Baseline 1",
       comparison: compareCounts(stats.stream_a, stats.baseline_1),
+      eligibility: getLiveComparisonEligibility(stats.event_time_a, stats.event_time_baseline_1, watermarkSkewThresholdUs),
     },
     {
       subjectLabel: "Messijo",
       baselineLabel: "Baseline 2",
       baselineIdentity: stats.baseline_2_name || "Baseline 2",
       comparison: compareCounts(stats.stream_a, stats.baseline_2),
+      eligibility: getLiveComparisonEligibility(stats.event_time_a, stats.event_time_baseline_2, watermarkSkewThresholdUs),
     },
     {
       subjectLabel: "Graze",
       baselineLabel: "Baseline 1",
       baselineIdentity: stats.baseline_1_name || "Baseline 1",
       comparison: compareCounts(stats.stream_b, stats.baseline_1),
+      eligibility: getLiveComparisonEligibility(stats.event_time_b, stats.event_time_baseline_1, watermarkSkewThresholdUs),
     },
     {
       subjectLabel: "Graze",
       baselineLabel: "Baseline 2",
       baselineIdentity: stats.baseline_2_name || "Baseline 2",
       comparison: compareCounts(stats.stream_b, stats.baseline_2),
+      eligibility: getLiveComparisonEligibility(stats.event_time_b, stats.event_time_baseline_2, watermarkSkewThresholdUs),
     },
   ];
   const transportConnected = connectionStatus === "connected";
@@ -209,6 +219,7 @@ function App() {
                 streamAName={stats.stream_a_name || "STREAM_A"}
                 streamBName={stats.stream_b_name || "STREAM_B"}
                 baselineComparisons={baselineComparisons}
+                primaryEligibility={primaryEligibility}
               />
 
               <div className="monitor-feed-region monitor-feed-region--primary">
@@ -232,6 +243,7 @@ function App() {
                   reconnectReason={stats.reconnect_reason_a}
                   dataIdleReconnects={stats.data_idle_reconnects_a}
                   clientRecoveryMs={stats.client_recovery_a_ms}
+                  eventTime={stats.event_time_a}
                 />
                 <StreamCard
                   streamId="b"
@@ -248,6 +260,7 @@ function App() {
                   reconnectReason={stats.reconnect_reason_b}
                   dataIdleReconnects={stats.data_idle_reconnects_b}
                   clientRecoveryMs={stats.client_recovery_b_ms}
+                  eventTime={stats.event_time_b}
                 />
                 </div>
               </div>
@@ -274,6 +287,7 @@ function App() {
                   reconnectReason={stats.reconnect_reason_baseline_1}
                   dataIdleReconnects={stats.data_idle_reconnects_baseline_1}
                   clientRecoveryMs={stats.client_recovery_baseline_1_ms}
+                  eventTime={stats.event_time_baseline_1}
                 />
                 <StreamCard
                   streamId="baseline-2"
@@ -291,6 +305,7 @@ function App() {
                   reconnectReason={stats.reconnect_reason_baseline_2}
                   dataIdleReconnects={stats.data_idle_reconnects_baseline_2}
                   clientRecoveryMs={stats.client_recovery_baseline_2_ms}
+                  eventTime={stats.event_time_baseline_2}
                 />
                 </div>
               </div>

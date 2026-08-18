@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 use std::collections::HashMap;
 
+use crate::stats::{ComparisonEligibility, StreamEventTimeSnapshot};
+
 const LEGACY_UPTIME_CONTRACT_VERSION: i64 = 1;
 const INTERVAL_UPTIME_CONTRACT_VERSION: i64 = 2;
 const HOURLY_WINDOW_SECONDS: i64 = 3600;
@@ -76,6 +78,17 @@ pub struct ReliabilityHistory {
     pub stream_b: AvailabilityHistory,
     pub baseline_1: AvailabilityHistory,
     pub baseline_2: AvailabilityHistory,
+    #[serde(default)]
+    pub event_time: EventTimeHistory,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EventTimeHistory {
+    pub stream_a: StreamEventTimeSnapshot,
+    pub stream_b: StreamEventTimeSnapshot,
+    pub baseline_1: StreamEventTimeSnapshot,
+    pub baseline_2: StreamEventTimeSnapshot,
+    pub comparison: ComparisonEligibility,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -498,7 +511,7 @@ impl Storage {
         let hour_str = hour.format("%Y-%m-%d %H:00:00").to_string();
         let reliability_json = serde_json::to_string(reliability)?;
         sqlx::query(
-            "UPDATE hourly_uptime SET reliability_json = ?, reliability_contract_version = 1, updated_at = CURRENT_TIMESTAMP WHERE hour = ?",
+            "UPDATE hourly_uptime SET reliability_json = ?, reliability_contract_version = 2, updated_at = CURRENT_TIMESTAMP WHERE hour = ?",
         )
         .bind(reliability_json)
         .bind(hour_str)
@@ -686,8 +699,10 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::{
-        AvailabilityHistory, ReliabilityHistory, Storage, INTERVAL_UPTIME_CONTRACT_VERSION,
+        AvailabilityHistory, EventTimeHistory, ReliabilityHistory, Storage,
+        INTERVAL_UPTIME_CONTRACT_VERSION,
     };
+    use crate::stats::{ComparisonEligibility, DeliveryMode, StreamEventTimeSnapshot};
     use chrono::{Duration, Utc};
     use sqlx::SqlitePool;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -796,17 +811,41 @@ mod tests {
                         coverage: "observed".to_string(),
                         ..Default::default()
                     },
+                    event_time: EventTimeHistory {
+                        stream_a: StreamEventTimeSnapshot {
+                            source_watermark_us: Some(100),
+                            source_lag_us: Some(5),
+                            delivery_mode: DeliveryMode::Live,
+                            event_time_coverage: true,
+                            clock_skew_us: 0,
+                        },
+                        stream_b: StreamEventTimeSnapshot {
+                            source_watermark_us: Some(98),
+                            source_lag_us: Some(7),
+                            delivery_mode: DeliveryMode::Live,
+                            event_time_coverage: true,
+                            clock_skew_us: 0,
+                        },
+                        comparison: ComparisonEligibility {
+                            eligible: true,
+                            reason: None,
+                            watermark_skew_us: Some(2),
+                        },
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
             )
             .await?;
 
         let rows = storage
-            .get_uptime_since(Utc::now() - Duration::hours(24))
+            .get_uptime_since(Utc::now() - Duration::hours(48))
             .await?;
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].reliability_classification, "legacy_unknown");
+        assert_eq!(rows[0].reliability_contract_version, 0);
 
-        let row = &rows[0];
+        let row = &rows[1];
         assert!(row.hour.contains(' '));
         assert_eq!(row.stream_a_seconds, 3200);
         assert_eq!(row.stream_b_seconds, 3000);
@@ -821,9 +860,15 @@ mod tests {
             INTERVAL_UPTIME_CONTRACT_VERSION
         );
         assert_eq!(row.reliability_classification, "observed");
+        assert_eq!(row.reliability_contract_version, 2);
         let reliability: ReliabilityHistory = serde_json::from_str(&row.reliability_json)?;
         assert_eq!(reliability.stream_a.transport_up_seconds, 3200);
         assert_eq!(reliability.stream_a.delivery_down_seconds, 400);
+        assert_eq!(
+            reliability.event_time.stream_a.delivery_mode,
+            DeliveryMode::Live
+        );
+        assert!(reliability.event_time.comparison.eligible);
 
         Ok(())
     }

@@ -18,6 +18,10 @@ pub struct Settings {
     pub stream_idle_timeout_seconds: u64,
     #[serde(default = "default_connection_timeout_seconds")]
     pub connection_timeout_seconds: u64,
+    #[serde(default = "default_live_lag_threshold_seconds")]
+    pub live_lag_threshold_seconds: u64,
+    #[serde(default = "default_watermark_skew_threshold_seconds")]
+    pub watermark_skew_threshold_seconds: u64,
     #[serde(default = "default_diagnostics_log_path")]
     pub diagnostics_log_path: String,
     #[serde(default = "default_diagnostics_log_max_bytes")]
@@ -48,6 +52,14 @@ fn default_connection_timeout_seconds() -> u64 {
     15
 }
 
+fn default_live_lag_threshold_seconds() -> u64 {
+    30
+}
+
+fn default_watermark_skew_threshold_seconds() -> u64 {
+    30
+}
+
 fn default_diagnostics_log_path() -> String {
     "./monitor-diagnostics.log".to_string()
 }
@@ -74,9 +86,14 @@ impl Settings {
                 default_connection_timeout_seconds(),
             )?
             .set_default(
-                "diagnostics_log_path",
-                default_diagnostics_log_path(),
+                "live_lag_threshold_seconds",
+                default_live_lag_threshold_seconds(),
             )?
+            .set_default(
+                "watermark_skew_threshold_seconds",
+                default_watermark_skew_threshold_seconds(),
+            )?
+            .set_default("diagnostics_log_path", default_diagnostics_log_path())?
             .set_default(
                 "diagnostics_log_max_bytes",
                 default_diagnostics_log_max_bytes(),
@@ -84,6 +101,43 @@ impl Settings {
             .add_source(config::Environment::default())
             .build()?;
 
-        settings.try_deserialize().map_err(Into::into)
+        let settings: Self = settings.try_deserialize()?;
+        validate_event_time_thresholds(
+            settings.live_lag_threshold_seconds,
+            settings.watermark_skew_threshold_seconds,
+        )?;
+        Ok(settings)
+    }
+}
+
+fn validate_event_time_thresholds(
+    live_lag_seconds: u64,
+    watermark_skew_seconds: u64,
+) -> Result<()> {
+    if live_lag_seconds == 0 {
+        anyhow::bail!("live_lag_threshold_seconds must be greater than zero");
+    }
+    if watermark_skew_seconds == 0 {
+        anyhow::bail!("watermark_skew_threshold_seconds must be greater than zero");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_time_threshold_defaults_align_with_useful_delivery_timeout() {
+        assert_eq!(default_live_lag_threshold_seconds(), 30);
+        assert_eq!(default_watermark_skew_threshold_seconds(), 30);
+        assert_eq!(default_stream_idle_timeout_seconds(), 30);
+    }
+
+    #[test]
+    fn event_time_thresholds_must_be_positive() {
+        assert!(validate_event_time_thresholds(0, 30).is_err());
+        assert!(validate_event_time_thresholds(30, 0).is_err());
+        assert!(validate_event_time_thresholds(30, 30).is_ok());
     }
 }

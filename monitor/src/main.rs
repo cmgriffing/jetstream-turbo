@@ -3,11 +3,12 @@ use jetstream_monitor::{
     config::Settings,
     diagnostics::DiagnosticLogger,
     stats::{
-        AvailabilitySnapshot, StatsAggregator, StreamStatsInternal, UptimeDetailedStats,
-        UptimeMetricsSnapshot, UptimeTracker,
+        comparison_eligibility, AvailabilitySnapshot, StatsAggregator, StreamStatsInternal,
+        UptimeDetailedStats, UptimeMetricsSnapshot, UptimeTracker,
     },
     storage::{
-        AvailabilityHistory, HourlyStat, HourlyUptime, ReliabilityHistory, Storage, UptimeResponse,
+        AvailabilityHistory, EventTimeHistory, HourlyStat, HourlyUptime, ReliabilityHistory,
+        Storage, UptimeResponse,
     },
     stream::{StreamClient, StreamId},
     websocket,
@@ -247,7 +248,13 @@ async fn main() -> Result<()> {
         .unwrap()
         .load_totals(lifetime_a, lifetime_b);
 
-    let uptime_tracker = Arc::new(std::sync::RwLock::new(UptimeTracker::default()));
+    let uptime_tracker = Arc::new(std::sync::RwLock::new(
+        UptimeTracker::with_event_time_thresholds(
+            Duration::from_secs(settings.live_lag_threshold_seconds),
+            Duration::from_secs(settings.watermark_skew_threshold_seconds),
+            Duration::from_secs(settings.stream_idle_timeout_seconds),
+        ),
+    ));
     uptime_tracker
         .write()
         .unwrap()
@@ -297,36 +304,36 @@ async fn main() -> Result<()> {
         loop {
             tokio::select! {
                 Some(msg) = stream_a.next() => {
-                    let count = msg.count;
                     let delivery_latency_us = msg.delivery_latency_us;
-                    stats_for_stream.write().unwrap().update(msg);
                     let mut tracker = uptime_for_status.write().unwrap();
-                    tracker.record_total_count(StreamId::A, count);
+                    tracker.record_stream_message(&msg);
                     if let Some(lat) = delivery_latency_us {
                         tracker.record_delivery_latency(StreamId::A, lat);
                     }
+                    drop(tracker);
+                    stats_for_stream.write().unwrap().update(msg);
                 }
                 Some(msg) = stream_b.next() => {
-                    let count = msg.count;
                     let delivery_latency_us = msg.delivery_latency_us;
-                    stats_for_stream.write().unwrap().update(msg);
                     let mut tracker = uptime_for_status.write().unwrap();
-                    tracker.record_total_count(StreamId::B, count);
+                    tracker.record_stream_message(&msg);
                     if let Some(lat) = delivery_latency_us {
                         tracker.record_delivery_latency(StreamId::B, lat);
                     }
+                    drop(tracker);
+                    stats_for_stream.write().unwrap().update(msg);
                 }
                 Some(msg) = stream_b1.next() => {
                     uptime_for_status
                         .write()
                         .unwrap()
-                        .record_total_count(StreamId::Baseline1, msg.count);
+                        .record_stream_message(&msg);
                 }
                 Some(msg) = stream_b2.next() => {
                     uptime_for_status
                         .write()
                         .unwrap()
-                        .record_total_count(StreamId::Baseline2, msg.count);
+                        .record_stream_message(&msg);
                 }
                 Some(status) = status_a.next() => {
                     uptime_for_status.write().unwrap().handle_connection_status(status);
@@ -460,6 +467,22 @@ async fn main() -> Result<()> {
                         &previous_availability.3,
                         &current_availability.3,
                     ),
+                    event_time: {
+                        let tracker = uptime_for_storage.read().unwrap();
+                        let stream_a = tracker.event_time_snapshot(StreamId::A);
+                        let stream_b = tracker.event_time_snapshot(StreamId::B);
+                        EventTimeHistory {
+                            stream_a,
+                            stream_b,
+                            baseline_1: tracker.event_time_snapshot(StreamId::Baseline1),
+                            baseline_2: tracker.event_time_snapshot(StreamId::Baseline2),
+                            comparison: comparison_eligibility(
+                                &stream_a,
+                                &stream_b,
+                                tracker.watermark_skew_threshold(),
+                            ),
+                        }
+                    },
                 };
                 if let Err(e) = storage_arc
                     .save_hourly_reliability(chrono::Utc::now(), &reliability)

@@ -17,8 +17,8 @@ use crate::turbocharger::diagnostics::{
     derive_health, CacheStateDiagnostics, DiagnosticsCollector, HealthDiagnostics, HealthStatus,
     NotRedisStateDiagnostics, ReadinessDiagnostics, SQLiteStateDiagnostics,
 };
-use crate::turbocharger::progress::PipelineProgress;
 use crate::turbocharger::progress::PipelineStage;
+use crate::turbocharger::progress::{BatchLifecycle, PipelineProgress};
 use crate::turbocharger::progress::{
     PipelineProgressSnapshot, PipelineReadinessState, ProgressThresholds,
 };
@@ -293,12 +293,13 @@ where
                     match result {
                         Some(Ok(message)) => {
                             if self.should_process_message(&message) {
-                                let event = IngressEvent::new(next_ingress_ordinal, message)
-                                    .ok_or_else(|| TurboError::InvalidMessage(
-                                        "Jetstream event is missing portable time_us cursor".to_string()
-                                    ))?;
-                                next_ingress_ordinal = next_ingress_ordinal.saturating_add(1);
-                                buffer.push(event);
+                                if let Some(event) = Self::accept_ingress_event(
+                                    self.progress.as_ref(),
+                                    &mut next_ingress_ordinal,
+                                    message,
+                                ) {
+                                    buffer.push(event);
+                                }
                             }
 
                             if buffer.len() >= BATCH_SIZE {
@@ -479,7 +480,10 @@ where
     ) -> RunResult<BatchCompletion> {
         match task_result {
             Ok(result) => result,
-            Err(e) => Err(TurboError::TaskJoin(Box::new(e)).into()),
+            Err(e) => {
+                metrics::counter!("pipeline_batch_join_failures_total").increment(1);
+                Err(TurboError::TaskJoin(Box::new(e)).into())
+            }
         }
     }
 
@@ -615,6 +619,7 @@ where
         batch_id: u64,
         timeout: Option<Duration>,
     ) -> TurboResult<BatchCompletion> {
+        let lifecycle = BatchLifecycle::new(Arc::clone(&progress), batch_id);
         let (events, range) = batch.into_parts();
         let deadline = timeout
             .map(|duration| Instant::now() + duration)
@@ -624,9 +629,16 @@ where
             .iter()
             .map(|event| event.cursor.source_event_id.clone())
             .collect::<Vec<_>>();
-        let completed_source_event_ids = record_store
+        let completed_source_event_ids = match record_store
             .completed_source_event_ids(&source_event_ids)
-            .await?;
+            .await
+        {
+            Ok(completed) => completed,
+            Err(error) => {
+                lifecycle.failed();
+                return Err(error);
+            }
+        };
         let duplicate_count = completed_source_event_ids.len();
         if duplicate_count > 0 {
             metrics::counter!("jetstream_replay_duplicates_total")
@@ -642,22 +654,19 @@ where
         let enriched_records = match timeout_at(deadline, hydrator.hydrate_batch(messages)).await {
             Ok(Ok(records)) => records,
             Ok(Err(error)) => {
-                progress.batch_failed(batch_id);
+                lifecycle.failed();
                 return Err(error);
             }
             Err(_) => {
-                return Err(batch_timeout(
-                    &progress,
-                    batch_id,
-                    PipelineStage::Hydration,
-                    timeout_secs,
-                ))
+                let error = batch_timeout(batch_id, PipelineStage::Hydration, timeout_secs);
+                lifecycle.timed_out();
+                return Err(error);
             }
         };
         let count = enriched_records.len();
 
         if count == 0 {
-            progress.batch_completed(batch_id, 0);
+            lifecycle.completed(0);
             return Ok(BatchCompletion {
                 processed_count: 0,
                 range,
@@ -668,16 +677,13 @@ where
         match timeout_at(deadline, record_store.store_batch(&enriched_records)).await {
             Ok(Ok(_)) => progress.store_succeeded(),
             Ok(Err(error)) => {
-                progress.batch_failed(batch_id);
+                lifecycle.failed();
                 return Err(error);
             }
             Err(_) => {
-                return Err(batch_timeout(
-                    &progress,
-                    batch_id,
-                    PipelineStage::Storage,
-                    timeout_secs,
-                ))
+                let error = batch_timeout(batch_id, PipelineStage::Storage, timeout_secs);
+                lifecycle.timed_out();
+                return Err(error);
             }
         }
 
@@ -685,16 +691,13 @@ where
         match timeout_at(deadline, event_publisher.publish_batch(&enriched_records)).await {
             Ok(Ok(_)) => progress.publication_succeeded(),
             Ok(Err(error)) => {
-                progress.batch_failed(batch_id);
+                lifecycle.failed();
                 return Err(error);
             }
             Err(_) => {
-                return Err(batch_timeout(
-                    &progress,
-                    batch_id,
-                    PipelineStage::Publication,
-                    timeout_secs,
-                ))
+                let error = batch_timeout(batch_id, PipelineStage::Publication, timeout_secs);
+                lifecycle.timed_out();
+                return Err(error);
             }
         }
 
@@ -707,7 +710,7 @@ where
             }
         }
         progress.broadcast_state(receivers, successful_sends);
-        progress.batch_completed(batch_id, count);
+        lifecycle.completed(count);
 
         Ok(BatchCompletion {
             processed_count: count,
@@ -717,6 +720,35 @@ where
 
     fn should_process_message(&self, _message: &JetstreamMessage) -> bool {
         true
+    }
+
+    fn accept_ingress_event(
+        progress: &PipelineProgress,
+        next_ingress_ordinal: &mut u64,
+        message: JetstreamMessage,
+    ) -> Option<IngressEvent> {
+        let message_kind = message.kind;
+        let Some(event) = IngressEvent::new(*next_ingress_ordinal, message) else {
+            let rejected_count = progress.rejected_cursorless_ingress(message_kind);
+            metrics::counter!(
+                "jetstream_ingress_rejections_total",
+                "reason" => "missing_time_us",
+                "kind" => message_kind.as_str()
+            )
+            .increment(1);
+            if rejected_count == 1 || rejected_count.is_power_of_two() {
+                warn!(
+                    reason = "missing_time_us",
+                    kind = message_kind.as_str(),
+                    rejected_count,
+                    "Rejected cursorless Jetstream ingress event"
+                );
+            }
+            return None;
+        };
+
+        *next_ingress_ordinal = next_ingress_ordinal.saturating_add(1);
+        Some(event)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<EnrichedRecord> {
@@ -773,13 +805,7 @@ async fn persist_batch_completion(
     Ok(Some(checkpoint))
 }
 
-fn batch_timeout(
-    progress: &PipelineProgress,
-    batch_id: u64,
-    stage: PipelineStage,
-    timeout_secs: u64,
-) -> TurboError {
-    progress.batch_timed_out(batch_id);
+fn batch_timeout(batch_id: u64, stage: PipelineStage, timeout_secs: u64) -> TurboError {
     metrics::counter!("pipeline_batch_timeouts_total", "stage" => format!("{stage:?}").to_lowercase()).increment(1);
     TurboError::BatchStageTimeout {
         batch_id,
@@ -1482,6 +1508,131 @@ mod tests {
             persistence_threshold: 2,
             isolation_request_budget: 4,
         }
+    }
+
+    #[test]
+    fn cursorless_ingress_is_rejected_without_consuming_an_ordinal() {
+        let progress = progress();
+        let mut next_ordinal = 1;
+        let mut cursorless = create_post_message(1);
+        cursorless.time_us = None;
+
+        let rejected = ProductionTurboCharger::accept_ingress_event(
+            progress.as_ref(),
+            &mut next_ordinal,
+            cursorless,
+        );
+        let accepted = ProductionTurboCharger::accept_ingress_event(
+            progress.as_ref(),
+            &mut next_ordinal,
+            create_post_message(2),
+        )
+        .expect("following valid event should be accepted");
+
+        assert!(rejected.is_none());
+        assert_eq!(accepted.ordinal, 1);
+        assert_eq!(next_ordinal, 2);
+        let snapshot = progress.snapshot(crate::turbocharger::ProgressThresholds {
+            startup_grace: Duration::from_secs(1),
+            ingress_idle: Duration::from_secs(1),
+            batch_execution: Duration::from_secs(1),
+            recovery_successes: 1,
+        });
+        assert_eq!(snapshot.rejected_ingress, 1);
+        assert_eq!(snapshot.active_permits, 0);
+    }
+
+    #[tokio::test]
+    async fn cursorless_rejection_never_checkpoints_and_following_completion_advances() {
+        let progress = progress();
+        let mut next_ordinal = 1;
+        let mut cursorless = create_post_message(1);
+        cursorless.time_us = None;
+        assert!(ProductionTurboCharger::accept_ingress_event(
+            progress.as_ref(),
+            &mut next_ordinal,
+            cursorless,
+        )
+        .is_none());
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sqlite = SQLiteStore::new(
+            temp_dir.path().join("cursorless-checkpoint.db"),
+            SQLitePragmaConfig {
+                cache_size_kib: 1024,
+                mmap_size_mb: 1,
+                journal_size_limit_mb: 1,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(sqlite.load_ingestion_checkpoint().await.unwrap(), None);
+
+        let accepted = ProductionTurboCharger::accept_ingress_event(
+            progress.as_ref(),
+            &mut next_ordinal,
+            create_post_message(2),
+        )
+        .expect("valid event should follow rejection");
+        let expected_time_us = accepted.cursor.time_us;
+        let completion = TurboCharger::<
+            MockMessageSource,
+            MockProfileFetcher,
+            MockPostFetcher,
+            MockRecordStore,
+            MockEventPublisher,
+        >::process_batch_internal(
+            Hydrator::new(
+                TurboCache::new(10, 10),
+                Arc::new(MockProfileFetcher::new()),
+                Arc::new(MockPostFetcher::new()),
+            ),
+            Arc::new(MockRecordStore::new()),
+            Arc::new(MockEventPublisher::new()),
+            broadcast::channel(1).0,
+            ingress_batch(vec![accepted]).unwrap(),
+            Arc::clone(&progress),
+            progress.batch_started(),
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+        let frontier = Mutex::new(CompletionFrontier::new(None));
+        let checkpoint = persist_batch_completion(&frontier, &sqlite, completion)
+            .await
+            .unwrap()
+            .expect("valid completion should checkpoint");
+
+        assert_eq!(checkpoint.ingress_ordinal, 1);
+        assert_eq!(checkpoint.cursor.time_us, expected_time_us);
+    }
+
+    #[test]
+    fn repeated_cursorless_replay_remains_bounded_and_does_not_activate_work() {
+        let progress = progress();
+        let mut next_ordinal = 8;
+        for _ in 0..16 {
+            let mut cursorless = create_post_message(1);
+            cursorless.time_us = None;
+            assert!(ProductionTurboCharger::accept_ingress_event(
+                progress.as_ref(),
+                &mut next_ordinal,
+                cursorless,
+            )
+            .is_none());
+        }
+
+        let snapshot = progress.snapshot(crate::turbocharger::ProgressThresholds {
+            startup_grace: Duration::from_secs(1),
+            ingress_idle: Duration::from_secs(1),
+            batch_execution: Duration::from_secs(1),
+            recovery_successes: 1,
+        });
+        assert_eq!(next_ordinal, 8);
+        assert_eq!(snapshot.rejected_ingress, 16);
+        assert_eq!(snapshot.rejected_ingress_reasons.len(), 1);
+        assert_eq!(snapshot.rejected_ingress_kinds.len(), 1);
+        assert_eq!(snapshot.active_permits, 0);
     }
 
     #[tokio::test]

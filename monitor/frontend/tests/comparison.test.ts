@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compareCounts } from "../src/lib/comparison";
+import { compareCounts, getLiveComparisonEligibility } from "../src/lib/comparison";
 
 describe("compareCounts", () => {
   it("reports a positive difference as ahead", () => {
@@ -48,5 +48,36 @@ describe("compareCounts", () => {
       magnitude: 7,
     });
     expect(compareCounts(0, 0).position).toBe("even");
+  });
+});
+
+describe("getLiveComparisonEligibility", () => {
+  const live = {
+    source_watermark_us: 10_000_000,
+    delivery_mode: "live" as const,
+    event_time_coverage: true,
+  };
+
+  it("allows overlapping covered live windows", () => {
+    expect(getLiveComparisonEligibility(live, { ...live, source_watermark_us: 12_000_000 }, 5_000_000)).toEqual({
+      eligible: true,
+      reason: null,
+    });
+  });
+
+  it("suppresses a catching-up stream", () => {
+    expect(getLiveComparisonEligibility({ ...live, delivery_mode: "catching_up" }, live, 5_000_000).reason).toBe("catching_up");
+  });
+
+  it("suppresses missing event-time coverage", () => {
+    expect(getLiveComparisonEligibility({ ...live, event_time_coverage: false }, live, 5_000_000).reason).toBe("missing_event_time_coverage");
+  });
+
+  it("suppresses excessive source-watermark skew", () => {
+    expect(getLiveComparisonEligibility(live, { ...live, source_watermark_us: 20_000_000 }, 5_000_000).reason).toBe("watermark_skew");
+  });
+
+  it("treats absent legacy context as unknown", () => {
+    expect(getLiveComparisonEligibility(undefined, live, 5_000_000).reason).toBe("unknown_mode");
   });
 });
