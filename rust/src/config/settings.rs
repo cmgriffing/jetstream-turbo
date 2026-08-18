@@ -74,6 +74,11 @@ pub struct Settings {
     pub max_concurrent_requests: usize,
     pub cache_size_users: usize,
     pub cache_size_posts: usize,
+    /// Maximum temporarily unavailable referenced-post outcomes retained in memory.
+    pub negative_post_cache_capacity: usize,
+    /// Expiry for temporarily unavailable referenced-post outcomes.
+    #[serde(skip)]
+    pub negative_post_cache_ttl: Duration,
 
     // Retry Configuration
     pub max_retries: u32,
@@ -151,6 +156,10 @@ impl Default for Settings {
             max_concurrent_requests: 6,
             cache_size_users: 50_000,
             cache_size_posts: 40_000,
+            // Sized for roughly half of the positive post cache's expected unique
+            // reference volume while bounding outage-related memory growth.
+            negative_post_cache_capacity: 20_000,
+            negative_post_cache_ttl: Duration::from_secs(5 * 60),
             max_retries: 3,
             retry_base_delay: Duration::from_millis(100),
             retry_max_delay: Duration::from_secs(5),
@@ -321,6 +330,9 @@ impl Settings {
         if let Ok(value) = std::env::var("BLUESKY_ISOLATION_REQUEST_BUDGET") {
             builder = builder.set_override("isolation_request_budget", value)?;
         }
+        if let Ok(value) = std::env::var("BLUESKY_NEGATIVE_POST_CACHE_CAPACITY") {
+            builder = builder.set_override("negative_post_cache_capacity", value)?;
+        }
 
         if let Ok(trim_maxlen) = std::env::var("TRIM_MAXLEN") {
             builder = builder.set_override("trim_maxlen", trim_maxlen)?;
@@ -351,6 +363,10 @@ impl Settings {
         settings.recovery_max_delay = duration_from_env_ms(
             "BLUESKY_RECOVERY_MAX_DELAY_MS",
             Settings::default().recovery_max_delay,
+        )?;
+        settings.negative_post_cache_ttl = duration_from_env_ms(
+            "BLUESKY_NEGATIVE_POST_CACHE_TTL_MS",
+            Settings::default().negative_post_cache_ttl,
         )?;
         settings.posthog_api_key = normalize_optional_setting(settings.posthog_api_key);
         settings.posthog_host = normalize_optional_setting(settings.posthog_host);
@@ -468,6 +484,12 @@ impl Settings {
         if self.cache_size_users == 0 || self.cache_size_posts == 0 {
             anyhow::bail!("cache_size_users and cache_size_posts must be greater than 0");
         }
+        if self.negative_post_cache_capacity == 0 {
+            anyhow::bail!("BLUESKY_NEGATIVE_POST_CACHE_CAPACITY must be greater than 0");
+        }
+        if self.negative_post_cache_ttl.is_zero() {
+            anyhow::bail!("BLUESKY_NEGATIVE_POST_CACHE_TTL_MS must be greater than 0");
+        }
 
         if self.max_db_size_mb == 0 {
             anyhow::bail!("max_db_size_mb must be greater than 0");
@@ -565,6 +587,8 @@ mod tests {
         assert!(!settings.pipeline_deadlines_enabled);
         assert_eq!(settings.cache_size_users, 50_000);
         assert_eq!(settings.cache_size_posts, 40_000);
+        assert_eq!(settings.negative_post_cache_capacity, 20_000);
+        assert_eq!(settings.negative_post_cache_ttl, Duration::from_secs(300));
         assert_eq!(settings.sqlite_cache_size_kib, 64 * 1024);
         assert_eq!(settings.sqlite_mmap_size_mb, 256);
         assert_eq!(settings.sqlite_journal_size_limit_mb, 512);
@@ -664,6 +688,12 @@ mod tests {
         settings.recovery_persistence_threshold = 1;
         settings.isolation_request_budget = 0;
         assert!(settings.validate().is_err());
+        settings.isolation_request_budget = 1;
+        settings.negative_post_cache_capacity = 0;
+        assert!(settings.validate().is_err());
+        settings.negative_post_cache_capacity = 1;
+        settings.negative_post_cache_ttl = Duration::ZERO;
+        assert!(settings.validate().is_err());
     }
 
     #[test]
@@ -694,6 +724,8 @@ mod tests {
             ("BLUESKY_RECOVERY_MAX_DELAY_MS", "9000"),
             ("BLUESKY_RECOVERY_PERSISTENCE_THRESHOLD", "4"),
             ("BLUESKY_ISOLATION_REQUEST_BUDGET", "6"),
+            ("BLUESKY_NEGATIVE_POST_CACHE_CAPACITY", "1234"),
+            ("BLUESKY_NEGATIVE_POST_CACHE_TTL_MS", "45000"),
         ];
         for (key, value) in values {
             std::env::set_var(key, value);
@@ -725,5 +757,7 @@ mod tests {
         assert_eq!(settings.recovery_max_delay, Duration::from_secs(9));
         assert_eq!(settings.recovery_persistence_threshold, 4);
         assert_eq!(settings.isolation_request_budget, 6);
+        assert_eq!(settings.negative_post_cache_capacity, 1234);
+        assert_eq!(settings.negative_post_cache_ttl, Duration::from_secs(45));
     }
 }

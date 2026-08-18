@@ -84,6 +84,18 @@ pub struct CacheStateDiagnostics {
     pub post_misses: u64,
     pub total_requests: u64,
     pub cache_evictions: u64,
+    pub negative_post_entries: usize,
+    pub negative_post_capacity: usize,
+    pub negative_post_hits: u64,
+    pub negative_post_evictions: u64,
+    pub post_recoveries: u64,
+    pub post_found: u64,
+    pub post_missing: u64,
+    pub post_unavailable: u64,
+    pub partial_records_total: u64,
+    pub isolation_broad_outage: u64,
+    pub isolation_singleton_poison: u64,
+    pub isolation_budget_exhausted: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +111,7 @@ pub struct SQLiteStateDiagnostics {
     pub mmap_size_bytes: Option<i64>,
     pub journal_mode: Option<String>,
     pub journal_size_limit_bytes: Option<i64>,
+    pub partial_records: Option<i64>,
     pub collection_error: Option<String>,
 }
 

@@ -34,6 +34,7 @@ pub struct SQLiteStateSnapshot {
     pub mmap_size_bytes: i64,
     pub journal_mode: String,
     pub journal_size_limit_bytes: i64,
+    pub partial_records: i64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -127,14 +128,15 @@ impl SQLiteStore {
                 api_calls_count INTEGER,
                 cache_hit_rate REAL,
                 cache_hits INTEGER,
-                cache_misses INTEGER
+                cache_misses INTEGER,
+                hydration_quality TEXT NOT NULL DEFAULT 'unknown'
+                    CHECK(hydration_quality IN ('unknown', 'complete', 'partial'))
             );
             
             CREATE INDEX IF NOT EXISTS idx_records_at_uri ON records(at_uri);
             CREATE INDEX IF NOT EXISTS idx_records_did ON records(did);
             CREATE INDEX IF NOT EXISTS idx_records_time_us ON records(time_us);
             CREATE INDEX IF NOT EXISTS idx_records_created_at ON records(created_at);
-
             CREATE TABLE IF NOT EXISTS ingestion_checkpoint (
                 singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
                 ingress_ordinal INTEGER NOT NULL,
@@ -160,6 +162,25 @@ impl SQLiteStore {
                 .execute(pool)
                 .await?;
         }
+        let has_hydration_quality = columns.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .is_ok_and(|name| name == "hydration_quality")
+        });
+        if !has_hydration_quality {
+            sqlx::query(
+                "ALTER TABLE records ADD COLUMN hydration_quality TEXT NOT NULL DEFAULT 'unknown'",
+            )
+            .execute(pool)
+            .await?;
+        }
+        sqlx::query("UPDATE records SET hydration_quality = 'unknown' WHERE hydration_quality IS NULL OR hydration_quality NOT IN ('unknown', 'complete', 'partial')")
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_records_hydration_quality ON records(hydration_quality)",
+        )
+        .execute(pool)
+        .await?;
         sqlx::query(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_records_source_event_id ON records(source_event_id) WHERE source_event_id IS NOT NULL",
         )
@@ -253,8 +274,9 @@ impl SQLiteStore {
             INSERT INTO records (
                 at_uri, did, time_us, source_event_id, message, message_metadata,
                 created_at, hydrated_at, hydration_time_ms,
-                api_calls_count, cache_hit_rate, cache_hits, cache_misses
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                api_calls_count, cache_hit_rate, cache_hits, cache_misses,
+                hydration_quality
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT DO UPDATE SET
                 source_event_id = excluded.source_event_id
             RETURNING id
@@ -273,6 +295,7 @@ impl SQLiteStore {
         .bind(record.metrics.cache_hit_rate)
         .bind(record.metrics.cache_hits as i64)
         .bind(record.metrics.cache_misses as i64)
+        .bind(record.hydrated_metadata.hydration_quality.as_str())
         .fetch_one(&self.pool)
         .await?;
 
@@ -284,7 +307,8 @@ impl SQLiteStore {
             r#"
             SELECT at_uri, did, time_us, message, message_metadata,
                    created_at, hydrated_at, hydration_time_ms,
-                   api_calls_count, cache_hit_rate, cache_hits, cache_misses
+                   api_calls_count, cache_hit_rate, cache_hits, cache_misses,
+                   hydration_quality
             FROM records 
             WHERE at_uri = ?
             LIMIT 1
@@ -323,7 +347,12 @@ impl SQLiteStore {
         let hydrated_metadata: serde_json::Value = serde_json::from_str(&metadata_str)?;
 
         let message = serde_json::from_value(message)?;
-        let hydrated_metadata = serde_json::from_value(hydrated_metadata)?;
+        let mut hydrated_metadata: crate::models::enriched::HydratedMetadata =
+            serde_json::from_value(hydrated_metadata)?;
+        if let Ok(quality) = row.try_get::<String, _>("hydration_quality") {
+            hydrated_metadata.hydration_quality =
+                crate::models::enriched::HydrationQuality::from_storage(&quality);
+        }
 
         let hydrated_at: String = row.try_get("hydrated_at")?;
         let processed_at = DateTime::parse_from_rfc3339(&hydrated_at)
@@ -353,6 +382,35 @@ impl SQLiteStore {
 
         let count: i64 = result.try_get("count")?;
         Ok(count)
+    }
+
+    /// Selects a bounded set of partial records for a future repair worker.
+    /// This read-only query intentionally does not touch the ingestion checkpoint.
+    pub async fn select_partial_records(&self, limit: usize) -> TurboResult<Vec<EnrichedRecord>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            r#"
+            SELECT at_uri, did, time_us, message, message_metadata,
+                   created_at, hydrated_at, hydration_time_ms,
+                   api_calls_count, cache_hit_rate, cache_hits, cache_misses,
+                   hydration_quality
+            FROM records
+            WHERE hydration_quality = 'partial'
+            ORDER BY id ASC
+            LIMIT ?
+            "#,
+        )
+        .bind(limit.min(1_000) as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut records = Vec::with_capacity(rows.len());
+        for row in rows {
+            records.push(self.row_to_record(row).await?);
+        }
+        Ok(records)
     }
 
     /// Loads the singleton durable ingestion checkpoint, if one has been committed.
@@ -516,6 +574,10 @@ impl SQLiteStore {
         let (journal_size_limit_bytes,): (i64,) = sqlx::query_as("PRAGMA journal_size_limit")
             .fetch_one(&self.pool)
             .await?;
+        let partial_records: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM records WHERE hydration_quality = 'partial'")
+                .fetch_one(&self.pool)
+                .await?;
 
         Ok(SQLiteStateSnapshot {
             db_size_bytes,
@@ -527,6 +589,7 @@ impl SQLiteStore {
             mmap_size_bytes,
             journal_mode,
             journal_size_limit_bytes,
+            partial_records,
         })
     }
 
@@ -676,10 +739,10 @@ impl RecordStore for SQLiteStore {
         let now_str = now.to_rfc3339();
 
         const MAX_PARAMS: usize = 999;
-        const COLUMNS: usize = 13;
+        const COLUMNS: usize = 14;
         const MAX_ROWS_PER_INSERT: usize = MAX_PARAMS / COLUMNS;
 
-        static SINGLE_ROW_PLACEHOLDER: &str = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        static SINGLE_ROW_PLACEHOLDER: &str = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
         let mut all_ids = Vec::with_capacity(count);
 
@@ -694,7 +757,8 @@ impl RecordStore for SQLiteStore {
                 r#"INSERT INTO records (
                     at_uri, did, time_us, source_event_id, message, message_metadata,
                     created_at, hydrated_at, hydration_time_ms,
-                    api_calls_count, cache_hit_rate, cache_hits, cache_misses
+                    api_calls_count, cache_hit_rate, cache_hits, cache_misses,
+                    hydration_quality
                 ) VALUES {placeholders}
                 ON CONFLICT DO UPDATE SET
                     source_event_id = excluded.source_event_id
@@ -717,7 +781,8 @@ impl RecordStore for SQLiteStore {
                     .bind(record.metrics.api_calls_count as i64)
                     .bind(record.metrics.cache_hit_rate)
                     .bind(record.metrics.cache_hits as i64)
-                    .bind(record.metrics.cache_misses as i64);
+                    .bind(record.metrics.cache_misses as i64)
+                    .bind(record.hydrated_metadata.hydration_quality.as_str());
             }
 
             let rows = query.fetch_all(&mut *tx).await?;
@@ -739,6 +804,7 @@ impl RecordStore for SQLiteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::enriched::HydrationQuality;
     use crate::models::jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType};
     use chrono::{Duration, Utc};
 
@@ -858,6 +924,21 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        sqlx::query(
+            r#"INSERT INTO records (
+                at_uri, did, time_us, message, message_metadata, created_at, hydrated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind("at://did:plc:legacy/app.bsky.feed.post/one")
+        .bind("did:plc:legacy")
+        .bind(1_i64)
+        .bind(r#"{"did":"did:plc:legacy","kind":"identity"}"#)
+        .bind("{}")
+        .bind("2026-01-01T00:00:00Z")
+        .bind("2026-01-01T00:00:00Z")
+        .execute(&pool)
+        .await
+        .unwrap();
         pool.close().await;
 
         let store = SQLiteStore::new(
@@ -879,6 +960,59 @@ mod tests {
             row.try_get::<String, _>("name")
                 .is_ok_and(|name| name == "source_event_id")
         }));
+        assert!(columns.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .is_ok_and(|name| name == "hydration_quality")
+        }));
+        let legacy_quality: String =
+            sqlx::query_scalar("SELECT hydration_quality FROM records LIMIT 1")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(legacy_quality, "unknown");
+        let indexes = sqlx::query("PRAGMA index_list(records)")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+        assert!(indexes.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .is_ok_and(|name| name == "idx_records_hydration_quality")
+        }));
+    }
+
+    #[tokio::test]
+    async fn hydration_quality_round_trips_and_partial_selection_is_bounded() {
+        let store = create_test_db().await;
+        let mut complete = test_record(1);
+        complete.hydrated_metadata.hydration_quality = HydrationQuality::Complete;
+        let mut partial_one = test_record(2);
+        partial_one.hydrated_metadata.hydration_quality = HydrationQuality::Partial;
+        let mut partial_two = test_record(3);
+        partial_two.hydrated_metadata.hydration_quality = HydrationQuality::Partial;
+
+        store
+            .store_batch(&[complete.clone(), partial_one.clone(), partial_two])
+            .await
+            .unwrap();
+
+        let loaded = store
+            .get_record_by_uri(&complete.get_at_uri().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.hydrated_metadata.hydration_quality,
+            HydrationQuality::Complete
+        );
+
+        let selected = store.select_partial_records(1).await.unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(
+            selected[0].hydrated_metadata.hydration_quality,
+            HydrationQuality::Partial
+        );
+        assert_eq!(store.select_partial_records(0).await.unwrap().len(), 0);
+        assert_eq!(store.load_ingestion_checkpoint().await.unwrap(), None);
     }
 
     #[tokio::test]

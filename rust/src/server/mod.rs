@@ -479,6 +479,82 @@ fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> Strin
     );
     append_gauge_metric(
         &mut output,
+        "jetstream_turbo_optional_hydration_negative_cache_entries",
+        "Active temporarily unavailable referenced-post cache entries.",
+        diagnostics.cache_state.negative_post_entries.to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_optional_hydration_negative_cache_capacity",
+        "Configured capacity for temporarily unavailable referenced posts.",
+        diagnostics.cache_state.negative_post_capacity.to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_optional_hydration_partial_records",
+        "Durably stored records with partial optional hydration.",
+        optional_i64_metric_value(diagnostics.sqlite_state.partial_records),
+    );
+    output.push_str("# HELP jetstream_turbo_optional_hydration_post_outcomes_total Referenced-post fetch outcomes by bounded result kind.\n");
+    output.push_str("# TYPE jetstream_turbo_optional_hydration_post_outcomes_total counter\n");
+    for (outcome, value) in [
+        ("found", diagnostics.cache_state.post_found),
+        ("missing", diagnostics.cache_state.post_missing),
+        (
+            "temporarily_unavailable",
+            diagnostics.cache_state.post_unavailable,
+        ),
+    ] {
+        output.push_str(&format!(
+            "jetstream_turbo_optional_hydration_post_outcomes_total{{outcome=\"{outcome}\"}} {value}\n"
+        ));
+    }
+    append_counter_metric(
+        &mut output,
+        "jetstream_turbo_optional_hydration_partial_records_total",
+        "Records produced with partial optional hydration.",
+        diagnostics.cache_state.partial_records_total,
+    );
+    append_counter_metric(
+        &mut output,
+        "jetstream_turbo_optional_hydration_negative_cache_hits_total",
+        "Referenced-post requests suppressed by the active negative cache.",
+        diagnostics.cache_state.negative_post_hits,
+    );
+    append_counter_metric(
+        &mut output,
+        "jetstream_turbo_optional_hydration_negative_cache_evictions_total",
+        "Negative referenced-post entries evicted at capacity.",
+        diagnostics.cache_state.negative_post_evictions,
+    );
+    append_counter_metric(
+        &mut output,
+        "jetstream_turbo_optional_hydration_recoveries_total",
+        "Referenced posts that resolved after temporary unavailability.",
+        diagnostics.cache_state.post_recoveries,
+    );
+    output.push_str("# HELP jetstream_turbo_optional_hydration_isolation_outcomes_total Bounded post-isolation classifications.\n");
+    output.push_str("# TYPE jetstream_turbo_optional_hydration_isolation_outcomes_total counter\n");
+    for (outcome, value) in [
+        (
+            "broad_outage",
+            diagnostics.cache_state.isolation_broad_outage,
+        ),
+        (
+            "singleton_poison",
+            diagnostics.cache_state.isolation_singleton_poison,
+        ),
+        (
+            "budget_exhausted",
+            diagnostics.cache_state.isolation_budget_exhausted,
+        ),
+    ] {
+        output.push_str(&format!(
+            "jetstream_turbo_optional_hydration_isolation_outcomes_total{{outcome=\"{outcome}\"}} {value}\n"
+        ));
+    }
+    append_gauge_metric(
+        &mut output,
         "jetstream_turbo_sqlite_available",
         "Whether SQLite is currently available (1 = yes, 0 = no).",
         bool_metric_value(diagnostics.sqlite_state.available),
@@ -658,6 +734,21 @@ fn append_gauge_metric(output: &mut String, name: &str, help: &str, value: Strin
     output.push('\n');
 }
 
+fn append_counter_metric(output: &mut String, name: &str, help: &str, value: u64) {
+    output.push_str("# HELP ");
+    output.push_str(name);
+    output.push(' ');
+    output.push_str(help);
+    output.push('\n');
+    output.push_str("# TYPE ");
+    output.push_str(name);
+    output.push_str(" counter\n");
+    output.push_str(name);
+    output.push(' ');
+    output.push_str(&value.to_string());
+    output.push('\n');
+}
+
 fn bool_metric_value(value: bool) -> String {
     if value {
         "1".to_string()
@@ -738,6 +829,18 @@ mod tests {
                 post_misses: 6,
                 total_requests: 18,
                 cache_evictions: 0,
+                negative_post_entries: 1,
+                negative_post_capacity: 8,
+                negative_post_hits: 2,
+                negative_post_evictions: 0,
+                post_recoveries: 1,
+                post_found: 7,
+                post_missing: 2,
+                post_unavailable: 3,
+                partial_records_total: 3,
+                isolation_broad_outage: 1,
+                isolation_singleton_poison: 1,
+                isolation_budget_exhausted: 1,
             },
             sqlite_state: SQLiteStateDiagnostics {
                 available: true,
@@ -750,6 +853,7 @@ mod tests {
                 mmap_size_bytes: Some(268435456),
                 journal_mode: Some("wal".to_string()),
                 journal_size_limit_bytes: Some(5368709120),
+                partial_records: Some(3),
                 collection_error: None,
             },
             not_redis_state: NotRedisStateDiagnostics {
@@ -866,6 +970,15 @@ mod tests {
         assert!(output.contains("jetstream_turbo_not_redis_stream_length 7"));
         assert!(output.contains("jetstream_turbo_pipeline_ingress_messages_total 1"));
         assert!(output.contains("jetstream_turbo_pipeline_maximum_batches 6"));
+        assert!(output.contains(
+            "jetstream_turbo_optional_hydration_post_outcomes_total{outcome=\"temporarily_unavailable\"} 3"
+        ));
+        assert!(output.contains("jetstream_turbo_optional_hydration_partial_records 3"));
+        assert!(output.contains("jetstream_turbo_optional_hydration_negative_cache_entries 1"));
+        assert!(!output.contains("at://"));
+        assert!(!output.to_ascii_lowercase().contains("authorization"));
+        assert!(!output.contains("request_fingerprint="));
+        assert!(!output.contains("fingerprint=\""));
     }
 
     #[test]

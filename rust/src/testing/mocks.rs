@@ -1,4 +1,4 @@
-use crate::client::{MessageSource, PostFetcher, ProfileFetcher};
+use crate::client::{MessageSource, PostFetchOutcome, PostFetcher, ProfileFetcher};
 use crate::models::enriched::EnrichedRecord;
 use crate::models::{
     bluesky::{BlueskyPost, BlueskyProfile},
@@ -86,6 +86,7 @@ impl ProfileFetcher for MockProfileFetcher {
 /// Mock implementation of `PostFetcher` that returns configurable posts.
 pub struct MockPostFetcher {
     posts: Mutex<std::collections::HashMap<String, BlueskyPost>>,
+    outcomes: Mutex<std::collections::HashMap<String, PostFetchOutcome>>,
     pub call_count: AtomicUsize,
     pub requested_uris: Mutex<Vec<Vec<String>>>,
 }
@@ -100,6 +101,7 @@ impl MockPostFetcher {
     pub fn new() -> Self {
         Self {
             posts: Mutex::new(std::collections::HashMap::new()),
+            outcomes: Mutex::new(std::collections::HashMap::new()),
             call_count: AtomicUsize::new(0),
             requested_uris: Mutex::new(Vec::new()),
         }
@@ -109,14 +111,29 @@ impl MockPostFetcher {
         let uri = post.uri.clone();
         self.posts.lock().await.insert(uri, post);
     }
+
+    pub async fn add_outcome(&self, uri: String, outcome: PostFetchOutcome) {
+        self.outcomes.lock().await.insert(uri, outcome);
+    }
 }
 
 impl PostFetcher for MockPostFetcher {
-    async fn bulk_fetch_posts(&self, uris: &[String]) -> TurboResult<Vec<Option<BlueskyPost>>> {
+    async fn bulk_fetch_posts(&self, uris: &[String]) -> TurboResult<Vec<PostFetchOutcome>> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         self.requested_uris.lock().await.push(uris.to_vec());
         let mut posts = self.posts.lock().await;
-        let results = uris.iter().map(|uri| posts.remove(uri.as_str())).collect();
+        let mut outcomes = self.outcomes.lock().await;
+        let results = uris
+            .iter()
+            .map(|uri| {
+                outcomes.remove(uri).unwrap_or_else(|| {
+                    posts
+                        .remove(uri.as_str())
+                        .map(PostFetchOutcome::Found)
+                        .unwrap_or(PostFetchOutcome::Missing)
+                })
+            })
+            .collect();
         Ok(results)
     }
 }

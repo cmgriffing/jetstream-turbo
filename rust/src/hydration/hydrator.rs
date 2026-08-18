@@ -1,8 +1,8 @@
-use crate::client::{PostFetcher, ProfileFetcher};
+use crate::client::{PostFetchOutcome, PostFetcher, ProfileFetcher};
 use crate::hydration::resolver::CacheMissResolver;
 use crate::hydration::TurboCache;
 use crate::models::{
-    enriched::EnrichedRecord,
+    enriched::{EnrichedRecord, HydrationQuality, ReferencedPost},
     jetstream::JetstreamMessage,
     record_view::{FacetFeature, RecordView},
     TurboResult,
@@ -10,13 +10,14 @@ use crate::models::{
 use crate::utils::serde_utils::string_utils::is_valid_at_uri;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{info, trace};
+use tracing::info;
 
 struct MessageContext {
     message: JetstreamMessage,
     author_did: String,
     is_post: bool,
     mentioned_dids: Vec<String>,
+    post_uris: Vec<String>,
 }
 
 /// Extract mentioned DIDs from a record view.
@@ -128,25 +129,13 @@ where
     }
 
     pub async fn hydrate_message(&self, message: JetstreamMessage) -> TurboResult<EnrichedRecord> {
-        let author_did = message.extract_did().to_string();
-        let at_uri = message.extract_at_uri();
-        let is_post = at_uri.is_some();
-
-        let mentioned_dids: Vec<String> = message
-            .commit
-            .as_ref()
-            .and_then(|c| c.record.as_ref())
-            .map(|r| extract_mentioned_dids_from_view(&RecordView::new(r)))
-            .unwrap_or_default();
-
-        self.hydrate_one(
-            message,
-            author_did,
-            is_post,
-            mentioned_dids,
-            chrono::Utc::now(),
-        )
-        .await
+        self.hydrate_batch(vec![message])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                crate::models::TurboError::Internal("hydrator returned no record".to_string())
+            })
     }
 
     async fn hydrate_one(
@@ -155,6 +144,8 @@ where
         author_did: String,
         is_post: bool,
         mentioned_dids: Vec<String>,
+        post_uris: Vec<String>,
+        post_outcomes: &std::collections::HashMap<String, PostFetchOutcome>,
         processed_at: chrono::DateTime<chrono::Utc>,
     ) -> TurboResult<EnrichedRecord> {
         let start_time = Instant::now();
@@ -162,13 +153,9 @@ where
         tracing::Span::current().record("did", &author_did);
 
         let mut enriched = EnrichedRecord::new_with_timestamp(message, processed_at);
+        enriched.hydrated_metadata.hydration_quality = HydrationQuality::Complete;
 
         if is_post {
-            let at_uri = enriched.message.extract_at_uri();
-            if let Some(ref uri) = at_uri {
-                tracing::Span::current().record("at_uri", uri);
-            }
-
             let author_profile = self.resolver.resolve_profile(&author_did).await?;
             let hit = author_profile.is_some();
             tracing::Span::current().record("cache_hit", hit);
@@ -180,6 +167,40 @@ where
             if let Some(profile) = self.resolver.cache().get_user_profile(did) {
                 enriched.hydrated_metadata.add_mentioned_profile(profile);
             }
+        }
+
+        for uri in post_uris {
+            let outcome = post_outcomes.get(&uri).ok_or_else(|| {
+                crate::models::TurboError::InvalidApiResponse(
+                    "missing post outcome for requested URI".to_string(),
+                )
+            })?;
+            match outcome {
+                PostFetchOutcome::Found(post) => {
+                    enriched
+                        .hydrated_metadata
+                        .add_referenced_post(ReferencedPost {
+                            uri: post.uri.clone(),
+                            cid: post.cid.clone(),
+                            text: post.text.clone(),
+                            author_did: Arc::clone(&post.author.did),
+                            author_handle: Some(post.author.handle.clone()),
+                            created_at: post.created_at,
+                            reply_count: post.reply_count,
+                            like_count: post.like_count,
+                            repost_count: post.repost_count,
+                        });
+                }
+                PostFetchOutcome::Missing => {}
+                PostFetchOutcome::TemporarilyUnavailable(failure) => {
+                    enriched.hydrated_metadata.add_degradation(failure.clone());
+                }
+            }
+        }
+
+        if enriched.hydrated_metadata.hydration_quality == HydrationQuality::Partial {
+            self.resolver.cache().record_partial_record();
+            metrics::counter!("optional_hydration_partial_records_total").increment(1);
         }
 
         enriched.metrics.hydration_time_ms = start_time.elapsed().as_millis() as u64;
@@ -233,6 +254,7 @@ where
                 author_did,
                 is_post,
                 mentioned_dids,
+                post_uris,
             });
         }
 
@@ -246,12 +268,23 @@ where
 
         let cache_check_start = Instant::now();
         self.resolver.resolve_profiles(&dids).await?;
-        self.resolver.resolve_posts(&uris).await?;
+        let post_outcomes = self.resolver.resolve_posts(&uris).await?;
+        if post_outcomes.len() != uris.len() {
+            return Err(crate::models::TurboError::InvalidApiResponse(format!(
+                "post outcome cardinality mismatch: requested {}, received {}",
+                uris.len(),
+                post_outcomes.len()
+            )));
+        }
+        let post_outcomes = uris
+            .into_iter()
+            .zip(post_outcomes)
+            .collect::<std::collections::HashMap<_, _>>();
         let api_fetch_time = cache_check_start.elapsed().as_millis() as u64;
         tracing::Span::current().record("api_fetch_time_ms", api_fetch_time);
 
         let hydrate_start = Instant::now();
-        let results = self.hydrate_contexts(contexts).await;
+        let results = self.hydrate_contexts(contexts, &post_outcomes).await?;
         let hydrate_time = hydrate_start.elapsed().as_millis() as u64;
         tracing::Span::current().record("hydrate_time_ms", hydrate_time);
 
@@ -267,30 +300,132 @@ where
         Ok(results)
     }
 
-    async fn hydrate_contexts(&self, contexts: Vec<MessageContext>) -> Vec<EnrichedRecord> {
+    async fn hydrate_contexts(
+        &self,
+        contexts: Vec<MessageContext>,
+        post_outcomes: &std::collections::HashMap<String, PostFetchOutcome>,
+    ) -> TurboResult<Vec<EnrichedRecord>> {
         let mut results = Vec::with_capacity(contexts.len());
         let processed_at = chrono::Utc::now();
         for ctx in contexts {
-            match self
+            let enriched = self
                 .hydrate_one(
                     ctx.message,
                     ctx.author_did,
                     ctx.is_post,
                     ctx.mentioned_dids,
+                    ctx.post_uris,
+                    post_outcomes,
                     processed_at,
                 )
-                .await
-            {
-                Ok(enriched) => results.push(enriched),
-                Err(e) => {
-                    trace!("Failed to hydrate message: {}", e);
-                }
-            }
+                .await?;
+            results.push(enriched);
         }
-        results
+        Ok(results)
     }
 
     pub fn get_cache(&self) -> &TurboCache {
         self.resolver.cache()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::{BlueskyOperation, HydrationFailure, UpstreamFailureCategory};
+    use crate::models::bluesky::BlueskyPost;
+    use crate::testing::fixtures::{create_post_message, create_profile, create_reply_message};
+    use crate::testing::mocks::{MockPostFetcher, MockProfileFetcher};
+
+    fn test_post(uri: &str) -> BlueskyPost {
+        BlueskyPost {
+            uri: uri.to_string(),
+            cid: "bafyreireferenced".to_string(),
+            author: create_profile("did:plc:parent"),
+            text: "referenced text".to_string(),
+            created_at: chrono::Utc::now(),
+            embed: None,
+            reply: None,
+            facets: None,
+            labels: None,
+            like_count: Some(2),
+            repost_count: Some(1),
+            reply_count: Some(3),
+        }
+    }
+
+    fn unavailable() -> PostFetchOutcome {
+        PostFetchOutcome::TemporarilyUnavailable(HydrationFailure {
+            operation: BlueskyOperation::Posts,
+            category: UpstreamFailureCategory::ServerError,
+            status_class: Some("5xx".to_string()),
+            attempts: 4,
+            request_fingerprint: "safe-fingerprint".to_string(),
+            isolation: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn shared_unavailable_reference_marks_only_affected_records_partial() {
+        let post_fetcher = Arc::new(MockPostFetcher::new());
+        let uri = "at://did:plc:parent/app.bsky.feed.post/shared";
+        post_fetcher
+            .add_outcome(uri.to_string(), unavailable())
+            .await;
+        let hydrator = Hydrator::new(
+            TurboCache::new(20, 20),
+            Arc::new(MockProfileFetcher::new()),
+            Arc::clone(&post_fetcher),
+        );
+
+        let records = hydrator
+            .hydrate_batch(vec![
+                create_reply_message(1, "did:plc:parent", "shared"),
+                create_reply_message(2, "did:plc:parent", "shared"),
+                create_post_message(3),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            records[0].hydrated_metadata.hydration_quality,
+            HydrationQuality::Partial
+        );
+        assert_eq!(
+            records[1].hydrated_metadata.hydration_quality,
+            HydrationQuality::Partial
+        );
+        assert_eq!(
+            records[2].hydrated_metadata.hydration_quality,
+            HydrationQuality::Complete
+        );
+        assert_eq!(
+            post_fetcher.requested_uris.lock().await[0],
+            vec![uri.to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn found_reference_is_attached_to_record() {
+        let post_fetcher = Arc::new(MockPostFetcher::new());
+        let uri = "at://did:plc:parent/app.bsky.feed.post/found";
+        post_fetcher.add_post(test_post(uri)).await;
+        let hydrator = Hydrator::new(
+            TurboCache::new(20, 20),
+            Arc::new(MockProfileFetcher::new()),
+            post_fetcher,
+        );
+
+        let record = hydrator
+            .hydrate_message(create_reply_message(1, "did:plc:parent", "found"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            record.hydrated_metadata.hydration_quality,
+            HydrationQuality::Complete
+        );
+        assert_eq!(record.hydrated_metadata.referenced_posts.len(), 1);
+        assert_eq!(record.hydrated_metadata.referenced_posts[0].uri, uri);
     }
 }

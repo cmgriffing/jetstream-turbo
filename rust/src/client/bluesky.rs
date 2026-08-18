@@ -30,7 +30,14 @@ pub trait PostFetcher {
     fn bulk_fetch_posts(
         &self,
         uris: &[String],
-    ) -> impl std::future::Future<Output = TurboResult<Vec<Option<BlueskyPost>>>> + Send;
+    ) -> impl std::future::Future<Output = TurboResult<Vec<PostFetchOutcome>>> + Send;
+}
+
+#[derive(Debug, Clone)]
+pub enum PostFetchOutcome {
+    Found(BlueskyPost),
+    Missing,
+    TemporarilyUnavailable(crate::client::HydrationFailure),
 }
 
 const REQUESTS_PER_SECOND_MS: u64 = 1000 / 10;
@@ -112,7 +119,6 @@ struct PostBatchCollector {
     api_base_url: String,
     retry_policy: RequestRetryPolicy,
     containment_policy: ContainmentPolicy,
-    isolation_recurrence: Arc<AtomicU32>,
     auth_client: Option<Arc<BlueskyAuthClient>>,
     refresh_jwt: Arc<RwLock<Option<String>>>,
     expires_at: Arc<RwLock<Option<String>>>,
@@ -444,6 +450,12 @@ impl BlueskyClient {
     pub async fn get_session_count(&self) -> usize {
         self.session_strings.read().await.len()
     }
+
+    #[cfg(test)]
+    pub(crate) async fn set_api_base_url_for_test(&self, api_base_url: String) {
+        self.profile_batch_collector.write().await.api_base_url = api_base_url.clone();
+        self.post_batch_collector.write().await.api_base_url = api_base_url;
+    }
 }
 
 impl ProfileFetcher for BlueskyClient {
@@ -472,7 +484,7 @@ impl PostFetcher for BlueskyClient {
         skip(self, uris),
         fields(count, valid_count)
     )]
-    async fn bulk_fetch_posts(&self, uris: &[String]) -> TurboResult<Vec<Option<BlueskyPost>>> {
+    async fn bulk_fetch_posts(&self, uris: &[String]) -> TurboResult<Vec<PostFetchOutcome>> {
         if uris.is_empty() {
             return Ok(vec![]);
         }
@@ -503,11 +515,126 @@ impl PostFetcher for BlueskyClient {
         }
 
         let mut collector = self.post_batch_collector.write().await;
-        let posts = collector.add_and_fetch(valid_uris).await?;
+        let fetch_result = collector.add_and_fetch(valid_uris.clone()).await;
         collector.log_partial_percentage();
 
-        Ok(posts)
+        match fetch_result {
+            Ok(posts) => Ok(posts
+                .into_iter()
+                .map(|post| {
+                    post.map(PostFetchOutcome::Found)
+                        .unwrap_or(PostFetchOutcome::Missing)
+                })
+                .collect()),
+            Err(error) => {
+                let Some(failure) = optional_post_failure(&error, &valid_uris) else {
+                    return Err(error);
+                };
+                let outcomes = valid_uris
+                    .iter()
+                    .map(|uri| {
+                        collector
+                            .isolation_cache
+                            .get(uri)
+                            .cloned()
+                            .map(|post| {
+                                post.map(PostFetchOutcome::Found)
+                                    .unwrap_or(PostFetchOutcome::Missing)
+                            })
+                            .unwrap_or_else(|| {
+                                PostFetchOutcome::TemporarilyUnavailable(failure.clone())
+                            })
+                    })
+                    .collect();
+                Ok(outcomes)
+            }
+        }
     }
+}
+
+fn optional_post_failure(
+    error: &TurboError,
+    uris: &[String],
+) -> Option<crate::client::HydrationFailure> {
+    let upstream = match error {
+        TurboError::BlueskyUpstream(error) => return Some(error.into()),
+        TurboError::HttpRequest(_) => UpstreamHttpError {
+            operation: BlueskyOperation::Posts,
+            status: None,
+            category: UpstreamFailureCategory::Transport,
+            diagnostic_summary: None,
+            attempts: 1,
+            retry_limit: 0,
+            request_cardinality: uris.len(),
+            transient: true,
+            request_fingerprint: stable_identifier_fingerprint(uris),
+            isolation: None,
+        },
+        TurboError::Timeout(_) => UpstreamHttpError {
+            operation: BlueskyOperation::Posts,
+            status: None,
+            category: UpstreamFailureCategory::RequestTimeout,
+            diagnostic_summary: None,
+            attempts: 1,
+            retry_limit: 0,
+            request_cardinality: uris.len(),
+            transient: true,
+            request_fingerprint: stable_identifier_fingerprint(uris),
+            isolation: None,
+        },
+        TurboError::RateLimitExceeded => UpstreamHttpError {
+            operation: BlueskyOperation::Posts,
+            status: Some(429),
+            category: UpstreamFailureCategory::RateLimited,
+            diagnostic_summary: None,
+            attempts: 1,
+            retry_limit: 0,
+            request_cardinality: uris.len(),
+            transient: true,
+            request_fingerprint: stable_identifier_fingerprint(uris),
+            isolation: None,
+        },
+        TurboError::ExpiredToken(_) => UpstreamHttpError {
+            operation: BlueskyOperation::Posts,
+            status: Some(401),
+            category: UpstreamFailureCategory::Authentication,
+            diagnostic_summary: None,
+            attempts: 1,
+            retry_limit: 0,
+            request_cardinality: uris.len(),
+            transient: false,
+            request_fingerprint: stable_identifier_fingerprint(uris),
+            isolation: None,
+        },
+        TurboError::PermissionDenied(_) => UpstreamHttpError {
+            operation: BlueskyOperation::Posts,
+            status: Some(403),
+            category: UpstreamFailureCategory::Permission,
+            diagnostic_summary: None,
+            attempts: 1,
+            retry_limit: 0,
+            request_cardinality: uris.len(),
+            transient: false,
+            request_fingerprint: stable_identifier_fingerprint(uris),
+            isolation: None,
+        },
+        TurboError::InvalidApiResponse(_)
+        | TurboError::JsonSerialization(_)
+        | TurboError::JsonDeserialization(_) => UpstreamHttpError {
+            operation: BlueskyOperation::Posts,
+            status: None,
+            category: UpstreamFailureCategory::Decode,
+            diagnostic_summary: None,
+            attempts: 1,
+            retry_limit: 0,
+            request_cardinality: uris.len(),
+            transient: false,
+            request_fingerprint: stable_identifier_fingerprint(uris),
+            isolation: None,
+        },
+        _ => return None,
+    };
+    Some((&upstream).into())
 }
 
 impl ProfileBatchCollector {
@@ -752,8 +879,12 @@ impl ProfileBatchCollector {
                         ));
                     }
                 },
-                Err(_error) => {
-                    let category = UpstreamFailureCategory::Transport;
+                Err(error) => {
+                    let category = if error.is_timeout() {
+                        UpstreamFailureCategory::RequestTimeout
+                    } else {
+                        UpstreamFailureCategory::Transport
+                    };
                     if attempts > self.retry_policy.max_retries {
                         let error = upstream_error(
                             operation,
@@ -1010,7 +1141,7 @@ impl PostBatchCollector {
             api_base_url,
             retry_policy,
             containment_policy,
-            isolation_recurrence,
+            isolation_recurrence: _,
             auth_client,
             refresh_jwt,
             expires_at,
@@ -1025,7 +1156,6 @@ impl PostBatchCollector {
             api_base_url,
             retry_policy,
             containment_policy,
-            isolation_recurrence,
             auth_client,
             refresh_jwt,
             expires_at,
@@ -1273,8 +1403,12 @@ impl PostBatchCollector {
                         ));
                     }
                 },
-                Err(_error) => {
-                    let category = UpstreamFailureCategory::Transport;
+                Err(error) => {
+                    let category = if error.is_timeout() {
+                        UpstreamFailureCategory::RequestTimeout
+                    } else {
+                        UpstreamFailureCategory::Transport
+                    };
                     if attempts > self.retry_policy.max_retries {
                         let error = upstream_error(
                             operation,
@@ -1331,12 +1465,7 @@ impl PostBatchCollector {
                     })
                     .collect())
             }
-            Err(error)
-                if transient_upstream_category(&error).is_some()
-                    && unresolved.len() > 1
-                    && self.isolation_recurrence.load(Ordering::Acquire)
-                        >= self.containment_policy.persistence_threshold =>
-            {
+            Err(error) if transient_upstream_category(&error).is_some() && unresolved.len() > 1 => {
                 self.isolate_posts(unresolved, error).await
             }
             Err(error) => Err(error),
@@ -1523,8 +1652,6 @@ impl PostBatchCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::recovery::{IngestionCheckpoint, IngressRange, SourceCursor, SourceEventId};
-    use crate::turbocharger::FailureSupervisor;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
@@ -1683,8 +1810,84 @@ mod tests {
             .await;
         let client = client_for_server(&server, 1, ContainmentPolicy::default()).await;
         let result = client.bulk_fetch_posts(&[uri.to_string()]).await.unwrap();
-        assert!(result[0].is_some());
+        assert!(matches!(result[0], PostFetchOutcome::Found(_)));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn successful_post_response_preserves_order_and_marks_omissions_missing() {
+        let server = MockServer::start().await;
+        let found = "at://did:plc:a/app.bsky.feed.post/found";
+        let missing = "at://did:plc:b/app.bsky.feed.post/missing";
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.feed.getPosts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(post_body(found)))
+            .mount(&server)
+            .await;
+        let client = client_for_server(&server, 0, ContainmentPolicy::default()).await;
+
+        let outcomes = client
+            .bulk_fetch_posts(&[found.to_string(), missing.to_string()])
+            .await
+            .unwrap();
+
+        assert!(matches!(&outcomes[0], PostFetchOutcome::Found(post) if post.uri == found));
+        assert!(matches!(outcomes[1], PostFetchOutcome::Missing));
+    }
+
+    #[tokio::test]
+    async fn singleton_502_becomes_temporarily_unavailable_after_retries() {
+        let server = MockServer::start().await;
+        let uri = "at://did:plc:a/app.bsky.feed.post/poison";
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.feed.getPosts"))
+            .respond_with(ResponseTemplate::new(502))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let client = client_for_server(&server, 1, ContainmentPolicy::default()).await;
+
+        let outcomes = client.bulk_fetch_posts(&[uri.to_string()]).await.unwrap();
+        assert!(matches!(
+            &outcomes[0],
+            PostFetchOutcome::TemporarilyUnavailable(failure)
+                if failure.category == UpstreamFailureCategory::ServerError && failure.attempts == 2
+        ));
+    }
+
+    #[tokio::test]
+    async fn post_isolation_keeps_successful_subset_and_bounds_budget_exhaustion() {
+        let server = MockServer::start().await;
+        let uris = [
+            "at://did:plc:a/app.bsky.feed.post/one".to_string(),
+            "at://did:plc:b/app.bsky.feed.post/two".to_string(),
+            "at://did:plc:c/app.bsky.feed.post/three".to_string(),
+            "at://did:plc:d/app.bsky.feed.post/poison".to_string(),
+        ];
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.feed.getPosts"))
+            .respond_with(PoisonResponder {
+                mode: PoisonMode::One(uris[3].clone()),
+            })
+            .mount(&server)
+            .await;
+        let containment = ContainmentPolicy {
+            isolation_request_budget: 1,
+            ..ContainmentPolicy::default()
+        };
+        let client = client_for_server(&server, 0, containment).await;
+
+        let outcomes = client.bulk_fetch_posts(&uris).await.unwrap();
+        assert_eq!(outcomes.len(), uris.len());
+        assert!(outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, PostFetchOutcome::Found(_))));
+        assert!(outcomes.iter().any(|outcome| matches!(
+            outcome,
+            PostFetchOutcome::TemporarilyUnavailable(failure)
+                if failure.isolation == Some(crate::client::IsolationOutcome::BudgetExhausted)
+        )));
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -1795,14 +1998,12 @@ mod tests {
             "at://did:plc:a/app.bsky.feed.post/one".to_string(),
             "at://did:plc:b/app.bsky.feed.post/two".to_string(),
         ];
-        let error = client.bulk_fetch_posts(&uris).await.unwrap_err();
-        let TurboError::BlueskyUpstream(error) = error else {
-            panic!("expected typed upstream error");
-        };
-        assert!(matches!(
-            error.isolation,
-            Some(crate::client::IsolationOutcome::BroadOutage { .. })
-        ));
+        let outcomes = client.bulk_fetch_posts(&uris).await.unwrap();
+        assert!(outcomes.iter().all(|outcome| matches!(
+            outcome,
+            PostFetchOutcome::TemporarilyUnavailable(failure)
+                if matches!(failure.isolation, Some(crate::client::IsolationOutcome::BroadOutage { .. }))
+        )));
         assert_eq!(server.received_requests().await.unwrap().len(), 3);
     }
 
@@ -1843,7 +2044,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replayed_502_recurrence_activates_isolation_at_threshold() {
+    async fn post_outage_returns_ordered_unavailable_without_replay() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/app.bsky.feed.getPosts"))
@@ -1859,55 +2060,16 @@ mod tests {
             isolation_request_budget: 8,
         };
         let client = client_for_server(&server, 0, containment).await;
-        let supervisor = FailureSupervisor::new(containment);
         let uris = [
             "at://did:plc:a/app.bsky.feed.post/one".to_string(),
             "at://did:plc:b/app.bsky.feed.post/two".to_string(),
         ];
-        let failed_range = IngressRange {
-            start_ordinal: 10,
-            end_ordinal: 11,
-            start_cursor: source_cursor(10_000, "failed-start"),
-            end_cursor: source_cursor(11_000, "failed-end"),
-        };
-
-        let first_error = client.bulk_fetch_posts(&uris).await.unwrap_err();
-        let first = supervisor.record_failure(&first_error, Some(&failed_range));
-        client.set_failure_recurrence(first.recurrence);
-        assert_eq!(first.recurrence, 1);
-        assert!(!first.persistent);
-
-        let replay_checkpoint = IngestionCheckpoint {
-            ingress_ordinal: 1_000,
-            cursor: source_cursor(10_500, "replayed-before-boundary"),
-            updated_at: chrono::Utc::now(),
-        };
-        assert!(supervisor.observe_checkpoint(&replay_checkpoint).is_none());
-
-        let replay_error = client.bulk_fetch_posts(&uris).await.unwrap_err();
-        let replay = supervisor.record_failure(&replay_error, Some(&failed_range));
-        client.set_failure_recurrence(replay.recurrence);
-        assert_eq!(replay.recurrence, 2);
-        assert!(replay.persistent);
-        assert!(replay.delay > first.delay);
-
-        let isolation_error = client.bulk_fetch_posts(&uris).await.unwrap_err();
-        let TurboError::BlueskyUpstream(isolation_error) = isolation_error else {
-            panic!("expected typed upstream error");
-        };
-        assert!(matches!(
-            isolation_error.isolation,
-            Some(crate::client::IsolationOutcome::BroadOutage { .. })
-        ));
-        assert_eq!(server.received_requests().await.unwrap().len(), 5);
-    }
-
-    fn source_cursor(time_us: u64, event_id: &str) -> SourceCursor {
-        SourceCursor {
-            time_us,
-            source_seq: None,
-            source_event_id: SourceEventId::from(event_id.to_string()),
-        }
+        let outcomes = client.bulk_fetch_posts(&uris).await.unwrap();
+        assert_eq!(outcomes.len(), uris.len());
+        assert!(outcomes
+            .iter()
+            .all(|outcome| matches!(outcome, PostFetchOutcome::TemporarilyUnavailable(_))));
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
     }
 
     #[tokio::test]

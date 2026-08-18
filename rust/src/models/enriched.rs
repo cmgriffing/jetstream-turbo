@@ -1,3 +1,4 @@
+use crate::client::HydrationFailure;
 use crate::models::recovery::SourceEventId;
 use crate::models::{bluesky::BlueskyProfile, jetstream::JetstreamMessage};
 use chrono::{DateTime, Utc};
@@ -27,6 +28,11 @@ pub struct EnrichedRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct HydratedMetadata {
+    /// Quality of optional enrichment. Missing on legacy records means unknown.
+    pub hydration_quality: HydrationQuality,
+    /// Bounded, privacy-safe details for temporarily unavailable enrichment.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub degradation_summaries: Vec<HydrationFailure>,
     /// Author profile information
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author_profile: Option<Arc<BlueskyProfile>>,
@@ -49,6 +55,35 @@ pub struct HydratedMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detected_language: Option<String>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HydrationQuality {
+    #[default]
+    Unknown,
+    Complete,
+    Partial,
+}
+
+impl HydrationQuality {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Complete => "complete",
+            Self::Partial => "partial",
+        }
+    }
+
+    pub fn from_storage(value: &str) -> Self {
+        match value {
+            "complete" => Self::Complete,
+            "partial" => Self::Partial,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+pub const MAX_DEGRADATION_SUMMARIES: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReferencedPost {
@@ -88,6 +123,8 @@ pub struct ProcessingMetrics {
 }
 
 const DEFAULT_HYDRATED: HydratedMetadata = HydratedMetadata {
+    hydration_quality: HydrationQuality::Unknown,
+    degradation_summaries: Vec::new(),
     author_profile: None,
     mentioned_profiles: Vec::new(),
     referenced_posts: Vec::new(),
@@ -157,6 +194,15 @@ impl EnrichedRecord {
 }
 
 impl HydratedMetadata {
+    pub fn add_degradation(&mut self, failure: HydrationFailure) {
+        self.hydration_quality = HydrationQuality::Partial;
+        if self.degradation_summaries.len() < MAX_DEGRADATION_SUMMARIES
+            && !self.degradation_summaries.contains(&failure)
+        {
+            self.degradation_summaries.push(failure);
+        }
+    }
+
     pub fn add_mentioned_profile(&mut self, profile: Arc<BlueskyProfile>) {
         if !self.mentioned_profiles.iter().any(|p| p.did == profile.did) {
             self.mentioned_profiles.push(profile);
@@ -164,7 +210,9 @@ impl HydratedMetadata {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.author_profile.is_none()
+        self.hydration_quality == HydrationQuality::Unknown
+            && self.degradation_summaries.is_empty()
+            && self.author_profile.is_none()
             && self.mentioned_profiles.is_empty()
             && self.referenced_posts.is_empty()
             && self.hashtags.is_empty()
@@ -183,6 +231,7 @@ impl HydratedMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::{BlueskyOperation, UpstreamFailureCategory};
     use crate::models::jetstream::{CommitData, MessageKind, OperationType};
     use serde_json::json;
 
@@ -252,7 +301,7 @@ mod tests {
         let enriched = EnrichedRecord::new(message);
         let json = serde_json::to_string(&enriched).unwrap();
 
-        assert!(json.contains("\"hydrated_metadata\":{}"));
+        assert!(json.contains("\"hydrated_metadata\":{\"hydration_quality\":\"unknown\"}"));
         assert!(!json.contains("\"mentioned_profiles\""));
         assert!(!json.contains("\"referenced_posts\""));
         assert!(!json.contains("\"hashtags\""));
@@ -290,5 +339,33 @@ mod tests {
         .unwrap();
 
         assert!(enriched.hydrated_metadata.is_empty());
+        assert_eq!(
+            enriched.hydrated_metadata.hydration_quality,
+            HydrationQuality::Unknown
+        );
+    }
+
+    #[test]
+    fn degradation_summaries_are_bounded_and_privacy_safe() {
+        let mut metadata = HydratedMetadata::default();
+        for index in 0..(MAX_DEGRADATION_SUMMARIES + 4) {
+            metadata.add_degradation(HydrationFailure {
+                operation: BlueskyOperation::Posts,
+                category: UpstreamFailureCategory::ServerError,
+                status_class: Some("5xx".to_string()),
+                attempts: 4,
+                request_fingerprint: format!("safe-{index}"),
+                isolation: None,
+            });
+        }
+
+        assert_eq!(metadata.hydration_quality, HydrationQuality::Partial);
+        assert_eq!(
+            metadata.degradation_summaries.len(),
+            MAX_DEGRADATION_SUMMARIES
+        );
+        let serialized = serde_json::to_string(&metadata).unwrap();
+        assert!(!serialized.contains("at://"));
+        assert!(!serialized.to_ascii_lowercase().contains("authorization"));
     }
 }

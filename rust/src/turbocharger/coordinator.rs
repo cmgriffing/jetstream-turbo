@@ -50,7 +50,7 @@ pub struct TaskPermit {
 }
 
 /// Retains completed ingress ranges until they form a contiguous durable prefix.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CompletionFrontier {
     next_ordinal: u64,
     pending: BTreeMap<u64, IngressRange>,

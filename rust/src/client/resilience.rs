@@ -1,5 +1,5 @@
 use reqwest::{header::HeaderValue, StatusCode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::time::Duration;
@@ -10,7 +10,7 @@ const REDACTED_AT_URI: &str = "[redacted-at-uri]";
 const REDACTED_AUTHORIZATION: &str = "[redacted-authorization]";
 const REDACTED_TOKEN: &str = "[redacted-token]";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BlueskyOperation {
     Profiles,
@@ -26,7 +26,7 @@ impl BlueskyOperation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UpstreamFailureCategory {
     Transport,
@@ -54,12 +54,50 @@ impl UpstreamFailureCategory {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IsolationOutcome {
     BroadOutage { category: UpstreamFailureCategory },
     SingletonPoison { request_fingerprint: String },
     BudgetExhausted,
+}
+
+impl IsolationOutcome {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::BroadOutage { .. } => "broad_outage",
+            Self::SingletonPoison { .. } => "singleton_poison",
+            Self::BudgetExhausted => "budget_exhausted",
+        }
+    }
+}
+
+/// Bounded, privacy-safe context for optional hydration degradation.
+///
+/// It deliberately excludes raw identifiers, response bodies, and credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HydrationFailure {
+    pub operation: BlueskyOperation,
+    pub category: UpstreamFailureCategory,
+    pub status_class: Option<String>,
+    pub attempts: u32,
+    pub request_fingerprint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<IsolationOutcome>,
+}
+
+impl From<&UpstreamHttpError> for HydrationFailure {
+    fn from(error: &UpstreamHttpError) -> Self {
+        Self {
+            operation: error.operation,
+            category: error.category,
+            status_class: error.status.map(|status| format!("{}xx", status / 100)),
+            attempts: error.attempts,
+            request_fingerprint: error.request_fingerprint.clone(),
+            isolation: error.isolation.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

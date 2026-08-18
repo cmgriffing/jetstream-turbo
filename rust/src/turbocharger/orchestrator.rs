@@ -191,7 +191,12 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             .await;
 
         // Initialize cache
-        let cache = TurboCache::new(settings.cache_size_users, settings.cache_size_posts);
+        let cache = TurboCache::new_with_negative_cache(
+            settings.cache_size_users,
+            settings.cache_size_posts,
+            settings.negative_post_cache_capacity,
+            settings.negative_post_cache_ttl,
+        );
 
         // Initialize hydrator
         let hydrator = Hydrator::new(cache, bluesky_client.clone(), bluesky_client.clone());
@@ -756,12 +761,15 @@ async fn persist_batch_completion(
     completion: BatchCompletion,
 ) -> TurboResult<Option<crate::models::recovery::IngestionCheckpoint>> {
     let mut frontier = frontier.lock().await;
-    let Some(checkpoint) = frontier.record_completed(completion.range)? else {
+    let mut staged_frontier = frontier.clone();
+    let Some(checkpoint) = staged_frontier.record_completed(completion.range)? else {
+        *frontier = staged_frontier;
         return Ok(None);
     };
     sqlite_store
         .advance_ingestion_checkpoint(&checkpoint)
         .await?;
+    *frontier = staged_frontier;
     Ok(Some(checkpoint))
 }
 
@@ -982,6 +990,18 @@ where
             post_misses: cache_metrics.post_misses,
             total_requests: cache_metrics.total_requests,
             cache_evictions: cache_metrics.cache_evictions,
+            negative_post_entries: cache.get_negative_post_entry_count(),
+            negative_post_capacity: cache.get_negative_post_capacity(),
+            negative_post_hits: cache_metrics.negative_post_hits,
+            negative_post_evictions: cache_metrics.negative_post_evictions,
+            post_recoveries: cache_metrics.post_recoveries,
+            post_found: cache_metrics.post_found,
+            post_missing: cache_metrics.post_missing,
+            post_unavailable: cache_metrics.post_unavailable,
+            partial_records_total: cache_metrics.partial_records,
+            isolation_broad_outage: cache_metrics.isolation_broad_outage,
+            isolation_singleton_poison: cache_metrics.isolation_singleton_poison,
+            isolation_budget_exhausted: cache_metrics.isolation_budget_exhausted,
         };
 
         let sqlite_state = match self.sqlite_store.get_state_snapshot().await {
@@ -996,6 +1016,7 @@ where
                 mmap_size_bytes: Some(snapshot.mmap_size_bytes),
                 journal_mode: Some(snapshot.journal_mode),
                 journal_size_limit_bytes: Some(snapshot.journal_size_limit_bytes),
+                partial_records: Some(snapshot.partial_records),
                 collection_error: None,
             },
             Err(e) => SQLiteStateDiagnostics {
@@ -1009,6 +1030,7 @@ where
                 mmap_size_bytes: None,
                 journal_mode: None,
                 journal_size_limit_bytes: None,
+                partial_records: None,
                 collection_error: Some(e.to_string()),
             },
         };
@@ -1314,20 +1336,23 @@ mod tests {
     use super::*;
     use crate::client::ProfileFetcher;
     use crate::client::{
-        BlueskyOperation, ContainmentPolicy, UpstreamFailureCategory, UpstreamHttpError,
+        BlueskyClient, BlueskyOperation, ContainmentPolicy, RequestRetryPolicy,
+        UpstreamFailureCategory, UpstreamHttpError,
     };
     use crate::hydration::TurboCache;
     use crate::models::bluesky::BlueskyProfile;
-    use crate::models::enriched::EnrichedRecord;
+    use crate::models::enriched::{EnrichedRecord, HydrationQuality};
     use crate::models::recovery::{SourceCursor, SourceEventId};
     use crate::storage::{EventPublisher, RecordStore};
     use crate::testing::{
-        create_post_message, MockEventPublisher, MockMessageSource, MockPostFetcher,
-        MockProfileFetcher, MockRecordStore,
+        create_post_message, create_reply_message, MockEventPublisher, MockMessageSource,
+        MockPostFetcher, MockProfileFetcher, MockRecordStore,
     };
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::Notify;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     struct CancellationFlag(Arc<AtomicBool>);
     impl Drop for CancellationFlag {
@@ -1354,6 +1379,19 @@ mod tests {
     struct BlockingRecordStore {
         started: Arc<Notify>,
         cancelled: Arc<AtomicBool>,
+    }
+    struct FailingRecordStore;
+    impl RecordStore for FailingRecordStore {
+        async fn store_batch(&self, _records: &[EnrichedRecord]) -> TurboResult<Vec<i64>> {
+            Err(TurboError::Internal("sqlite write failed".to_string()))
+        }
+    }
+
+    struct FailingEventPublisher;
+    impl EventPublisher for FailingEventPublisher {
+        async fn publish_batch(&self, _records: &[EnrichedRecord]) -> TurboResult<Vec<String>> {
+            Err(TurboError::Internal("redis publication failed".to_string()))
+        }
     }
     impl RecordStore for BlockingRecordStore {
         async fn store_batch(&self, _records: &[EnrichedRecord]) -> TurboResult<Vec<i64>> {
@@ -1447,6 +1485,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unavailable_singleton_is_stored_published_and_checkpointed_as_partial() {
+        let server = MockServer::start().await;
+        let message = create_reply_message(1, "did:plc:parent", "poison");
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.actor.getProfiles"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "profiles": [
+                    {"did": message.did.clone(), "handle": "replier.bsky.social"},
+                    {"did": "did:plc:parent", "handle": "parent.bsky.social"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.feed.getPosts"))
+            .respond_with(ResponseTemplate::new(502))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let bluesky = Arc::new(
+            BlueskyClient::new_with_policies(
+                vec!["test-session".to_string()],
+                None,
+                25,
+                25,
+                0,
+                0,
+                RequestRetryPolicy {
+                    max_retries: 1,
+                    base_delay: Duration::from_millis(1),
+                    max_delay: Duration::from_millis(2),
+                },
+                containment_policy(),
+            )
+            .unwrap(),
+        );
+        bluesky.set_api_base_url_for_test(server.uri()).await;
+        let hydrator = Hydrator::new(
+            TurboCache::new_with_negative_cache(10, 10, 10, Duration::from_secs(300)),
+            Arc::clone(&bluesky),
+            Arc::clone(&bluesky),
+        );
+        let record_store = Arc::new(MockRecordStore::new());
+        let publisher = Arc::new(MockEventPublisher::new());
+        let progress = progress();
+
+        let completion = TurboCharger::<
+            MockMessageSource,
+            BlueskyClient,
+            BlueskyClient,
+            MockRecordStore,
+            MockEventPublisher,
+        >::process_batch_internal(
+            hydrator.clone(),
+            Arc::clone(&record_store),
+            Arc::clone(&publisher),
+            broadcast::channel(1).0,
+            test_ingress_batch(vec![message.clone()]),
+            Arc::clone(&progress),
+            progress.batch_started(),
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(record_store.get_stored_count().await, 1);
+        assert_eq!(publisher.get_published_count().await, 1);
+        assert_eq!(
+            record_store.stored_records.lock().await[0]
+                .hydrated_metadata
+                .hydration_quality,
+            HydrationQuality::Partial
+        );
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let sqlite = SQLiteStore::new(
+            temp_dir.path().join("optional-hydration-checkpoint.db"),
+            SQLitePragmaConfig {
+                cache_size_kib: 1024,
+                mmap_size_mb: 1,
+                journal_size_limit_mb: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let frontier = Mutex::new(CompletionFrontier::new(None));
+        let checkpoint = persist_batch_completion(&frontier, &sqlite, completion)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            sqlite.load_ingestion_checkpoint().await.unwrap(),
+            Some(checkpoint)
+        );
+
+        TurboCharger::<
+            MockMessageSource,
+            BlueskyClient,
+            BlueskyClient,
+            MockRecordStore,
+            MockEventPublisher,
+        >::process_batch_internal(
+            hydrator,
+            Arc::clone(&record_store),
+            Arc::clone(&publisher),
+            broadcast::channel(1).0,
+            test_ingress_batch(vec![message]),
+            Arc::clone(&progress),
+            progress.batch_started(),
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| { request.url.path().ends_with("getPosts") })
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
     async fn replayed_failure_increases_delay_and_keeps_checkpoint_blocked() {
         let temp_dir = tempfile::tempdir().unwrap();
         let store = SQLiteStore::new(
@@ -1521,6 +1685,47 @@ mod tests {
         let next = supervisor.record_failure(&replay_failure(), Some(&failed_range));
         assert_eq!(next.recurrence, 1);
         assert_eq!(next.delay, containment_policy().min_delay);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_persistence_failure_leaves_completion_replayable() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("checkpoint-retry.db");
+        let pragma = SQLitePragmaConfig {
+            cache_size_kib: 1024,
+            mmap_size_mb: 1,
+            journal_size_limit_mb: 1,
+        };
+        let failed_store = SQLiteStore::new(&db_path, pragma).await.unwrap();
+        failed_store.close().await.unwrap();
+        let frontier = Mutex::new(CompletionFrontier::new(None));
+
+        let error = persist_batch_completion(
+            &frontier,
+            &failed_store,
+            BatchCompletion {
+                processed_count: 1,
+                range: test_ingress_range(1, 1),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, TurboError::Database(_)));
+        assert_eq!(frontier.lock().await.pending_range_count(), 0);
+
+        let recovered_store = SQLiteStore::new(&db_path, pragma).await.unwrap();
+        let checkpoint = persist_batch_completion(
+            &frontier,
+            &recovered_store,
+            BatchCompletion {
+                processed_count: 1,
+                range: test_ingress_range(1, 1),
+            },
+        )
+        .await
+        .unwrap()
+        .expect("same completion must be retryable after persistence recovers");
+        assert_eq!(checkpoint.ingress_ordinal, 1);
     }
 
     #[test]
@@ -1679,6 +1884,61 @@ mod tests {
         });
         assert_eq!(snapshot.timed_out_batches, 1);
         assert_eq!(snapshot.active_permits, 0);
+    }
+
+    #[tokio::test]
+    async fn core_storage_and_publication_failures_produce_no_checkpointable_completion() {
+        let storage_progress = progress();
+        let storage_result = TurboCharger::<
+            MockMessageSource,
+            MockProfileFetcher,
+            MockPostFetcher,
+            FailingRecordStore,
+            MockEventPublisher,
+        >::process_batch_internal(
+            Hydrator::new(
+                TurboCache::new(10, 10),
+                Arc::new(MockProfileFetcher::new()),
+                Arc::new(MockPostFetcher::new()),
+            ),
+            Arc::new(FailingRecordStore),
+            Arc::new(MockEventPublisher::new()),
+            broadcast::channel(1).0,
+            test_ingress_batch(vec![create_post_message(10)]),
+            Arc::clone(&storage_progress),
+            storage_progress.batch_started(),
+            Some(Duration::from_secs(1)),
+        )
+        .await;
+        assert!(
+            matches!(storage_result, Err(TurboError::Internal(message)) if message == "sqlite write failed")
+        );
+
+        let publication_progress = progress();
+        let publication_result = TurboCharger::<
+            MockMessageSource,
+            MockProfileFetcher,
+            MockPostFetcher,
+            MockRecordStore,
+            FailingEventPublisher,
+        >::process_batch_internal(
+            Hydrator::new(
+                TurboCache::new(10, 10),
+                Arc::new(MockProfileFetcher::new()),
+                Arc::new(MockPostFetcher::new()),
+            ),
+            Arc::new(MockRecordStore::new()),
+            Arc::new(FailingEventPublisher),
+            broadcast::channel(1).0,
+            test_ingress_batch(vec![create_post_message(11)]),
+            Arc::clone(&publication_progress),
+            publication_progress.batch_started(),
+            Some(Duration::from_secs(1)),
+        )
+        .await;
+        assert!(
+            matches!(publication_result, Err(TurboError::Internal(message)) if message == "redis publication failed")
+        );
     }
 
     #[tokio::test]

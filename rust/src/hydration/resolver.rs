@@ -1,6 +1,6 @@
-use crate::client::{PostFetcher, ProfileFetcher};
+use crate::client::{PostFetchOutcome, PostFetcher, ProfileFetcher};
 use crate::hydration::TurboCache;
-use crate::models::bluesky::{BlueskyPost, BlueskyProfile};
+use crate::models::bluesky::BlueskyProfile;
 use crate::models::TurboResult;
 use std::sync::Arc;
 use tracing::trace;
@@ -63,9 +63,12 @@ where
     }
 
     /// Ensure a single post is in cache.
-    pub async fn resolve_post(&self, uri: &str) -> TurboResult<Option<Arc<BlueskyPost>>> {
+    pub async fn resolve_post(&self, uri: &str) -> TurboResult<PostFetchOutcome> {
         if let Some(post) = self.cache.get_post(uri) {
-            return Ok(Some(post));
+            return Ok(PostFetchOutcome::Found((*post).clone()));
+        }
+        if let Some(failure) = self.cache.get_unavailable_post(uri) {
+            return Ok(PostFetchOutcome::TemporarilyUnavailable(failure));
         }
 
         let posts = self
@@ -73,13 +76,26 @@ where
             .bulk_fetch_posts(&[uri.to_string()])
             .await?;
 
-        if let Some(post) = posts.into_iter().next().flatten() {
-            let post_arc = Arc::new(post);
-            self.cache.set_post(uri.to_string(), Arc::clone(&post_arc));
-            Ok(Some(post_arc))
-        } else {
-            Ok(None)
+        if posts.len() != 1 {
+            return Err(crate::models::TurboError::InvalidApiResponse(format!(
+                "post outcome cardinality mismatch: requested 1, received {}",
+                posts.len()
+            )));
         }
+        let outcome = posts.into_iter().next().expect("length checked");
+        match &outcome {
+            PostFetchOutcome::Found(post) => {
+                self.cache.set_post(uri.to_string(), Arc::new(post.clone()));
+            }
+            PostFetchOutcome::Missing => {
+                self.cache.complete_post_resolution(uri, "missing");
+            }
+            PostFetchOutcome::TemporarilyUnavailable(failure) => {
+                self.cache
+                    .set_unavailable_post(uri.to_string(), failure.clone());
+            }
+        }
+        Ok(outcome)
     }
 
     // ---- Batch resolution ----
@@ -117,36 +133,82 @@ where
         Ok(resolved)
     }
 
-    /// Ensure all given posts are in cache.
-    pub async fn resolve_posts(&self, uris: &[String]) -> TurboResult<usize> {
+    /// Resolve every URI to exactly one ordered outcome.
+    pub async fn resolve_posts(&self, uris: &[String]) -> TurboResult<Vec<PostFetchOutcome>> {
         if uris.is_empty() {
-            return Ok(0);
+            return Ok(Vec::new());
         }
 
-        let cached_flags = self.cache.check_posts_cached(uris);
-        let uncached: Vec<String> = uris
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !cached_flags[*i])
-            .map(|(_, uri)| uri.clone())
-            .collect();
-
-        if uncached.is_empty() {
-            return Ok(0);
-        }
-
-        let posts = self.post_fetcher.bulk_fetch_posts(&uncached).await?;
-        let mut resolved = 0;
-
-        for (uri, maybe_post) in uncached.iter().zip(posts) {
-            if let Some(post) = maybe_post {
-                self.cache.set_post(uri.clone(), Arc::new(post));
-                resolved += 1;
+        let mut outcomes = vec![None; uris.len()];
+        let mut uncached = Vec::new();
+        let mut uncached_indexes = Vec::new();
+        for (index, uri) in uris.iter().enumerate() {
+            if let Some(post) = self.cache.get_post(uri) {
+                outcomes[index] = Some(PostFetchOutcome::Found((*post).clone()));
+            } else if let Some(failure) = self.cache.get_unavailable_post(uri) {
+                outcomes[index] = Some(PostFetchOutcome::TemporarilyUnavailable(failure));
+            } else {
+                uncached.push(uri.clone());
+                uncached_indexes.push(index);
             }
         }
 
-        trace!("Resolved {}/{} missing posts", resolved, uncached.len());
-        Ok(resolved)
+        if uncached.is_empty() {
+            return Ok(outcomes.into_iter().flatten().collect());
+        }
+
+        let fetched = self.post_fetcher.bulk_fetch_posts(&uncached).await?;
+        if fetched.len() != uncached.len() {
+            return Err(crate::models::TurboError::InvalidApiResponse(format!(
+                "post outcome cardinality mismatch: requested {}, received {}",
+                uncached.len(),
+                fetched.len()
+            )));
+        }
+
+        for ((uri, index), outcome) in uncached.iter().zip(uncached_indexes).zip(fetched) {
+            self.cache.record_post_outcome(&outcome);
+            match &outcome {
+                PostFetchOutcome::Found(post) => {
+                    self.cache.set_post(uri.clone(), Arc::new(post.clone()));
+                    metrics::counter!("optional_hydration_post_outcomes_total", "outcome" => "found")
+                        .increment(1);
+                }
+                PostFetchOutcome::Missing => {
+                    self.cache.complete_post_resolution(uri, "missing");
+                    metrics::counter!("optional_hydration_post_outcomes_total", "outcome" => "missing")
+                        .increment(1);
+                }
+                PostFetchOutcome::TemporarilyUnavailable(failure) => {
+                    self.cache
+                        .set_unavailable_post(uri.clone(), failure.clone());
+                    metrics::counter!(
+                        "optional_hydration_post_outcomes_total",
+                        "outcome" => "temporarily_unavailable",
+                        "category" => failure.category.as_str(),
+                        "status_class" => failure.status_class.clone().unwrap_or_else(|| "none".to_string()),
+                        "isolation" => failure.isolation.as_ref().map_or("none", |value| value.as_str()),
+                    )
+                    .increment(1);
+                    tracing::warn!(
+                        operation = failure.operation.as_str(),
+                        category = failure.category.as_str(),
+                        status_class = failure.status_class.as_deref(),
+                        attempts = failure.attempts,
+                        request_fingerprint = failure.request_fingerprint,
+                        isolation = failure.isolation.as_ref().map(|value| value.as_str()),
+                        "Optional referenced-post hydration degraded"
+                    );
+                }
+            }
+            outcomes[index] = Some(outcome);
+        }
+
+        trace!("Resolved {} missing post outcomes", uncached.len());
+        Ok(outcomes
+            .into_iter()
+            .map(|outcome| outcome.expect("every URI receives an outcome"))
+            .collect())
     }
 
     /// Access the underlying cache (for reads after resolution).
@@ -158,9 +220,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::bluesky::BlueskyProfile;
+    use crate::client::{BlueskyOperation, HydrationFailure, UpstreamFailureCategory};
+    use crate::models::bluesky::{BlueskyPost, BlueskyProfile};
     use crate::testing::mocks::{MockPostFetcher, MockProfileFetcher};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    struct CardinalityMismatchFetcher;
+
+    impl PostFetcher for CardinalityMismatchFetcher {
+        async fn bulk_fetch_posts(&self, _uris: &[String]) -> TurboResult<Vec<PostFetchOutcome>> {
+            Ok(Vec::new())
+        }
+    }
 
     fn test_profile(did: &str) -> BlueskyProfile {
         BlueskyProfile {
@@ -176,6 +248,23 @@ mod tests {
             indexed_at: None,
             created_at: None,
             labels: None,
+        }
+    }
+
+    fn test_post(uri: &str) -> BlueskyPost {
+        BlueskyPost {
+            uri: uri.to_string(),
+            cid: "cid".to_string(),
+            author: test_profile("did:plc:author"),
+            text: "recovered".to_string(),
+            created_at: chrono::Utc::now(),
+            embed: None,
+            reply: None,
+            facets: None,
+            labels: None,
+            like_count: None,
+            repost_count: None,
+            reply_count: None,
         }
     }
 
@@ -258,5 +347,86 @@ mod tests {
 
         let resolved = resolver.resolve_profiles(&[]).await.unwrap();
         assert_eq!(resolved, 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_posts_rejects_outcome_cardinality_mismatch() {
+        let resolver = CacheMissResolver::new(
+            TurboCache::new(10, 10),
+            Arc::new(MockProfileFetcher::new()),
+            Arc::new(CardinalityMismatchFetcher),
+        );
+
+        let error = resolver
+            .resolve_posts(&["at://did:plc:test/app.bsky.feed.post/one".to_string()])
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::models::TurboError::InvalidApiResponse(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn negative_cache_suppresses_upstream_then_recovers_after_expiry() {
+        let start = Instant::now();
+        let now = Arc::new(Mutex::new(start));
+        let clock_now = Arc::clone(&now);
+        let cache = TurboCache::new_with_clock(
+            10,
+            10,
+            10,
+            Duration::from_secs(30),
+            Arc::new(move || *clock_now.lock().unwrap()),
+        );
+        let post_fetcher = Arc::new(MockPostFetcher::new());
+        let uri = "at://did:plc:test/app.bsky.feed.post/recovery";
+        post_fetcher
+            .add_outcome(
+                uri.to_string(),
+                PostFetchOutcome::TemporarilyUnavailable(HydrationFailure {
+                    operation: BlueskyOperation::Posts,
+                    category: UpstreamFailureCategory::ServerError,
+                    status_class: Some("5xx".to_string()),
+                    attempts: 4,
+                    request_fingerprint: "safe-fingerprint".to_string(),
+                    isolation: None,
+                }),
+            )
+            .await;
+        let resolver = CacheMissResolver::new(
+            cache,
+            Arc::new(MockProfileFetcher::new()),
+            Arc::clone(&post_fetcher),
+        );
+
+        assert!(matches!(
+            resolver.resolve_posts(&[uri.to_string()]).await.unwrap()[0],
+            PostFetchOutcome::TemporarilyUnavailable(_)
+        ));
+        assert!(matches!(
+            resolver.resolve_posts(&[uri.to_string()]).await.unwrap()[0],
+            PostFetchOutcome::TemporarilyUnavailable(_)
+        ));
+        assert_eq!(
+            post_fetcher
+                .call_count
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+
+        *now.lock().unwrap() = start + Duration::from_secs(30);
+        post_fetcher.add_post(test_post(uri)).await;
+        assert!(matches!(
+            resolver.resolve_posts(&[uri.to_string()]).await.unwrap()[0],
+            PostFetchOutcome::Found(_)
+        ));
+        assert_eq!(
+            post_fetcher
+                .call_count
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        assert_eq!(resolver.cache().get_metrics().post_recoveries, 1);
     }
 }

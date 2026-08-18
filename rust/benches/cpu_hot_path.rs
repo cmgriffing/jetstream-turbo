@@ -74,6 +74,8 @@ fn realistic_message_json() -> String {
 /// A realistic hydrated-metadata payload for serialization benchmarks.
 fn realistic_metadata() -> HydratedMetadata {
     HydratedMetadata {
+        hydration_quality: jetstream_turbo_rs::models::enriched::HydrationQuality::Complete,
+        degradation_summaries: vec![],
         author_profile: Some(Arc::new(create_profile("did:plc:author123"))),
         mentioned_profiles: vec![Arc::new(create_profile("did:plc:mentioned"))],
         referenced_posts: vec![],
