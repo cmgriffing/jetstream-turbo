@@ -1,7 +1,4 @@
-use crate::models::{
-    enriched::EnrichedRecord,
-    errors::{TurboError, TurboResult},
-};
+use crate::models::{enriched::EnrichedRecord, errors::TurboResult};
 use not_redis::Client as NotRedisClient;
 use serde_json;
 use std::sync::Arc;
@@ -48,14 +45,12 @@ impl RedisStore {
         let mut client = self.client.lock().await;
         let id: String = client
             .xadd(self.stream_name.clone(), Some(&message_id), values)
-            .await
-            .map_err(TurboError::RedisOperation)?;
+            .await?;
 
         if let Some(max_len) = self.max_length {
             let _: i64 = client
                 .xtrim(self.stream_name.clone(), max_len, false)
-                .await
-                .map_err(TurboError::RedisOperation)?;
+                .await?;
         }
 
         trace!("Published record to not_redis stream with ID: {}", id);
@@ -64,10 +59,7 @@ impl RedisStore {
 
     pub async fn get_stream_info(&self) -> TurboResult<StreamInfo> {
         let mut client = self.client.lock().await;
-        let stream_length: i64 = client
-            .xlen(self.stream_name.clone())
-            .await
-            .map_err(TurboError::RedisOperation)?;
+        let stream_length: i64 = client.xlen(self.stream_name.clone()).await?;
 
         let redis_version = "not_redis".to_string();
 
@@ -83,10 +75,7 @@ impl RedisStore {
         info!("Clearing not_redis stream: {}", self.stream_name);
         let mut client = self.client.lock().await;
 
-        let _: i64 = client
-            .del(self.stream_name.clone())
-            .await
-            .map_err(TurboError::RedisOperation)?;
+        let _: i64 = client.del(self.stream_name.clone()).await?;
 
         trace!("Cleared not_redis stream: {}", self.stream_name);
         Ok(())
@@ -128,8 +117,7 @@ impl EventPublisher for RedisStore {
 
             let id: String = client
                 .xadd(self.stream_name.clone(), Some(&message_id), values)
-                .await
-                .map_err(TurboError::RedisOperation)?;
+                .await?;
 
             message_ids.push(id);
         }
@@ -138,8 +126,7 @@ impl EventPublisher for RedisStore {
         if let Some(max_len) = self.max_length {
             let _: i64 = client
                 .xtrim(self.stream_name.clone(), max_len, false)
-                .await
-                .map_err(TurboError::RedisOperation)?;
+                .await?;
         }
 
         info!(

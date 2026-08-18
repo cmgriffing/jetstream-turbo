@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 /// Create a realistic Bluesky post creation message.
 pub fn create_post_message(index: usize) -> JetstreamMessage {
-    let did = format!("did:plc:user{:04}", index);
-    let rkey = format!("3mepgzgia{:04}", index);
+    let did = format!("did:plc:user{index:04}");
+    let rkey = format!("3mepgzgia{index:04}");
     let text = sample_post_text(index);
 
     JetstreamMessage {
@@ -16,7 +16,7 @@ pub fn create_post_message(index: usize) -> JetstreamMessage {
         seq: Some(100000 + index as u64),
         kind: MessageKind::Commit,
         commit: Some(CommitData {
-            rev: Some(format!("3mepgzgimkv{:04}", index)),
+            rev: Some(format!("3mepgzgimkv{index:04}")),
             operation_type: OperationType::Create,
             collection: Some("app.bsky.feed.post".to_string()),
             rkey: Some(rkey),
@@ -26,16 +26,16 @@ pub fn create_post_message(index: usize) -> JetstreamMessage {
                 "text": text,
                 "langs": ["en"]
             })),
-            cid: Some(format!("bafyreia{}", &format!("{:032x}", index)[..32])),
+            cid: Some(format!("bafyreia{}", &format!("{index:032x}")[..32])),
         }),
     }
 }
 
 /// Create a post message that includes a reply reference.
 pub fn create_reply_message(index: usize, parent_did: &str, parent_rkey: &str) -> JetstreamMessage {
-    let did = format!("did:plc:replier{:04}", index);
-    let rkey = format!("3reply{:06}", index);
-    let parent_uri = format!("at://{}/app.bsky.feed.post/{}", parent_did, parent_rkey);
+    let did = format!("did:plc:replier{index:04}");
+    let rkey = format!("3reply{index:06}");
+    let parent_uri = format!("at://{parent_did}/app.bsky.feed.post/{parent_rkey}");
 
     JetstreamMessage {
         did,
@@ -43,7 +43,7 @@ pub fn create_reply_message(index: usize, parent_did: &str, parent_rkey: &str) -
         seq: Some(200000 + index as u64),
         kind: MessageKind::Commit,
         commit: Some(CommitData {
-            rev: Some(format!("3replrev{:06}", index)),
+            rev: Some(format!("3replrev{index:06}")),
             operation_type: OperationType::Create,
             collection: Some("app.bsky.feed.post".to_string()),
             rkey: Some(rkey),
@@ -62,7 +62,7 @@ pub fn create_reply_message(index: usize, parent_did: &str, parent_rkey: &str) -
                     }
                 }
             })),
-            cid: Some(format!("bafyreireply{:06}", index)),
+            cid: Some(format!("bafyreireply{index:06}")),
         }),
     }
 }
@@ -80,8 +80,8 @@ pub fn create_profile(did: &str) -> BlueskyProfile {
         .to_string();
     BlueskyProfile {
         did: Arc::from(did),
-        handle: format!("{}.bsky.social", handle),
-        display_name: Some(format!("User {}", handle)),
+        handle: format!("{handle}.bsky.social"),
+        display_name: Some(format!("User {handle}")),
         description: Some("A test user on Bluesky".to_string()),
         avatar: Some("https://cdn.bsky.social/avatar/test.jpg".to_string()),
         banner: None,

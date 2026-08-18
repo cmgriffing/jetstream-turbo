@@ -6,14 +6,14 @@ pub type TurboResult<T> = Result<T, TurboError>;
 pub enum TurboError {
     // Connection errors
     #[error("Jetstream connection failed: {0}")]
-    JetstreamConnection(#[from] tokio_tungstenite::tungstenite::Error),
+    JetstreamConnection(#[source] Box<tokio_tungstenite::tungstenite::Error>),
 
     #[error("WebSocket connection failed: {0}")]
     WebSocketConnection(String),
 
     // HTTP/ API errors
     #[error("HTTP request failed: {0}")]
-    HttpRequest(#[from] reqwest::Error),
+    HttpRequest(#[source] Box<reqwest::Error>),
 
     #[error("API rate limit exceeded")]
     RateLimitExceeded,
@@ -23,24 +23,24 @@ pub enum TurboError {
 
     // Configuration errors
     #[error("Configuration error: {0}")]
-    Configuration(#[from] config::ConfigError),
+    Configuration(#[source] Box<config::ConfigError>),
 
     #[error("Environment variable missing: {0}")]
     MissingEnvVar(String),
 
     // Storage errors
     #[error("SQLite database error: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(#[source] Box<sqlx::Error>),
 
     #[error("Redis operation failed: {0}")]
-    RedisOperation(#[from] not_redis::RedisError),
+    RedisOperation(#[source] Box<not_redis::RedisError>),
 
     // Serialization errors
     #[error("JSON serialization failed: {0}")]
-    JsonSerialization(#[from] serde_json::Error),
+    JsonSerialization(#[source] Box<serde_json::Error>),
 
     #[error("JSON deserialization failed: {0}")]
-    JsonDeserialization(#[from] simd_json::Error),
+    JsonDeserialization(#[source] Box<simd_json::Error>),
 
     // Cache errors
     #[error("Cache operation failed: {0}")]
@@ -58,10 +58,10 @@ pub enum TurboError {
 
     // System errors
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[source] Box<std::io::Error>),
 
     #[error("Task join error: {0}")]
-    TaskJoin(#[from] tokio::task::JoinError),
+    TaskJoin(#[source] Box<tokio::task::JoinError>),
 
     #[error("Elapsed timeout")]
     Timeout(#[from] tokio::time::error::Elapsed),
@@ -86,6 +86,26 @@ pub enum TurboError {
     #[error("Session expired: {0}")]
     ExpiredToken(String),
 }
+
+macro_rules! impl_boxed_from {
+    ($variant:ident, $source:ty) => {
+        impl From<$source> for TurboError {
+            fn from(source: $source) -> Self {
+                TurboError::$variant(Box::new(source))
+            }
+        }
+    };
+}
+
+impl_boxed_from!(JetstreamConnection, tokio_tungstenite::tungstenite::Error);
+impl_boxed_from!(HttpRequest, reqwest::Error);
+impl_boxed_from!(Configuration, config::ConfigError);
+impl_boxed_from!(Database, sqlx::Error);
+impl_boxed_from!(RedisOperation, not_redis::RedisError);
+impl_boxed_from!(JsonSerialization, serde_json::Error);
+impl_boxed_from!(JsonDeserialization, simd_json::Error);
+impl_boxed_from!(Io, std::io::Error);
+impl_boxed_from!(TaskJoin, tokio::task::JoinError);
 
 impl TurboError {
     pub fn is_retryable(&self) -> bool {

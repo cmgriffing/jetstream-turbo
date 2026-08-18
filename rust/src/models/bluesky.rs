@@ -255,6 +255,7 @@ pub struct BlueskyPost {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 pub enum Embed {
     Images(ImagesEmbed),
     External(ExternalEmbed),

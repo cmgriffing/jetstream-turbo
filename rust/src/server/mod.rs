@@ -337,13 +337,13 @@ pub async fn create_server(
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await
-        .map_err(TurboError::Io)?;
+        .map_err(|e| TurboError::Io(Box::new(e)))?;
 
     info!("Starting HTTP server on port {}", port);
 
     axum::serve(listener, app)
         .await
-        .map_err(|e| TurboError::Io(std::io::Error::other(e)))?;
+        .map_err(|e| TurboError::Io(Box::new(std::io::Error::other(e))))?;
 
     Ok(())
 }
@@ -593,8 +593,14 @@ fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> Strin
         &mut output,
         "jetstream_turbo_pipeline_ready",
         "Whether progress is currently healthy (1 = healthy, 0 = otherwise).",
-        if diagnostics.pipeline_progress.readiness_state == crate::turbocharger::PipelineReadinessState::Healthy { "1" } else { "0" }
-            .to_string(),
+        if diagnostics.pipeline_progress.readiness_state
+            == crate::turbocharger::PipelineReadinessState::Healthy
+        {
+            "1"
+        } else {
+            "0"
+        }
+        .to_string(),
     );
     output.push_str("# HELP jetstream_turbo_reconnects_total Upstream reconnects grouped by initiating reason.\n");
     output.push_str("# TYPE jetstream_turbo_reconnects_total counter\n");

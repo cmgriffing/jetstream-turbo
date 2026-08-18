@@ -165,9 +165,7 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
         );
 
         // Initialize semaphore for concurrency control
-        let semaphore = Arc::new(Semaphore::new(
-            settings.max_concurrent_requests.max(1)
-        ));
+        let semaphore = Arc::new(Semaphore::new(settings.max_concurrent_requests.max(1)));
 
         // Initialize monitor broadcast channel
         let (broadcast_sender, _) = broadcast::channel(settings.monitor_broadcast_capacity);
@@ -369,7 +367,7 @@ where
     ) -> TurboResult<BatchCompletion> {
         match task_result {
             Ok(result) => result,
-            Err(e) => Err(TurboError::TaskJoin(e)),
+            Err(e) => Err(TurboError::TaskJoin(Box::new(e))),
         }
     }
 
@@ -478,6 +476,7 @@ where
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn process_batch_internal(
         hydrator: Hydrator<P, Po>,
         record_store: Arc<S>,

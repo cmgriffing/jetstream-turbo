@@ -46,6 +46,25 @@ struct BatchConfig {
     wait_ms: u64,
 }
 
+#[derive(Clone)]
+struct BatchCollectorDeps {
+    http_client: Client,
+    session_strings: Arc<RwLock<Vec<String>>>,
+    rate_limiter: Arc<
+        RateLimiter<
+            governor::state::NotKeyed,
+            governor::state::InMemoryState,
+            governor::clock::DefaultClock,
+        >,
+    >,
+    api_base_url: String,
+    max_retries: u32,
+    retry_delay: Duration,
+    auth_client: Option<Arc<BlueskyAuthClient>>,
+    refresh_jwt: Arc<RwLock<Option<String>>>,
+    expires_at: Arc<RwLock<Option<String>>>,
+}
+
 struct ProfileBatchCollector {
     config: BatchConfig,
     pending: Vec<String>,
@@ -144,20 +163,24 @@ impl BlueskyClient {
         let max_retries = 3;
         let retry_delay = Duration::from_millis(200);
 
+        let collector_deps = BatchCollectorDeps {
+            http_client: http_client.clone(),
+            session_strings: session_strings.clone(),
+            rate_limiter: rate_limiter.clone(),
+            api_base_url: api_base_url.clone(),
+            max_retries,
+            retry_delay,
+            auth_client: auth_client.clone(),
+            refresh_jwt: refresh_jwt.clone(),
+            expires_at: expires_at.clone(),
+        };
+
         let profile_batch_collector = Arc::new(RwLock::new(ProfileBatchCollector::new(
             BatchConfig {
                 batch_size: profile_batch_size,
                 wait_ms: profile_batch_wait_ms,
             },
-            http_client.clone(),
-            session_strings.clone(),
-            rate_limiter.clone(),
-            api_base_url.clone(),
-            max_retries,
-            retry_delay,
-            auth_client.clone(),
-            refresh_jwt.clone(),
-            expires_at.clone(),
+            collector_deps.clone(),
         )));
 
         let post_batch_collector = Arc::new(RwLock::new(PostBatchCollector::new(
@@ -165,15 +188,7 @@ impl BlueskyClient {
                 batch_size: post_batch_size,
                 wait_ms: post_batch_wait_ms,
             },
-            http_client.clone(),
-            session_strings.clone(),
-            rate_limiter.clone(),
-            api_base_url.clone(),
-            max_retries,
-            retry_delay,
-            auth_client.clone(),
-            refresh_jwt.clone(),
-            expires_at.clone(),
+            collector_deps,
         )));
 
         Ok(Self {
@@ -348,24 +363,18 @@ impl PostFetcher for BlueskyClient {
 }
 
 impl ProfileBatchCollector {
-    fn new(
-        config: BatchConfig,
-        http_client: Client,
-        session_strings: Arc<RwLock<Vec<String>>>,
-        rate_limiter: Arc<
-            RateLimiter<
-                governor::state::NotKeyed,
-                governor::state::InMemoryState,
-                governor::clock::DefaultClock,
-            >,
-        >,
-        api_base_url: String,
-        max_retries: u32,
-        retry_delay: Duration,
-        auth_client: Option<Arc<BlueskyAuthClient>>,
-        refresh_jwt: Arc<RwLock<Option<String>>>,
-        expires_at: Arc<RwLock<Option<String>>>,
-    ) -> Self {
+    fn new(config: BatchConfig, deps: BatchCollectorDeps) -> Self {
+        let BatchCollectorDeps {
+            http_client,
+            session_strings,
+            rate_limiter,
+            api_base_url,
+            max_retries,
+            retry_delay,
+            auth_client,
+            refresh_jwt,
+            expires_at,
+        } = deps;
         Self {
             config,
             pending: Vec::new(),
@@ -547,7 +556,7 @@ impl ProfileBatchCollector {
                 Err(e) => {
                     error!("HTTP request failed: {}", e);
                     if attempt >= self.max_retries {
-                        return Err(TurboError::HttpRequest(e));
+                        return Err(TurboError::HttpRequest(Box::new(e)));
                     }
                 }
             }
@@ -649,24 +658,18 @@ impl ProfileBatchCollector {
 }
 
 impl PostBatchCollector {
-    fn new(
-        config: BatchConfig,
-        http_client: Client,
-        session_strings: Arc<RwLock<Vec<String>>>,
-        rate_limiter: Arc<
-            RateLimiter<
-                governor::state::NotKeyed,
-                governor::state::InMemoryState,
-                governor::clock::DefaultClock,
-            >,
-        >,
-        api_base_url: String,
-        max_retries: u32,
-        retry_delay: Duration,
-        auth_client: Option<Arc<BlueskyAuthClient>>,
-        refresh_jwt: Arc<RwLock<Option<String>>>,
-        expires_at: Arc<RwLock<Option<String>>>,
-    ) -> Self {
+    fn new(config: BatchConfig, deps: BatchCollectorDeps) -> Self {
+        let BatchCollectorDeps {
+            http_client,
+            session_strings,
+            rate_limiter,
+            api_base_url,
+            max_retries,
+            retry_delay,
+            auth_client,
+            refresh_jwt,
+            expires_at,
+        } = deps;
         Self {
             config,
             pending: Vec::new(),
@@ -880,7 +883,7 @@ impl PostBatchCollector {
                 Err(e) => {
                     error!("HTTP request failed: {}", e);
                     if attempt >= self.max_retries {
-                        return Err(TurboError::HttpRequest(e));
+                        return Err(TurboError::HttpRequest(Box::new(e)));
                     }
                 }
             }

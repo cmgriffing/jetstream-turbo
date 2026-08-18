@@ -46,6 +46,12 @@ pub struct MockProfileFetcher {
     pub requested_dids: Mutex<Vec<Vec<String>>>,
 }
 
+impl Default for MockProfileFetcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockProfileFetcher {
     pub fn new() -> Self {
         Self {
@@ -84,6 +90,12 @@ pub struct MockPostFetcher {
     pub requested_uris: Mutex<Vec<Vec<String>>>,
 }
 
+impl Default for MockPostFetcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockPostFetcher {
     pub fn new() -> Self {
         Self {
@@ -114,6 +126,12 @@ pub struct MockRecordStore {
     pub stored_records: Mutex<Vec<EnrichedRecord>>,
     pub call_count: AtomicUsize,
     next_id: AtomicUsize,
+}
+
+impl Default for MockRecordStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MockRecordStore {
@@ -149,6 +167,12 @@ pub struct MockEventPublisher {
     pub published_records: Mutex<Vec<EnrichedRecord>>,
     pub call_count: AtomicUsize,
     next_id: AtomicUsize,
+}
+
+impl Default for MockEventPublisher {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MockEventPublisher {

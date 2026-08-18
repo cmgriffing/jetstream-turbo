@@ -16,7 +16,7 @@ mod tests {
         let settings = Settings::default();
         assert_eq!(settings.wanted_collections, "app.bsky.feed.post");
         assert_eq!(settings.batch_size, 10);
-        assert!(settings.jetstream_hosts.len() > 0);
+        assert!(!settings.jetstream_hosts.is_empty());
     }
 
     #[tokio::test]
@@ -105,7 +105,7 @@ mod tests {
 
         for i in 0..10000 {
             cache.set_user_profile(
-                format!("did:plc:test{}", i),
+                format!("did:plc:test{i}"),
                 std::sync::Arc::new(profile.clone()),
             );
         }
@@ -115,13 +115,13 @@ mod tests {
         let start = std::time::Instant::now();
 
         for i in 0..10000 {
-            let _result = cache.get_user_profile(&format!("did:plc:test{}", i));
+            let _result = cache.get_user_profile(&format!("did:plc:test{i}"));
         }
 
         let get_time = start.elapsed();
 
-        println!("Cache set time for 10k items: {:?}", set_time);
-        println!("Cache get time for 10k items: {:?}", get_time);
+        println!("Cache set time for 10k items: {set_time:?}");
+        println!("Cache get time for 10k items: {get_time:?}");
 
         // Verify cache hit rates
         let (user_hit_rate, post_hit_rate) = cache.get_hit_rates();

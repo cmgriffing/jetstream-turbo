@@ -521,8 +521,7 @@ fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
     // simd-json requires mutable input and uses unsafe SIMD operations internally
     // The library handles safety internally through careful validation
     let mut text = text.to_string();
-    let message: JetstreamMessage =
-        unsafe { simd_json::from_str(&mut text).map_err(TurboError::JsonDeserialization)? };
+    let message: JetstreamMessage = unsafe { simd_json::from_str(&mut text)? };
 
     // Validate required fields
     if message.did.is_empty() {
@@ -787,16 +786,16 @@ mod tests {
     async fn useful_data_idle_rotates_past_control_and_malformed_frames_then_recovers() {
         let stale = local_fixture(
             vec![
-                Message::Ping(Vec::new().into()),
-                Message::Binary(vec![1, 2, 3].into()),
+                Message::Ping(Vec::new()),
+                Message::Binary(vec![1, 2, 3]),
                 Message::Text("not-json".into()),
-                Message::Text(out_of_scope_message_json().into()),
+                Message::Text(out_of_scope_message_json()),
             ],
             Duration::from_secs(2),
         )
         .await;
         let recovered = local_fixture(
-            vec![Message::Text(valid_message_json().into())],
+            vec![Message::Text(valid_message_json())],
             Duration::from_millis(100),
         )
         .await;
@@ -840,7 +839,7 @@ mod tests {
     async fn connection_timeout_rotates_past_hanging_handshake() {
         let hanging = hanging_handshake_fixture(Duration::from_secs(2)).await;
         let recovered = local_fixture(
-            vec![Message::Text(valid_message_json().into())],
+            vec![Message::Text(valid_message_json())],
             Duration::from_millis(100),
         )
         .await;
@@ -863,8 +862,8 @@ mod tests {
     async fn saturated_input_channel_waits_without_dropping() {
         let endpoint = local_fixture(
             vec![
-                Message::Text(valid_message_json().into()),
-                Message::Text(valid_message_json().replace("12345", "12346").into()),
+                Message::Text(valid_message_json()),
+                Message::Text(valid_message_json().replace("12345", "12346")),
             ],
             Duration::from_secs(1),
         )
@@ -923,8 +922,8 @@ mod tests {
         let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
         let first = capturing_fixture(
             vec![
-                Message::Text(valid_message_json().into()),
-                Message::Text(valid_message_json().replace("12345", "12346").into()),
+                Message::Text(valid_message_json()),
+                Message::Text(valid_message_json().replace("12345", "12346")),
                 Message::Close(None),
             ],
             request_tx.clone(),
@@ -932,7 +931,7 @@ mod tests {
         .await;
         let second = capturing_fixture(
             vec![Message::Text(
-                valid_message_json().replace("12345", "12347").into(),
+                valid_message_json().replace("12345", "12347"),
             )],
             request_tx,
         )

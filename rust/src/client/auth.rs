@@ -125,7 +125,7 @@ impl BlueskyAuthClient {
                 Err(e) => {
                     error!("HTTP request failed: {}", e);
                     if attempt >= self.max_retries {
-                        return Err(TurboError::HttpRequest(e));
+                        return Err(TurboError::HttpRequest(Box::new(e)));
                     }
                 }
             }

@@ -54,6 +54,11 @@ impl DidInterner {
         let cache = self.cache.read().await;
         cache.len()
     }
+
+    pub async fn is_empty(&self) -> bool {
+        let cache = self.cache.read().await;
+        cache.is_empty()
+    }
 }
 
 impl Default for DidInterner {
@@ -84,6 +89,10 @@ impl DidInternerHandle {
 
     pub async fn len(&self) -> usize {
         self.0.len().await
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        self.0.is_empty().await
     }
 }
 

@@ -1076,8 +1076,8 @@ mod tests {
                 r#"INSERT INTO records (at_uri, did, time_us, message, message_metadata, created_at, hydrated_at, hydration_time_ms, api_calls_count, cache_hit_rate, cache_hits, cache_misses)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
             )
-            .bind(format!("at://test{}.bsky.social/app.bsky.feed.post/1", i))
-            .bind(format!("did:plc:test{}", i))
+            .bind(format!("at://test{i}.bsky.social/app.bsky.feed.post/1"))
+            .bind(format!("did:plc:test{i}"))
             .bind(1000i64 + i as i64)
             .bind(r#"{"foo":"bar","extra":"data"}"#)
             .bind(r#"{}"#)
@@ -1122,8 +1122,8 @@ mod tests {
                 r#"INSERT INTO records (at_uri, did, time_us, message, message_metadata, created_at, hydrated_at, hydration_time_ms, api_calls_count, cache_hit_rate, cache_hits, cache_misses)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
             )
-            .bind(format!("at://recent{}.bsky.social/app.bsky.feed.post/1", i))
-            .bind(format!("did:plc:recent{}", i))
+            .bind(format!("at://recent{i}.bsky.social/app.bsky.feed.post/1"))
+            .bind(format!("did:plc:recent{i}"))
             .bind(1000i64 + i as i64)
             .bind(r#"{"foo":"bar"}"#)
             .bind(r#"{}"#)

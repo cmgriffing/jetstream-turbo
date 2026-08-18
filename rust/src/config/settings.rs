@@ -497,8 +497,10 @@ mod tests {
 
     #[test]
     fn test_validation_missing_required_fields() {
-        let mut settings = Settings::default();
-        settings.stream_name = "".to_string();
+        let mut settings = Settings {
+            stream_name: "".to_string(),
+            ..Default::default()
+        };
 
         assert!(settings.validate().is_err());
 
@@ -526,10 +528,12 @@ mod tests {
 
     #[test]
     fn test_pipeline_settings_validation() {
-        let mut settings = Settings::default();
-        settings.stream_name = "test".to_string();
-        settings.bluesky_handle = "test.bsky.social".to_string();
-        settings.bluesky_app_password = "password".to_string();
+        let mut settings = Settings {
+            stream_name: "test".to_string(),
+            bluesky_handle: "test.bsky.social".to_string(),
+            bluesky_app_password: "password".to_string(),
+            ..Default::default()
+        };
 
         settings.jetstream_data_idle_timeout_secs = 0;
         assert!(settings.validate().is_err());
