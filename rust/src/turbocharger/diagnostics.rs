@@ -30,6 +30,9 @@ pub struct ReadinessDiagnostics {
     pub state: PipelineReadinessState,
     pub stage: Option<PipelineStage>,
     pub reason: Option<String>,
+    pub transport_connected: bool,
+    pub recovery_phase: crate::models::recovery::RecoveryPhase,
+    pub unrecoverable_gap: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -186,6 +189,8 @@ pub fn derive_health(
     redis_connected
         && sqlite_available
         && session_count > 0
+        && progress.input_drops == 0
+        && progress.unrecoverable_gap.is_none()
         && (!progress_readiness_enabled
             || progress.readiness_state == PipelineReadinessState::Healthy)
 }
@@ -463,6 +468,35 @@ mod tests {
         let stale = progress_snapshot(false);
         assert!(!derive_health(true, true, 1, &stale, true));
         assert!(derive_health(true, true, 1, &stale, false));
+    }
+
+    #[test]
+    fn derive_health_treats_any_input_drop_as_correctness_failure() {
+        let progress = PipelineProgress::new(2, 10);
+        let _ = progress.valid_ingress();
+        progress.input_dropped(10);
+        let snapshot = progress.snapshot(ProgressThresholds {
+            startup_grace: Duration::from_secs(1),
+            ingress_idle: Duration::from_secs(1),
+            batch_execution: Duration::from_secs(1),
+            recovery_successes: 1,
+        });
+
+        assert!(!derive_health(true, true, 1, &snapshot, false));
+    }
+
+    #[test]
+    fn derive_health_treats_unrecoverable_gap_as_failure() {
+        let progress = PipelineProgress::new(2, 10);
+        progress.mark_unrecoverable_gap("cursor rejected");
+        let snapshot = progress.snapshot(ProgressThresholds {
+            startup_grace: Duration::from_secs(1),
+            ingress_idle: Duration::from_secs(1),
+            batch_execution: Duration::from_secs(1),
+            recovery_successes: 1,
+        });
+
+        assert!(!derive_health(true, true, 1, &snapshot, false));
     }
 
     #[test]

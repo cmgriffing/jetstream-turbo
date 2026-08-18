@@ -1,4 +1,8 @@
-use crate::models::{enriched::EnrichedRecord, TurboResult};
+use crate::models::{
+    enriched::EnrichedRecord,
+    recovery::{IngestionCheckpoint, SourceCursor, SourceEventId},
+    TurboError, TurboResult,
+};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use simd_json::to_string as simd_json_to_string;
@@ -6,6 +10,7 @@ use sqlx::{
     sqlite::SqliteConnectOptions, sqlite::SqliteJournalMode, sqlite::SqlitePoolOptions, Row,
     SqliteConnection, SqlitePool,
 };
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Instant;
 use tokio::time::{sleep, Duration};
@@ -43,6 +48,13 @@ pub trait RecordStore {
         &self,
         records: &[EnrichedRecord],
     ) -> impl std::future::Future<Output = TurboResult<Vec<i64>>> + Send;
+
+    fn completed_source_event_ids(
+        &self,
+        _source_event_ids: &[SourceEventId],
+    ) -> impl std::future::Future<Output = TurboResult<HashSet<SourceEventId>>> + Send {
+        async { Ok(HashSet::new()) }
+    }
 }
 
 pub struct SQLiteStore {
@@ -106,6 +118,7 @@ impl SQLiteStore {
                 at_uri TEXT CHECK(LENGTH(at_uri) <= 300),
                 did TEXT CHECK(LENGTH(did) <= 100),
                 time_us INTEGER,
+                source_event_id TEXT,
                 message TEXT NOT NULL CHECK(json_valid(message)),
                 message_metadata TEXT CHECK(json_valid(message_metadata)),
                 created_at TEXT NOT NULL,
@@ -121,7 +134,34 @@ impl SQLiteStore {
             CREATE INDEX IF NOT EXISTS idx_records_did ON records(did);
             CREATE INDEX IF NOT EXISTS idx_records_time_us ON records(time_us);
             CREATE INDEX IF NOT EXISTS idx_records_created_at ON records(created_at);
+
+            CREATE TABLE IF NOT EXISTS ingestion_checkpoint (
+                singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+                ingress_ordinal INTEGER NOT NULL,
+                time_us INTEGER NOT NULL,
+                source_seq INTEGER,
+                source_event_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             "#,
+        )
+        .execute(pool)
+        .await?;
+
+        let columns = sqlx::query("PRAGMA table_info(records)")
+            .fetch_all(pool)
+            .await?;
+        let has_source_event_id = columns.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .is_ok_and(|name| name == "source_event_id")
+        });
+        if !has_source_event_id {
+            sqlx::query("ALTER TABLE records ADD COLUMN source_event_id TEXT")
+                .execute(pool)
+                .await?;
+        }
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_records_source_event_id ON records(source_event_id) WHERE source_event_id IS NOT NULL",
         )
         .execute(pool)
         .await?;
@@ -208,18 +248,22 @@ impl SQLiteStore {
         let message_json = simd_json_to_string(&record.message).unwrap();
         let metadata_json = simd_json_to_string(&record.hydrated_metadata).unwrap();
 
-        let result = sqlx::query(
+        let id: i64 = sqlx::query_scalar(
             r#"
             INSERT INTO records (
-                at_uri, did, time_us, message, message_metadata,
+                at_uri, did, time_us, source_event_id, message, message_metadata,
                 created_at, hydrated_at, hydration_time_ms,
                 api_calls_count, cache_hit_rate, cache_hits, cache_misses
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT DO UPDATE SET
+                source_event_id = excluded.source_event_id
+            RETURNING id
             "#,
         )
         .bind(record.get_at_uri())
         .bind(record.get_did())
         .bind(record.message.time_us.map(|t| t as i64))
+        .bind(record.source_event_id().to_string())
         .bind(message_json)
         .bind(metadata_json)
         .bind(record.processed_at.to_rfc3339())
@@ -229,10 +273,10 @@ impl SQLiteStore {
         .bind(record.metrics.cache_hit_rate)
         .bind(record.metrics.cache_hits as i64)
         .bind(record.metrics.cache_misses as i64)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await?;
 
-        Ok(result.last_insert_rowid())
+        Ok(id)
     }
 
     pub async fn get_record_by_uri(&self, at_uri: &str) -> TurboResult<Option<EnrichedRecord>> {
@@ -257,6 +301,18 @@ impl SQLiteStore {
             }
             None => Ok(None),
         }
+    }
+
+    pub async fn has_completed_source_event(
+        &self,
+        source_event_id: &SourceEventId,
+    ) -> TurboResult<bool> {
+        let exists: i64 =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM records WHERE source_event_id = ?)")
+                .bind(source_event_id.as_str())
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(exists != 0)
     }
 
     async fn row_to_record(&self, row: sqlx::sqlite::SqliteRow) -> TurboResult<EnrichedRecord> {
@@ -297,6 +353,99 @@ impl SQLiteStore {
 
         let count: i64 = result.try_get("count")?;
         Ok(count)
+    }
+
+    /// Loads the singleton durable ingestion checkpoint, if one has been committed.
+    pub async fn load_ingestion_checkpoint(&self) -> TurboResult<Option<IngestionCheckpoint>> {
+        let row = sqlx::query(
+            r#"
+            SELECT ingress_ordinal, time_us, source_seq, source_event_id, updated_at
+            FROM ingestion_checkpoint
+            WHERE singleton_id = 1
+            "#,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| {
+            let ingress_ordinal = u64::try_from(row.try_get::<i64, _>("ingress_ordinal")?)
+                .map_err(|_| {
+                    TurboError::InvalidMessage("negative checkpoint ordinal".to_string())
+                })?;
+            let time_us = u64::try_from(row.try_get::<i64, _>("time_us")?).map_err(|_| {
+                TurboError::InvalidMessage("negative checkpoint time_us".to_string())
+            })?;
+            let source_seq = row
+                .try_get::<Option<i64>, _>("source_seq")?
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| {
+                    TurboError::InvalidMessage("negative checkpoint source_seq".to_string())
+                })?;
+            let updated_at = DateTime::parse_from_rfc3339(&row.try_get::<String, _>("updated_at")?)
+                .map_err(|error| {
+                    TurboError::InvalidMessage(format!("invalid checkpoint updated_at: {error}"))
+                })?
+                .with_timezone(&Utc);
+
+            Ok(IngestionCheckpoint {
+                ingress_ordinal,
+                cursor: SourceCursor {
+                    time_us,
+                    source_seq,
+                    source_event_id: SourceEventId::from(
+                        row.try_get::<String, _>("source_event_id")?,
+                    ),
+                },
+                updated_at,
+            })
+        })
+        .transpose()
+    }
+
+    /// Atomically advances the singleton checkpoint when `checkpoint` is newer.
+    pub async fn advance_ingestion_checkpoint(
+        &self,
+        checkpoint: &IngestionCheckpoint,
+    ) -> TurboResult<bool> {
+        let ingress_ordinal = i64::try_from(checkpoint.ingress_ordinal).map_err(|_| {
+            TurboError::InvalidMessage("checkpoint ordinal exceeds SQLite range".to_string())
+        })?;
+        let time_us = i64::try_from(checkpoint.cursor.time_us).map_err(|_| {
+            TurboError::InvalidMessage("checkpoint time_us exceeds SQLite range".to_string())
+        })?;
+        let source_seq = checkpoint
+            .cursor
+            .source_seq
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| {
+                TurboError::InvalidMessage("checkpoint source_seq exceeds SQLite range".to_string())
+            })?;
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO ingestion_checkpoint (
+                singleton_id, ingress_ordinal, time_us, source_seq, source_event_id, updated_at
+            ) VALUES (1, ?, ?, ?, ?, ?)
+            ON CONFLICT(singleton_id) DO UPDATE SET
+                ingress_ordinal = excluded.ingress_ordinal,
+                time_us = excluded.time_us,
+                source_seq = excluded.source_seq,
+                source_event_id = excluded.source_event_id,
+                updated_at = excluded.updated_at
+            WHERE excluded.ingress_ordinal > ingestion_checkpoint.ingress_ordinal
+            "#,
+        )
+        .bind(ingress_ordinal)
+        .bind(time_us)
+        .bind(source_seq)
+        .bind(checkpoint.cursor.source_event_id.as_str())
+        .bind(checkpoint.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() == 1)
     }
 
     pub async fn cleanup_old_records(
@@ -495,6 +644,19 @@ impl SQLiteStore {
 }
 
 impl RecordStore for SQLiteStore {
+    async fn completed_source_event_ids(
+        &self,
+        source_event_ids: &[SourceEventId],
+    ) -> TurboResult<HashSet<SourceEventId>> {
+        let mut completed = HashSet::new();
+        for source_event_id in source_event_ids {
+            if self.has_completed_source_event(source_event_id).await? {
+                completed.insert(source_event_id.clone());
+            }
+        }
+        Ok(completed)
+    }
+
     #[instrument(
         name = "sqlite_store_batch",
         skip(self, records),
@@ -514,10 +676,10 @@ impl RecordStore for SQLiteStore {
         let now_str = now.to_rfc3339();
 
         const MAX_PARAMS: usize = 999;
-        const COLUMNS: usize = 12;
+        const COLUMNS: usize = 13;
         const MAX_ROWS_PER_INSERT: usize = MAX_PARAMS / COLUMNS;
 
-        static SINGLE_ROW_PLACEHOLDER: &str = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        static SINGLE_ROW_PLACEHOLDER: &str = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
         let mut all_ids = Vec::with_capacity(count);
 
@@ -531,10 +693,13 @@ impl RecordStore for SQLiteStore {
 
             let insert_sql = format!(
                 r#"INSERT INTO records (
-                    at_uri, did, time_us, message, message_metadata,
+                    at_uri, did, time_us, source_event_id, message, message_metadata,
                     created_at, hydrated_at, hydration_time_ms,
                     api_calls_count, cache_hit_rate, cache_hits, cache_misses
-                ) VALUES {}"#,
+                ) VALUES {}
+                ON CONFLICT DO UPDATE SET
+                    source_event_id = excluded.source_event_id
+                RETURNING id"#,
                 placeholders
             );
 
@@ -545,6 +710,7 @@ impl RecordStore for SQLiteStore {
                     .bind(record.get_at_uri())
                     .bind(record.get_did())
                     .bind(record.message.time_us.map(|t| t as i64))
+                    .bind(record.source_event_id().to_string())
                     .bind(simd_json_to_string(&record.message).unwrap())
                     .bind(simd_json_to_string(&record.hydrated_metadata).unwrap())
                     .bind(record.processed_at.to_rfc3339())
@@ -556,13 +722,13 @@ impl RecordStore for SQLiteStore {
                     .bind(record.metrics.cache_misses as i64);
             }
 
-            let result = query.execute(&mut *tx).await?;
+            let rows = query.fetch_all(&mut *tx).await?;
             tx.commit().await?;
-
-            let base_id = result.last_insert_rowid();
-            for i in 0..chunk.len() {
-                all_ids.push(base_id - (chunk.len() - 1 - i) as i64);
-            }
+            all_ids.extend(
+                rows.into_iter()
+                    .map(|row| row.try_get::<i64, _>("id"))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
         }
 
         let duration = start.elapsed().as_millis() as u64;
@@ -575,6 +741,7 @@ impl RecordStore for SQLiteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType};
     use chrono::{Duration, Utc};
 
     async fn create_test_db() -> SQLiteStore {
@@ -593,6 +760,38 @@ mod tests {
         .unwrap()
     }
 
+    fn test_checkpoint(ordinal: u64, time_us: u64) -> IngestionCheckpoint {
+        IngestionCheckpoint {
+            ingress_ordinal: ordinal,
+            cursor: SourceCursor {
+                time_us,
+                source_seq: Some(ordinal * 10),
+                source_event_id: SourceEventId::from(format!("event-{ordinal}")),
+            },
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn test_record(seq: u64) -> EnrichedRecord {
+        EnrichedRecord::new_with_timestamp(
+            JetstreamMessage {
+                did: "did:plc:stored".to_string(),
+                time_us: Some(1_000_000 + seq),
+                seq: Some(seq),
+                kind: MessageKind::Commit,
+                commit: Some(CommitData {
+                    rev: Some("rev-1".to_string()),
+                    operation_type: OperationType::Create,
+                    collection: Some("app.bsky.feed.post".to_string()),
+                    rkey: Some(format!("post-{seq}")),
+                    record: None,
+                    cid: Some(format!("cid-{seq}")),
+                }),
+            },
+            Utc::now(),
+        )
+    }
+
     #[tokio::test]
     async fn test_get_db_size() {
         let store = create_test_db().await;
@@ -601,6 +800,142 @@ mod tests {
         assert!(size > 0, "Database should have some initial size");
 
         store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ingestion_checkpoint_schema_is_added_to_existing_database() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("existing.db");
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::query("CREATE TABLE legacy_data (id INTEGER PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let store = SQLiteStore::new(
+            &db_path,
+            SQLitePragmaConfig {
+                cache_size_kib: 64 * 1024,
+                mmap_size_mb: 256,
+                journal_size_limit_mb: 512,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(store.load_ingestion_checkpoint().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn source_event_identity_column_is_added_to_existing_records_table() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("records-migration.db");
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
+        sqlx::query(
+            r#"
+            CREATE TABLE records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                at_uri TEXT,
+                did TEXT,
+                time_us INTEGER,
+                message TEXT NOT NULL,
+                message_metadata TEXT,
+                created_at TEXT NOT NULL,
+                hydrated_at TEXT NOT NULL,
+                hydration_time_ms INTEGER,
+                api_calls_count INTEGER,
+                cache_hit_rate REAL,
+                cache_hits INTEGER,
+                cache_misses INTEGER
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let store = SQLiteStore::new(
+            &db_path,
+            SQLitePragmaConfig {
+                cache_size_kib: 64 * 1024,
+                mmap_size_mb: 256,
+                journal_size_limit_mb: 512,
+            },
+        )
+        .await
+        .unwrap();
+        let columns = sqlx::query("PRAGMA table_info(records)")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+
+        assert!(columns.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .is_ok_and(|name| name == "source_event_id")
+        }));
+    }
+
+    #[tokio::test]
+    async fn source_event_identity_recognizes_completed_replay() {
+        let store = create_test_db().await;
+        let record = test_record(1);
+        let source_event_id = record.source_event_id();
+        let first_id = store.store_record(&record).await.unwrap();
+
+        assert!(store
+            .has_completed_source_event(&source_event_id)
+            .await
+            .unwrap());
+        assert_eq!(store.store_record(&record).await.unwrap(), first_id);
+    }
+
+    #[tokio::test]
+    async fn ingestion_checkpoint_advances_monotonically() {
+        let store = create_test_db().await;
+        let newer = test_checkpoint(2, 2_000);
+
+        assert!(store.advance_ingestion_checkpoint(&newer).await.unwrap());
+        assert!(!store
+            .advance_ingestion_checkpoint(&test_checkpoint(1, 1_000))
+            .await
+            .unwrap());
+        assert_eq!(
+            store.load_ingestion_checkpoint().await.unwrap(),
+            Some(newer)
+        );
+    }
+
+    #[tokio::test]
+    async fn ingestion_checkpoint_survives_store_restart() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("restart.db");
+        let pragma_config = SQLitePragmaConfig {
+            cache_size_kib: 64 * 1024,
+            mmap_size_mb: 256,
+            journal_size_limit_mb: 512,
+        };
+        let checkpoint = test_checkpoint(7, 7_000);
+        let store = SQLiteStore::new(&db_path, pragma_config).await.unwrap();
+        store
+            .advance_ingestion_checkpoint(&checkpoint)
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+
+        let reopened = SQLiteStore::new(&db_path, pragma_config).await.unwrap();
+
+        assert_eq!(
+            reopened.load_ingestion_checkpoint().await.unwrap(),
+            Some(checkpoint)
+        );
     }
 
     #[tokio::test]

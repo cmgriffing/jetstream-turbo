@@ -42,18 +42,8 @@ impl RedisStore {
     }
 
     pub async fn publish_record(&self, record: &EnrichedRecord) -> TurboResult<String> {
-        let message_json = serde_json::to_string(record)?;
         let message_id = generate_message_id(record);
-        let at_uri = record.get_at_uri().unwrap_or_default();
-        let did = record.get_did().to_string();
-        let hydrated_at = record.processed_at.to_rfc3339();
-
-        let values = vec![
-            ("at_uri", at_uri),
-            ("did", did),
-            ("message", message_json),
-            ("hydrated_at", hydrated_at),
-        ];
+        let values = publication_values(record)?;
 
         let mut client = self.client.lock().await;
         let id: String = client
@@ -133,18 +123,8 @@ impl EventPublisher for RedisStore {
 
         // Batch Redis operations - acquire lock once for all records
         for record in records {
-            let message_json = serde_json::to_string(record)?;
             let message_id = generate_message_id(record);
-            let at_uri = record.get_at_uri().unwrap_or_default();
-            let did = record.get_did().to_string();
-            let hydrated_at = record.processed_at.to_rfc3339();
-
-            let values = vec![
-                ("at_uri", at_uri),
-                ("did", did),
-                ("message", message_json),
-                ("hydrated_at", hydrated_at),
-            ];
+            let values = publication_values(record)?;
 
             let id: String = client
                 .xadd(self.stream_name.clone(), Some(&message_id), values)
@@ -186,6 +166,16 @@ fn generate_message_id(record: &EnrichedRecord) -> String {
     )
 }
 
+fn publication_values(record: &EnrichedRecord) -> TurboResult<Vec<(&'static str, String)>> {
+    Ok(vec![
+        ("at_uri", record.get_at_uri().unwrap_or_default()),
+        ("did", record.get_did().to_string()),
+        ("source_event_id", record.source_event_id().to_string()),
+        ("message", serde_json::to_string(record)?),
+        ("hydrated_at", record.processed_at.to_rfc3339()),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,5 +212,30 @@ mod tests {
         let message_id = generate_message_id(&record);
         assert!(message_id.contains('-'));
         assert_eq!(message_id.split('-').count(), 2);
+    }
+
+    #[test]
+    fn replay_publication_keeps_source_identity_across_crash_boundary() {
+        let original = EnrichedRecord::new_with_timestamp(
+            crate::testing::create_post_message(42),
+            chrono::DateTime::UNIX_EPOCH,
+        );
+        let replayed = EnrichedRecord::new_with_timestamp(
+            original.message.clone(),
+            chrono::DateTime::UNIX_EPOCH + chrono::Duration::seconds(1),
+        );
+        let source_id = |record: &EnrichedRecord| {
+            publication_values(record)
+                .unwrap()
+                .into_iter()
+                .find_map(|(key, value)| (key == "source_event_id").then_some(value))
+                .unwrap()
+        };
+
+        assert_ne!(
+            generate_message_id(&original),
+            generate_message_id(&replayed)
+        );
+        assert_eq!(source_id(&original), source_id(&replayed));
     }
 }

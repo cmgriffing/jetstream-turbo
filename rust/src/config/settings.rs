@@ -51,6 +51,14 @@ pub struct Settings {
 
     // Pipeline Progress and Recovery Configuration
     pub jetstream_data_idle_timeout_secs: u64,
+    pub jetstream_connect_timeout_secs: u64,
+    pub jetstream_cursor_overlap_secs: u64,
+    pub jetstream_endpoint_backoff_min_secs: u64,
+    pub jetstream_endpoint_backoff_max_secs: u64,
+    pub jetstream_committed_lag_threshold_secs: u64,
+    pub jetstream_live_stability_observations: u32,
+    pub jetstream_recovery_deadlines_enabled: bool,
+    pub jetstream_cursor_replay_enabled: bool,
     pub batch_execution_timeout_secs: u64,
     pub pipeline_startup_grace_secs: u64,
     pub readiness_recovery_successes: u32,
@@ -111,7 +119,15 @@ impl Default for Settings {
             http_port: 8080,
             channel_capacity: default_channel_capacity(),
             monitor_broadcast_capacity: default_monitor_broadcast_capacity(),
-            jetstream_data_idle_timeout_secs: 120,
+            jetstream_data_idle_timeout_secs: 30,
+            jetstream_connect_timeout_secs: 10,
+            jetstream_cursor_overlap_secs: 10,
+            jetstream_endpoint_backoff_min_secs: 1,
+            jetstream_endpoint_backoff_max_secs: 30,
+            jetstream_committed_lag_threshold_secs: 30,
+            jetstream_live_stability_observations: 3,
+            jetstream_recovery_deadlines_enabled: true,
+            jetstream_cursor_replay_enabled: true,
             batch_execution_timeout_secs: 60,
             pipeline_startup_grace_secs: 300,
             readiness_recovery_successes: 3,
@@ -241,6 +257,30 @@ impl Settings {
         if let Ok(value) = std::env::var("JETSTREAM_DATA_IDLE_TIMEOUT_SECS") {
             builder = builder.set_override("jetstream_data_idle_timeout_secs", value)?;
         }
+        if let Ok(value) = std::env::var("JETSTREAM_CONNECT_TIMEOUT_SECS") {
+            builder = builder.set_override("jetstream_connect_timeout_secs", value)?;
+        }
+        if let Ok(value) = std::env::var("JETSTREAM_CURSOR_OVERLAP_SECS") {
+            builder = builder.set_override("jetstream_cursor_overlap_secs", value)?;
+        }
+        if let Ok(value) = std::env::var("JETSTREAM_ENDPOINT_BACKOFF_MIN_SECS") {
+            builder = builder.set_override("jetstream_endpoint_backoff_min_secs", value)?;
+        }
+        if let Ok(value) = std::env::var("JETSTREAM_ENDPOINT_BACKOFF_MAX_SECS") {
+            builder = builder.set_override("jetstream_endpoint_backoff_max_secs", value)?;
+        }
+        if let Ok(value) = std::env::var("JETSTREAM_COMMITTED_LAG_THRESHOLD_SECS") {
+            builder = builder.set_override("jetstream_committed_lag_threshold_secs", value)?;
+        }
+        if let Ok(value) = std::env::var("JETSTREAM_LIVE_STABILITY_OBSERVATIONS") {
+            builder = builder.set_override("jetstream_live_stability_observations", value)?;
+        }
+        if let Ok(value) = std::env::var("JETSTREAM_RECOVERY_DEADLINES_ENABLED") {
+            builder = builder.set_override("jetstream_recovery_deadlines_enabled", value)?;
+        }
+        if let Ok(value) = std::env::var("JETSTREAM_CURSOR_REPLAY_ENABLED") {
+            builder = builder.set_override("jetstream_cursor_replay_enabled", value)?;
+        }
         if let Ok(value) = std::env::var("BATCH_EXECUTION_TIMEOUT_SECS") {
             builder = builder.set_override("batch_execution_timeout_secs", value)?;
         }
@@ -327,8 +367,31 @@ impl Settings {
             anyhow::bail!("monitor_broadcast_capacity must be greater than 0");
         }
 
-        if self.jetstream_data_idle_timeout_secs == 0 {
-            anyhow::bail!("jetstream_data_idle_timeout_secs must be greater than 0");
+        if !(1..=3_600).contains(&self.jetstream_data_idle_timeout_secs) {
+            anyhow::bail!("jetstream_data_idle_timeout_secs must be between 1 and 3600");
+        }
+        if !(1..=300).contains(&self.jetstream_connect_timeout_secs) {
+            anyhow::bail!("jetstream_connect_timeout_secs must be between 1 and 300");
+        }
+        if self.jetstream_cursor_overlap_secs > 86_400 {
+            anyhow::bail!("jetstream_cursor_overlap_secs must be at most 86400");
+        }
+        if !(1..=3_600).contains(&self.jetstream_endpoint_backoff_min_secs) {
+            anyhow::bail!("jetstream_endpoint_backoff_min_secs must be between 1 and 3600");
+        }
+        if !(1..=3_600).contains(&self.jetstream_endpoint_backoff_max_secs) {
+            anyhow::bail!("jetstream_endpoint_backoff_max_secs must be between 1 and 3600");
+        }
+        if self.jetstream_endpoint_backoff_min_secs > self.jetstream_endpoint_backoff_max_secs {
+            anyhow::bail!(
+                "jetstream_endpoint_backoff_min_secs must not exceed jetstream_endpoint_backoff_max_secs"
+            );
+        }
+        if !(1..=86_400).contains(&self.jetstream_committed_lag_threshold_secs) {
+            anyhow::bail!("jetstream_committed_lag_threshold_secs must be between 1 and 86400");
+        }
+        if !(1..=1_000).contains(&self.jetstream_live_stability_observations) {
+            anyhow::bail!("jetstream_live_stability_observations must be between 1 and 1000");
         }
         if self.batch_execution_timeout_secs == 0 {
             anyhow::bail!("batch_execution_timeout_secs must be greater than 0");
@@ -411,7 +474,15 @@ mod tests {
         assert_eq!(settings.max_concurrent_requests, 6);
         assert_eq!(settings.channel_capacity, 10_000);
         assert_eq!(settings.monitor_broadcast_capacity, 10_000);
-        assert_eq!(settings.jetstream_data_idle_timeout_secs, 120);
+        assert_eq!(settings.jetstream_data_idle_timeout_secs, 30);
+        assert_eq!(settings.jetstream_connect_timeout_secs, 10);
+        assert_eq!(settings.jetstream_cursor_overlap_secs, 10);
+        assert_eq!(settings.jetstream_endpoint_backoff_min_secs, 1);
+        assert_eq!(settings.jetstream_endpoint_backoff_max_secs, 30);
+        assert_eq!(settings.jetstream_committed_lag_threshold_secs, 30);
+        assert_eq!(settings.jetstream_live_stability_observations, 3);
+        assert!(settings.jetstream_recovery_deadlines_enabled);
+        assert!(settings.jetstream_cursor_replay_enabled);
         assert_eq!(settings.batch_execution_timeout_secs, 60);
         assert_eq!(settings.pipeline_startup_grace_secs, 300);
         assert_eq!(settings.readiness_recovery_successes, 3);
@@ -463,6 +534,22 @@ mod tests {
         settings.jetstream_data_idle_timeout_secs = 0;
         assert!(settings.validate().is_err());
         settings.jetstream_data_idle_timeout_secs = 1;
+        settings.jetstream_connect_timeout_secs = 0;
+        assert!(settings.validate().is_err());
+        settings.jetstream_connect_timeout_secs = 1;
+        settings.jetstream_cursor_overlap_secs = 86_401;
+        assert!(settings.validate().is_err());
+        settings.jetstream_cursor_overlap_secs = 10;
+        settings.jetstream_endpoint_backoff_min_secs = 31;
+        settings.jetstream_endpoint_backoff_max_secs = 30;
+        assert!(settings.validate().is_err());
+        settings.jetstream_endpoint_backoff_min_secs = 1;
+        settings.jetstream_committed_lag_threshold_secs = 0;
+        assert!(settings.validate().is_err());
+        settings.jetstream_committed_lag_threshold_secs = 30;
+        settings.jetstream_live_stability_observations = 0;
+        assert!(settings.validate().is_err());
+        settings.jetstream_live_stability_observations = 3;
         settings.batch_execution_timeout_secs = 0;
         assert!(settings.validate().is_err());
         settings.batch_execution_timeout_secs = 1;
@@ -483,6 +570,14 @@ mod tests {
             ("BLUESKY_HANDLE", "test.bsky.social"),
             ("BLUESKY_APP_PASSWORD", "password"),
             ("JETSTREAM_DATA_IDLE_TIMEOUT_SECS", "45"),
+            ("JETSTREAM_CONNECT_TIMEOUT_SECS", "12"),
+            ("JETSTREAM_CURSOR_OVERLAP_SECS", "15"),
+            ("JETSTREAM_ENDPOINT_BACKOFF_MIN_SECS", "2"),
+            ("JETSTREAM_ENDPOINT_BACKOFF_MAX_SECS", "20"),
+            ("JETSTREAM_COMMITTED_LAG_THRESHOLD_SECS", "25"),
+            ("JETSTREAM_LIVE_STABILITY_OBSERVATIONS", "4"),
+            ("JETSTREAM_RECOVERY_DEADLINES_ENABLED", "false"),
+            ("JETSTREAM_CURSOR_REPLAY_ENABLED", "false"),
             ("BATCH_EXECUTION_TIMEOUT_SECS", "30"),
             ("PIPELINE_STARTUP_GRACE_SECS", "90"),
             ("READINESS_RECOVERY_SUCCESSES", "5"),
@@ -499,6 +594,14 @@ mod tests {
             std::env::remove_var(key);
         }
         assert_eq!(settings.jetstream_data_idle_timeout_secs, 45);
+        assert_eq!(settings.jetstream_connect_timeout_secs, 12);
+        assert_eq!(settings.jetstream_cursor_overlap_secs, 15);
+        assert_eq!(settings.jetstream_endpoint_backoff_min_secs, 2);
+        assert_eq!(settings.jetstream_endpoint_backoff_max_secs, 20);
+        assert_eq!(settings.jetstream_committed_lag_threshold_secs, 25);
+        assert_eq!(settings.jetstream_live_stability_observations, 4);
+        assert!(!settings.jetstream_recovery_deadlines_enabled);
+        assert!(!settings.jetstream_cursor_replay_enabled);
         assert_eq!(settings.batch_execution_timeout_secs, 30);
         assert_eq!(settings.pipeline_startup_grace_secs, 90);
         assert_eq!(settings.readiness_recovery_successes, 5);

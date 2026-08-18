@@ -757,6 +757,13 @@ mod tests {
                 },
                 stage: None,
                 reason: (!healthy).then(|| "dependency_unhealthy".to_string()),
+                transport_connected: healthy,
+                recovery_phase: if healthy {
+                    crate::models::recovery::RecoveryPhase::Live
+                } else {
+                    crate::models::recovery::RecoveryPhase::Connecting
+                },
+                unrecoverable_gap: None,
             },
         }
     }

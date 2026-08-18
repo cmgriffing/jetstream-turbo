@@ -1,3 +1,4 @@
+use crate::models::recovery::RecoveryPhase;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -33,6 +34,7 @@ pub struct ActiveBatchSnapshot {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct PipelineProgressSnapshot {
+    pub recovery_phase: RecoveryPhase,
     pub readiness_state: PipelineReadinessState,
     pub stale_stage: Option<PipelineStage>,
     pub readiness_reason: Option<String>,
@@ -41,6 +43,17 @@ pub struct PipelineProgressSnapshot {
     pub reconnect_count: u64,
     pub reconnect_reasons: HashMap<String, u64>,
     pub recovery_duration_ms: Option<u64>,
+    pub unrecoverable_gap: Option<String>,
+    pub last_received_event_time_us: Option<u64>,
+    pub last_committed_event_time_us: Option<u64>,
+    pub received_lag_us: Option<u64>,
+    pub committed_lag_us: Option<u64>,
+    pub live_stability_observations: u32,
+    pub endpoint_attempts: HashMap<String, u64>,
+    pub endpoint_failures: HashMap<String, u64>,
+    pub replayed_events: u64,
+    pub duplicate_events: u64,
+    pub blocked_send_duration_ms: u64,
     pub ingress_messages: u64,
     pub completed_batches: u64,
     pub completed_records: u64,
@@ -85,6 +98,7 @@ struct ActiveBatch {
 
 #[derive(Debug)]
 struct ProgressState {
+    recovery_phase: RecoveryPhase,
     started_at: Instant,
     connected_endpoint: Option<String>,
     last_reconnect_reason: Option<String>,
@@ -92,6 +106,17 @@ struct ProgressState {
     reconnect_count: u64,
     reconnect_reasons: HashMap<String, u64>,
     recovery_duration_ms: Option<u64>,
+    unrecoverable_gap: Option<String>,
+    last_received_event_time_us: Option<u64>,
+    last_committed_event_time_us: Option<u64>,
+    received_lag_us: Option<u64>,
+    committed_lag_us: Option<u64>,
+    live_stability_observations: u32,
+    endpoint_attempts: HashMap<String, u64>,
+    endpoint_failures: HashMap<String, u64>,
+    replayed_events: u64,
+    duplicate_events: u64,
+    blocked_send_duration_ms: u64,
     last_ingress: Option<TimedEvent>,
     first_ingress_at: Option<Instant>,
     last_completion: Option<TimedEvent>,
@@ -128,6 +153,7 @@ impl PipelineProgress {
     fn with_started_at(maximum_permits: usize, input_capacity: usize, started_at: Instant) -> Self {
         Self {
             state: Mutex::new(ProgressState {
+                recovery_phase: RecoveryPhase::Connecting,
                 started_at,
                 connected_endpoint: None,
                 last_reconnect_reason: None,
@@ -135,6 +161,17 @@ impl PipelineProgress {
                 reconnect_count: 0,
                 reconnect_reasons: HashMap::new(),
                 recovery_duration_ms: None,
+                unrecoverable_gap: None,
+                last_received_event_time_us: None,
+                last_committed_event_time_us: None,
+                received_lag_us: None,
+                committed_lag_us: None,
+                live_stability_observations: 0,
+                endpoint_attempts: HashMap::new(),
+                endpoint_failures: HashMap::new(),
+                replayed_events: 0,
+                duplicate_events: 0,
+                blocked_send_duration_ms: 0,
                 last_ingress: None,
                 first_ingress_at: None,
                 last_completion: None,
@@ -167,7 +204,52 @@ impl PipelineProgress {
     }
 
     pub fn connection_established(&self, endpoint: impl Into<String>) {
-        self.state().connected_endpoint = Some(endpoint.into());
+        self.connection_established_with_replay(endpoint, false);
+    }
+
+    pub fn connecting(&self) {
+        let mut state = self.state();
+        state.recovery_phase = RecoveryPhase::Connecting;
+        state.live_stability_observations = 0;
+    }
+
+    pub fn endpoint_attempted(&self, endpoint: &str) {
+        *self
+            .state()
+            .endpoint_attempts
+            .entry(endpoint.to_string())
+            .or_insert(0) += 1;
+    }
+
+    pub fn endpoint_failed(&self, endpoint: &str) {
+        *self
+            .state()
+            .endpoint_failures
+            .entry(endpoint.to_string())
+            .or_insert(0) += 1;
+    }
+
+    pub fn replayed_event(&self) {
+        self.state().replayed_events += 1;
+    }
+
+    pub fn duplicate_events(&self, count: usize) {
+        self.state().duplicate_events += count as u64;
+    }
+
+    pub fn connection_established_with_replay(
+        &self,
+        endpoint: impl Into<String>,
+        replay_requested: bool,
+    ) {
+        let mut state = self.state();
+        state.connected_endpoint = Some(endpoint.into());
+        state.recovery_phase = if replay_requested {
+            RecoveryPhase::Replaying
+        } else {
+            RecoveryPhase::CatchingUp
+        };
+        state.live_stability_observations = 0;
     }
 
     pub fn disconnected(&self, reason: impl Into<String>) {
@@ -178,10 +260,93 @@ impl PipelineProgress {
         *state.reconnect_reasons.entry(reason).or_insert(0) += 1;
         state.reconnect_count += 1;
         state.reconnect_started_at = Some(Instant::now());
+        state.recovery_phase = RecoveryPhase::Connecting;
+        state.live_stability_observations = 0;
+    }
+
+    pub fn mark_unrecoverable_gap(&self, reason: impl Into<String>) {
+        let mut state = self.state();
+        state.unrecoverable_gap = Some(reason.into());
+        state.recovery_phase = RecoveryPhase::UnrecoverableGap;
+        state.live_stability_observations = 0;
+    }
+
+    pub fn clear_unrecoverable_gap(&self) {
+        self.state().unrecoverable_gap = None;
     }
 
     pub fn valid_ingress(&self) -> Option<u64> {
         self.valid_ingress_at(Instant::now(), SystemTime::now())
+    }
+
+    pub fn valid_ingress_event(&self, event_time_us: u64) -> Option<u64> {
+        self.valid_ingress_event_at(event_time_us, Instant::now(), SystemTime::now())
+    }
+
+    fn valid_ingress_event_at(
+        &self,
+        event_time_us: u64,
+        now: Instant,
+        wall: SystemTime,
+    ) -> Option<u64> {
+        let recovery = self.valid_ingress_at(now, wall);
+        let mut state = self.state();
+        state.last_received_event_time_us = Some(event_time_us);
+        state.received_lag_us = Some(unix_us(wall).saturating_sub(event_time_us));
+        if state.recovery_phase != RecoveryPhase::UnrecoverableGap
+            && state.recovery_phase != RecoveryPhase::Live
+        {
+            state.recovery_phase = RecoveryPhase::CatchingUp;
+        }
+        recovery
+    }
+
+    pub fn checkpoint_committed(
+        &self,
+        event_time_us: u64,
+        live_lag_threshold: Duration,
+        required_stability_observations: u32,
+    ) -> bool {
+        self.checkpoint_committed_at(
+            event_time_us,
+            live_lag_threshold,
+            required_stability_observations,
+            Instant::now(),
+            SystemTime::now(),
+        )
+    }
+
+    fn checkpoint_committed_at(
+        &self,
+        event_time_us: u64,
+        live_lag_threshold: Duration,
+        required_stability_observations: u32,
+        now: Instant,
+        wall: SystemTime,
+    ) -> bool {
+        let mut state = self.state();
+        state.last_committed_event_time_us = Some(event_time_us);
+        let committed_lag_us = unix_us(wall).saturating_sub(event_time_us);
+        state.committed_lag_us = Some(committed_lag_us);
+        if state.recovery_phase == RecoveryPhase::UnrecoverableGap {
+            return false;
+        }
+
+        if committed_lag_us <= live_lag_threshold.as_micros().min(u64::MAX as u128) as u64 {
+            state.live_stability_observations = state.live_stability_observations.saturating_add(1);
+            if state.live_stability_observations >= required_stability_observations.max(1) {
+                state.recovery_phase = RecoveryPhase::Live;
+                if let Some(started) = state.reconnect_started_at.take() {
+                    state.recovery_duration_ms =
+                        Some(duration_millis(now.saturating_duration_since(started)));
+                }
+                return true;
+            }
+        } else {
+            state.live_stability_observations = 0;
+        }
+        state.recovery_phase = RecoveryPhase::CatchingUp;
+        false
     }
 
     fn valid_ingress_at(&self, now: Instant, wall: SystemTime) -> Option<u64> {
@@ -209,10 +374,24 @@ impl PipelineProgress {
         state.input_occupancy = occupancy;
     }
 
+    pub fn input_blocked(&self, occupancy: usize) {
+        let mut state = self.state();
+        state.input_backpressured = true;
+        state.input_occupancy = occupancy;
+    }
+
     pub fn input_recovered(&self, occupancy: usize) {
         let mut state = self.state();
         state.input_backpressured = false;
         state.input_occupancy = occupancy;
+    }
+
+    pub fn input_send_completed(&self, occupancy: usize, blocked_duration: Duration) {
+        let mut state = self.state();
+        state.input_occupancy = occupancy;
+        state.blocked_send_duration_ms = state
+            .blocked_send_duration_ms
+            .saturating_add(duration_millis(blocked_duration));
     }
 
     pub fn batch_started(&self) -> u64 {
@@ -392,6 +571,7 @@ impl PipelineProgress {
         }
 
         PipelineProgressSnapshot {
+            recovery_phase: state.recovery_phase,
             readiness_state,
             stale_stage,
             readiness_reason,
@@ -400,6 +580,17 @@ impl PipelineProgress {
             reconnect_count: state.reconnect_count,
             reconnect_reasons: state.reconnect_reasons.clone(),
             recovery_duration_ms: state.recovery_duration_ms,
+            unrecoverable_gap: state.unrecoverable_gap.clone(),
+            last_received_event_time_us: state.last_received_event_time_us,
+            last_committed_event_time_us: state.last_committed_event_time_us,
+            received_lag_us: state.received_lag_us,
+            committed_lag_us: state.committed_lag_us,
+            live_stability_observations: state.live_stability_observations,
+            endpoint_attempts: state.endpoint_attempts.clone(),
+            endpoint_failures: state.endpoint_failures.clone(),
+            replayed_events: state.replayed_events,
+            duplicate_events: state.duplicate_events,
+            blocked_send_duration_ms: state.blocked_send_duration_ms,
             ingress_messages: state.ingress_messages,
             completed_batches: state.completed_batches,
             completed_records: state.completed_records,
@@ -436,6 +627,13 @@ fn event_now() -> TimedEvent {
 
 fn unix_ms(time: SystemTime) -> u64 {
     duration_millis(time.duration_since(UNIX_EPOCH).unwrap_or_default())
+}
+
+fn unix_us(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros()
+        .min(u64::MAX as u128) as u64
 }
 
 fn duration_millis(duration: Duration) -> u64 {
@@ -535,5 +733,107 @@ mod tests {
             healthy.broadcast_receivers, 0,
             "no subscribers must not affect readiness"
         );
+    }
+
+    #[test]
+    fn committed_lag_requires_stable_observations_before_live() {
+        let start = Instant::now();
+        let wall = UNIX_EPOCH + Duration::from_secs(100);
+        let event_time_us = 95_000_000;
+        let progress = PipelineProgress::with_started_at(2, 100, start);
+        progress.disconnected("test_recovery");
+        progress.connection_established_with_replay("endpoint-a", true);
+        progress.valid_ingress_event_at(event_time_us, start, wall);
+
+        assert!(!progress.checkpoint_committed_at(
+            event_time_us,
+            Duration::from_secs(10),
+            3,
+            start,
+            wall,
+        ));
+        assert!(!progress.checkpoint_committed_at(
+            event_time_us,
+            Duration::from_secs(10),
+            3,
+            start + Duration::from_secs(1),
+            wall,
+        ));
+        assert!(progress.checkpoint_committed_at(
+            event_time_us,
+            Duration::from_secs(10),
+            3,
+            start + Duration::from_secs(2),
+            wall,
+        ));
+
+        let snapshot = progress.snapshot_at(thresholds(), start + Duration::from_secs(2));
+        assert_eq!(snapshot.recovery_phase, RecoveryPhase::Live);
+        assert_eq!(snapshot.committed_lag_us, Some(5_000_000));
+        assert_eq!(snapshot.live_stability_observations, 3);
+    }
+
+    #[test]
+    fn non_converging_committed_lag_remains_catching_up() {
+        let start = Instant::now();
+        let wall = UNIX_EPOCH + Duration::from_secs(100);
+        let progress = PipelineProgress::with_started_at(2, 100, start);
+        progress.connection_established_with_replay("endpoint-a", true);
+        progress.valid_ingress_event_at(99_000_000, start, wall);
+
+        for observation in 0..5 {
+            assert!(!progress.checkpoint_committed_at(
+                50_000_000,
+                Duration::from_secs(30),
+                3,
+                start + Duration::from_secs(observation),
+                wall,
+            ));
+        }
+
+        let snapshot = progress.snapshot_at(thresholds(), start + Duration::from_secs(5));
+        assert_eq!(snapshot.recovery_phase, RecoveryPhase::CatchingUp);
+        assert_eq!(snapshot.committed_lag_us, Some(50_000_000));
+        assert_eq!(snapshot.live_stability_observations, 0);
+    }
+
+    #[test]
+    fn upstream_downtime_and_replay_backlog_stays_recovering_until_commit_converges() {
+        let start = Instant::now();
+        let wall = UNIX_EPOCH + Duration::from_secs(100);
+        let progress = PipelineProgress::with_started_at(2, 100, start);
+        progress.disconnected("upstream_downtime");
+        assert_eq!(progress.state().recovery_phase, RecoveryPhase::Connecting);
+
+        progress.connection_established_with_replay("healthy-alternate", true);
+        assert_eq!(progress.state().recovery_phase, RecoveryPhase::Replaying);
+        progress.valid_ingress_event_at(60_000_000, start, wall);
+        assert!(!progress.checkpoint_committed_at(
+            60_000_000,
+            Duration::from_secs(30),
+            2,
+            start,
+            wall,
+        ));
+        assert_eq!(progress.state().recovery_phase, RecoveryPhase::CatchingUp);
+
+        progress.valid_ingress_event_at(95_000_000, start + Duration::from_secs(1), wall);
+        assert!(!progress.checkpoint_committed_at(
+            80_000_000,
+            Duration::from_secs(30),
+            2,
+            start + Duration::from_secs(1),
+            wall,
+        ));
+        assert_eq!(progress.state().recovery_phase, RecoveryPhase::CatchingUp);
+
+        assert!(progress.checkpoint_committed_at(
+            95_000_000,
+            Duration::from_secs(30),
+            2,
+            start + Duration::from_secs(2),
+            wall,
+        ));
+        assert_eq!(progress.state().recovery_phase, RecoveryPhase::Live);
     }
 }

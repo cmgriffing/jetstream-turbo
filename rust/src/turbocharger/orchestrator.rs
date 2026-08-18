@@ -7,9 +7,11 @@ use crate::models::enriched::EnrichedRecord;
 use crate::models::{
     errors::{TurboError, TurboResult},
     jetstream::JetstreamMessage,
+    recovery::{IngressBatch, IngressEvent, IngressRange},
 };
 use crate::storage::{EventPublisher, RecordStore, RedisStore, SQLitePragmaConfig, SQLiteStore};
 use crate::telemetry::ErrorReporter;
+use crate::turbocharger::coordinator::CompletionFrontier;
 use crate::turbocharger::diagnostics::{
     derive_health, CacheStateDiagnostics, DiagnosticsCollector, HealthDiagnostics, HealthStatus,
     NotRedisStateDiagnostics, ReadinessDiagnostics, SQLiteStateDiagnostics,
@@ -24,7 +26,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, Semaphore};
+use tokio::sync::{broadcast, Mutex, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::{interval, sleep, timeout_at, Instant};
 use tracing::{error, info, trace};
@@ -53,6 +55,7 @@ pub struct TurboCharger<M, P, Po, S, E> {
     error_reporter: ErrorReporter,
     diagnostics_collector: DiagnosticsCollector,
     progress: Arc<PipelineProgress>,
+    completion_frontier: Arc<Mutex<CompletionFrontier>>,
 }
 
 impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, RedisStore> {
@@ -72,18 +75,29 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             settings.max_concurrent_requests,
             settings.channel_capacity,
         ));
-        let mut jetstream_client = JetstreamClient::new(
+        let jetstream_client = JetstreamClient::new(
             settings.jetstream_hosts.clone(),
             settings.wanted_collections.clone(),
         )
         .with_channel_capacity(settings.channel_capacity)
+        .with_endpoint_backoff(
+            Duration::from_secs(settings.jetstream_endpoint_backoff_min_secs),
+            Duration::from_secs(settings.jetstream_endpoint_backoff_max_secs),
+        )
+        .with_cursor_overlap(Duration::from_secs(settings.jetstream_cursor_overlap_secs))
         .with_progress_tracker(Arc::clone(&progress));
-        jetstream_client = if settings.pipeline_deadlines_enabled {
-            jetstream_client.with_data_idle_timeout(Duration::from_secs(
-                settings.jetstream_data_idle_timeout_secs,
-            ))
+        let jetstream_client = if settings.jetstream_recovery_deadlines_enabled {
+            jetstream_client
+                .with_connection_timeout(Duration::from_secs(
+                    settings.jetstream_connect_timeout_secs,
+                ))
+                .with_data_idle_timeout(Duration::from_secs(
+                    settings.jetstream_data_idle_timeout_secs,
+                ))
         } else {
-            jetstream_client.without_data_idle_timeout()
+            jetstream_client
+                .without_connection_timeout()
+                .without_data_idle_timeout()
         };
 
         // Authenticate directly with Bluesky
@@ -132,6 +146,14 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             )
             .await?,
         );
+        let checkpoint = sqlite_store.load_ingestion_checkpoint().await?;
+        let completion_frontier =
+            Arc::new(Mutex::new(CompletionFrontier::new(checkpoint.as_ref())));
+        let jetstream_client = if settings.jetstream_cursor_replay_enabled {
+            jetstream_client.with_checkpoint_store(Arc::clone(&sqlite_store))
+        } else {
+            jetstream_client
+        };
 
         let redis_store = Arc::new(
             RedisStore::new(
@@ -166,6 +188,7 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             error_reporter,
             diagnostics_collector: DiagnosticsCollector::default(),
             progress,
+            completion_frontier,
         })
     }
 }
@@ -185,10 +208,15 @@ where
 
         let mut last_stats = std::time::Instant::now();
         let mut batch_reporter = BatchReporter::new(BATCH_SIZE);
-        let mut buffer: Vec<JetstreamMessage> = Vec::with_capacity(BATCH_SIZE);
+        let checkpoint = self.sqlite_store.load_ingestion_checkpoint().await?;
+        let mut next_ingress_ordinal = checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.ingress_ordinal.saturating_add(1))
+            .unwrap_or(1);
+        let mut buffer: Vec<IngressEvent> = Vec::with_capacity(BATCH_SIZE);
         let mut flush_interval = interval(Duration::from_millis(MAX_WAIT_TIME_MS));
-        let mut batch_buffer: Vec<JetstreamMessage> = Vec::with_capacity(BATCH_SIZE);
-        let mut batch_tasks: JoinSet<TurboResult<usize>> = JoinSet::new();
+        let mut batch_buffer: Vec<IngressEvent> = Vec::with_capacity(BATCH_SIZE);
+        let mut batch_tasks: JoinSet<TurboResult<BatchCompletion>> = JoinSet::new();
 
         tokio::pin!(message_stream);
 
@@ -198,7 +226,12 @@ where
                     match result {
                         Some(Ok(message)) => {
                             if self.should_process_message(&message) {
-                                buffer.push(message);
+                                let event = IngressEvent::new(next_ingress_ordinal, message)
+                                    .ok_or_else(|| TurboError::InvalidMessage(
+                                        "Jetstream event is missing portable time_us cursor".to_string()
+                                    ))?;
+                                next_ingress_ordinal = next_ingress_ordinal.saturating_add(1);
+                                buffer.push(event);
                             }
 
                             if buffer.len() >= BATCH_SIZE {
@@ -206,7 +239,7 @@ where
                                 batch_buffer.clear();
                                 batch_buffer.extend(buffer.drain(..));
                                 self.spawn_batch_processing(
-                                    std::mem::take(&mut batch_buffer),
+                                    ingress_batch(std::mem::take(&mut batch_buffer))?,
                                     &mut batch_tasks,
                                 )
                                 .await?;
@@ -229,7 +262,7 @@ where
                         batch_buffer.clear();
                         batch_buffer.extend(buffer.drain(..));
                         self.spawn_batch_processing(
-                            std::mem::take(&mut batch_buffer),
+                            ingress_batch(std::mem::take(&mut batch_buffer))?,
                             &mut batch_tasks,
                         )
                         .await?;
@@ -238,7 +271,7 @@ where
             }
 
             while let Some(task_result) = batch_tasks.try_join_next() {
-                if let Err(error) = self.handle_batch_task_result(task_result) {
+                if let Err(error) = self.handle_batch_task_result(task_result).await {
                     Self::abort_and_drain_batch_tasks(&mut batch_tasks).await;
                     return Err(error);
                 }
@@ -255,6 +288,16 @@ where
                 batch_reporter.maybe_log();
                 let snapshot = self.progress.snapshot(self.progress_thresholds());
                 info!(
+                    recovery_phase = ?snapshot.recovery_phase,
+                    active_endpoint = ?snapshot.connected_endpoint,
+                    reconnect_reason = ?snapshot.last_reconnect_reason,
+                    last_received_event_time_us = ?snapshot.last_received_event_time_us,
+                    last_committed_event_time_us = ?snapshot.last_committed_event_time_us,
+                    received_lag_us = ?snapshot.received_lag_us,
+                    committed_lag_us = ?snapshot.committed_lag_us,
+                    replayed_events = snapshot.replayed_events,
+                    duplicate_events = snapshot.duplicate_events,
+                    blocked_send_duration_ms = snapshot.blocked_send_duration_ms,
                     readiness_state = ?snapshot.readiness_state,
                     stale_stage = ?snapshot.stale_stage,
                     ingress_age_seconds = ?snapshot.ingress_age_seconds,
@@ -272,7 +315,8 @@ where
 
         if !buffer.is_empty() {
             batch_reporter.record(BatchFlushReason::Shutdown, buffer.len());
-            self.process_batch(buffer).await?;
+            let completion = self.process_batch(ingress_batch(buffer)?).await?;
+            self.persist_batch_completion(completion).await?;
         }
 
         batch_reporter.log_if_window_has_data();
@@ -285,8 +329,8 @@ where
 
     async fn spawn_batch_processing(
         &self,
-        batch: Vec<JetstreamMessage>,
-        batch_tasks: &mut JoinSet<TurboResult<usize>>,
+        batch: IngressBatch,
+        batch_tasks: &mut JoinSet<TurboResult<BatchCompletion>>,
     ) -> TurboResult<()> {
         let hydrator = self.hydrator.clone();
         let record_store = Arc::clone(&self.record_store);
@@ -321,21 +365,26 @@ where
     }
 
     pub(crate) fn resolve_batch_task_result(
-        task_result: Result<TurboResult<usize>, tokio::task::JoinError>,
-    ) -> TurboResult<usize> {
+        task_result: Result<TurboResult<BatchCompletion>, tokio::task::JoinError>,
+    ) -> TurboResult<BatchCompletion> {
         match task_result {
             Ok(result) => result,
             Err(e) => Err(TurboError::TaskJoin(e)),
         }
     }
 
-    fn handle_batch_task_result(
+    async fn handle_batch_task_result(
         &self,
-        task_result: Result<TurboResult<usize>, tokio::task::JoinError>,
+        task_result: Result<TurboResult<BatchCompletion>, tokio::task::JoinError>,
     ) -> TurboResult<()> {
         match Self::resolve_batch_task_result(task_result) {
-            Ok(count) => {
-                trace!("Processed batch of {} messages", count);
+            Ok(completion) => {
+                trace!(
+                    "Processed batch of {} messages through ingress ordinal {}",
+                    completion.processed_count,
+                    completion.range.end_ordinal
+                );
+                self.persist_batch_completion(completion).await?;
                 Ok(())
             }
             Err(e) => {
@@ -351,21 +400,21 @@ where
 
     async fn drain_batch_tasks(
         &self,
-        batch_tasks: &mut JoinSet<TurboResult<usize>>,
+        batch_tasks: &mut JoinSet<TurboResult<BatchCompletion>>,
     ) -> TurboResult<()> {
         while let Some(task_result) = batch_tasks.join_next().await {
-            self.handle_batch_task_result(task_result)?;
+            self.handle_batch_task_result(task_result).await?;
         }
 
         Ok(())
     }
 
-    async fn abort_and_drain_batch_tasks(batch_tasks: &mut JoinSet<TurboResult<usize>>) {
+    async fn abort_and_drain_batch_tasks(batch_tasks: &mut JoinSet<TurboResult<BatchCompletion>>) {
         batch_tasks.abort_all();
         while batch_tasks.join_next().await.is_some() {}
     }
 
-    async fn process_batch(&self, batch: Vec<JetstreamMessage>) -> TurboResult<usize> {
+    async fn process_batch(&self, batch: IngressBatch) -> TurboResult<BatchCompletion> {
         let permit = self.semaphore.acquire().await.map_err(|e| {
             TurboError::Internal(format!("Batch semaphore closed unexpectedly: {e}"))
         })?;
@@ -386,22 +435,84 @@ where
         Ok(count)
     }
 
+    async fn persist_batch_completion(&self, completion: BatchCompletion) -> TurboResult<()> {
+        if let Some(checkpoint) = persist_batch_completion(
+            self.completion_frontier.as_ref(),
+            self.sqlite_store.as_ref(),
+            completion,
+        )
+        .await?
+        {
+            let became_live = self.progress.checkpoint_committed(
+                checkpoint.cursor.time_us,
+                Duration::from_secs(self.settings.jetstream_committed_lag_threshold_secs),
+                self.settings.jetstream_live_stability_observations,
+            );
+            let now_us = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_micros()
+                .min(u64::MAX as u128) as u64;
+            let committed_lag_us = now_us.saturating_sub(checkpoint.cursor.time_us);
+            metrics::gauge!("jetstream_last_committed_event_time_us")
+                .set(checkpoint.cursor.time_us as f64);
+            metrics::gauge!("jetstream_committed_lag_seconds")
+                .set(committed_lag_us as f64 / 1_000_000.0);
+            let snapshot = self.progress.snapshot(self.progress_thresholds());
+            metrics::gauge!("jetstream_recovery_phase")
+                .set(recovery_phase_code(snapshot.recovery_phase));
+            info!(
+                recovery_phase = ?snapshot.recovery_phase,
+                committed_event_time_us = checkpoint.cursor.time_us,
+                committed_lag_us,
+                stable_observations = snapshot.live_stability_observations,
+                "Durable Jetstream checkpoint advanced"
+            );
+            if became_live {
+                if let Some(recovery_duration_ms) = snapshot.recovery_duration_ms {
+                    metrics::histogram!("jetstream_recovery_duration_seconds")
+                        .record(recovery_duration_ms as f64 / 1_000.0);
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn process_batch_internal(
         hydrator: Hydrator<P, Po>,
         record_store: Arc<S>,
         event_publisher: Arc<E>,
         broadcast_sender: broadcast::Sender<EnrichedRecord>,
-        batch: Vec<JetstreamMessage>,
+        batch: IngressBatch,
         progress: Arc<PipelineProgress>,
         batch_id: u64,
         timeout: Option<Duration>,
-    ) -> TurboResult<usize> {
+    ) -> TurboResult<BatchCompletion> {
+        let (events, range) = batch.into_parts();
         let deadline = timeout
             .map(|duration| Instant::now() + duration)
             .unwrap_or_else(|| Instant::now() + Duration::from_secs(100 * 365 * 24 * 60 * 60));
         let timeout_secs = timeout.map(|duration| duration.as_secs()).unwrap_or(0);
+        let source_event_ids = events
+            .iter()
+            .map(|event| event.cursor.source_event_id.clone())
+            .collect::<Vec<_>>();
+        let completed_source_event_ids = record_store
+            .completed_source_event_ids(&source_event_ids)
+            .await?;
+        let duplicate_count = completed_source_event_ids.len();
+        if duplicate_count > 0 {
+            metrics::counter!("jetstream_replay_duplicates_total")
+                .increment(duplicate_count as u64);
+            progress.duplicate_events(duplicate_count);
+        }
+        let messages = events
+            .into_iter()
+            .filter(|event| !completed_source_event_ids.contains(&event.cursor.source_event_id))
+            .map(|event| event.message)
+            .collect();
         progress.batch_stage(batch_id, PipelineStage::Hydration);
-        let enriched_records = match timeout_at(deadline, hydrator.hydrate_batch(batch)).await {
+        let enriched_records = match timeout_at(deadline, hydrator.hydrate_batch(messages)).await {
             Ok(Ok(records)) => records,
             Ok(Err(error)) => {
                 progress.batch_failed(batch_id);
@@ -420,7 +531,10 @@ where
 
         if count == 0 {
             progress.batch_completed(batch_id, 0);
-            return Ok(0);
+            return Ok(BatchCompletion {
+                processed_count: 0,
+                range,
+            });
         }
 
         progress.batch_stage(batch_id, PipelineStage::Storage);
@@ -468,7 +582,10 @@ where
         progress.broadcast_state(receivers, successful_sends);
         progress.batch_completed(batch_id, count);
 
-        Ok(count)
+        Ok(BatchCompletion {
+            processed_count: count,
+            range,
+        })
     }
 
     fn should_process_message(&self, _message: &JetstreamMessage) -> bool {
@@ -487,6 +604,43 @@ where
             recovery_successes: self.settings.readiness_recovery_successes,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BatchCompletion {
+    processed_count: usize,
+    range: IngressRange,
+}
+
+fn ingress_batch(events: Vec<IngressEvent>) -> TurboResult<IngressBatch> {
+    IngressBatch::new(events).ok_or_else(|| {
+        TurboError::InvalidMessage("ingress batch must be non-empty and ordered".to_string())
+    })
+}
+
+fn recovery_phase_code(phase: crate::models::recovery::RecoveryPhase) -> f64 {
+    match phase {
+        crate::models::recovery::RecoveryPhase::Connecting => 0.0,
+        crate::models::recovery::RecoveryPhase::Replaying => 1.0,
+        crate::models::recovery::RecoveryPhase::CatchingUp => 2.0,
+        crate::models::recovery::RecoveryPhase::Live => 3.0,
+        crate::models::recovery::RecoveryPhase::UnrecoverableGap => 4.0,
+    }
+}
+
+async fn persist_batch_completion(
+    frontier: &Mutex<CompletionFrontier>,
+    sqlite_store: &SQLiteStore,
+    completion: BatchCompletion,
+) -> TurboResult<Option<crate::models::recovery::IngestionCheckpoint>> {
+    let mut frontier = frontier.lock().await;
+    let Some(checkpoint) = frontier.record_completed(completion.range)? else {
+        return Ok(None);
+    };
+    sqlite_store
+        .advance_ingestion_checkpoint(&checkpoint)
+        .await?;
+    Ok(Some(checkpoint))
 }
 
 fn batch_timeout(
@@ -580,17 +734,53 @@ where
             .await;
 
         let dependency_healthy = redis_healthy && sqlite_available && session_count > 0;
-        let readiness = if !dependency_healthy {
+        let transport_connected = pipeline_progress.connected_endpoint.is_some();
+        let recovery_phase = pipeline_progress.recovery_phase;
+        let unrecoverable_gap = pipeline_progress.unrecoverable_gap.clone();
+        let readiness = if unrecoverable_gap.is_some() {
+            ReadinessDiagnostics {
+                state: PipelineReadinessState::Stale,
+                stage: Some(PipelineStage::Ingress),
+                reason: Some("unrecoverable_cursor_gap".to_string()),
+                transport_connected,
+                recovery_phase,
+                unrecoverable_gap,
+            }
+        } else if pipeline_progress.input_drops > 0 {
+            ReadinessDiagnostics {
+                state: PipelineReadinessState::Stale,
+                stage: Some(PipelineStage::Ingress),
+                reason: Some("input_drop_correctness_failure".to_string()),
+                transport_connected,
+                recovery_phase,
+                unrecoverable_gap: None,
+            }
+        } else if !dependency_healthy {
             ReadinessDiagnostics {
                 state: PipelineReadinessState::Stale,
                 stage: None,
                 reason: Some("dependency_unhealthy".to_string()),
+                transport_connected,
+                recovery_phase,
+                unrecoverable_gap: None,
+            }
+        } else if recovery_phase != crate::models::recovery::RecoveryPhase::Live {
+            ReadinessDiagnostics {
+                state: PipelineReadinessState::Recovering,
+                stage: Some(PipelineStage::Ingress),
+                reason: Some(format!("recovery_{recovery_phase:?}").to_lowercase()),
+                transport_connected,
+                recovery_phase,
+                unrecoverable_gap: None,
             }
         } else {
             ReadinessDiagnostics {
                 state: pipeline_progress.readiness_state,
                 stage: pipeline_progress.stale_stage,
                 reason: pipeline_progress.readiness_reason.clone(),
+                transport_connected,
+                recovery_phase,
+                unrecoverable_gap: None,
             }
         };
 
@@ -987,11 +1177,13 @@ mod tests {
     use crate::hydration::TurboCache;
     use crate::models::bluesky::BlueskyProfile;
     use crate::models::enriched::EnrichedRecord;
+    use crate::models::recovery::{SourceCursor, SourceEventId};
     use crate::storage::{EventPublisher, RecordStore};
     use crate::testing::{
         create_post_message, MockEventPublisher, MockMessageSource, MockPostFetcher,
         MockProfileFetcher, MockRecordStore,
     };
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::Notify;
 
@@ -1033,6 +1225,25 @@ mod tests {
         started: Arc<Notify>,
         cancelled: Arc<AtomicBool>,
     }
+
+    struct DuplicateAwareRecordStore {
+        completed: SourceEventId,
+        store_called: Arc<AtomicBool>,
+    }
+
+    impl RecordStore for DuplicateAwareRecordStore {
+        async fn store_batch(&self, _records: &[EnrichedRecord]) -> TurboResult<Vec<i64>> {
+            self.store_called.store(true, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+
+        async fn completed_source_event_ids(
+            &self,
+            _source_event_ids: &[SourceEventId],
+        ) -> TurboResult<HashSet<SourceEventId>> {
+            Ok(HashSet::from([self.completed.clone()]))
+        }
+    }
     impl EventPublisher for BlockingEventPublisher {
         async fn publish_batch(&self, _records: &[EnrichedRecord]) -> TurboResult<Vec<String>> {
             let _cancel = CancellationFlag(Arc::clone(&self.cancelled));
@@ -1043,6 +1254,29 @@ mod tests {
 
     fn progress() -> Arc<PipelineProgress> {
         Arc::new(PipelineProgress::new(1, 10))
+    }
+
+    fn test_ingress_batch(messages: Vec<JetstreamMessage>) -> IngressBatch {
+        let events = messages
+            .into_iter()
+            .enumerate()
+            .map(|(index, message)| IngressEvent::new(index as u64 + 1, message).unwrap())
+            .collect();
+        ingress_batch(events).unwrap()
+    }
+
+    fn test_ingress_range(start: u64, end: u64) -> IngressRange {
+        let cursor = |ordinal| SourceCursor {
+            time_us: ordinal * 1_000,
+            source_seq: Some(ordinal * 10),
+            source_event_id: SourceEventId::from(format!("event-{ordinal}")),
+        };
+        IngressRange {
+            start_ordinal: start,
+            end_ordinal: end,
+            start_cursor: cursor(start),
+            end_cursor: cursor(end),
+        }
     }
 
     #[test]
@@ -1058,13 +1292,62 @@ mod tests {
         let join_error = tokio::spawn(async move {
             panic!("simulated worker panic");
             #[allow(unreachable_code)]
-            Ok::<usize, TurboError>(0)
+            Err::<BatchCompletion, TurboError>(TurboError::Internal("unreachable".to_string()))
         })
         .await
         .expect_err("task should panic");
 
         let result = ProductionTurboCharger::resolve_batch_task_result(Err(join_error));
         assert!(matches!(result, Err(TurboError::TaskJoin(_))));
+    }
+
+    #[tokio::test]
+    async fn later_batch_does_not_persist_past_unfinished_earlier_batch() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = SQLiteStore::new(
+            temp_dir.path().join("checkpoint.db"),
+            SQLitePragmaConfig {
+                cache_size_kib: 1024,
+                mmap_size_mb: 1,
+                journal_size_limit_mb: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let frontier = Mutex::new(CompletionFrontier::new(None));
+
+        persist_batch_completion(
+            &frontier,
+            &store,
+            BatchCompletion {
+                processed_count: 2,
+                range: test_ingress_range(3, 4),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(store.load_ingestion_checkpoint().await.unwrap(), None);
+
+        persist_batch_completion(
+            &frontier,
+            &store,
+            BatchCompletion {
+                processed_count: 2,
+                range: test_ingress_range(1, 2),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            store
+                .load_ingestion_checkpoint()
+                .await
+                .unwrap()
+                .unwrap()
+                .ingress_ordinal,
+            4
+        );
     }
 
     #[test]
@@ -1124,7 +1407,7 @@ mod tests {
             Arc::new(MockRecordStore::new()),
             Arc::new(MockEventPublisher::new()),
             broadcast::channel(1).0,
-            vec![create_post_message(1)],
+            test_ingress_batch(vec![create_post_message(1)]),
             Arc::clone(&progress),
             batch_id,
             Some(Duration::from_millis(20)),
@@ -1174,7 +1457,7 @@ mod tests {
                     }),
                     Arc::new(MockEventPublisher::new()),
                     broadcast::channel(1).0,
-                    vec![create_post_message(2)],
+                    test_ingress_batch(vec![create_post_message(2)]),
                     progress,
                     batch_id,
                     Some(Duration::from_millis(20)),
@@ -1204,13 +1487,15 @@ mod tests {
             Arc::new(MockRecordStore::new()),
             Arc::new(MockEventPublisher::new()),
             broadcast::channel(1).0,
-            vec![create_post_message(3)],
+            test_ingress_batch(vec![create_post_message(3)]),
             Arc::clone(&progress),
             resumed_id,
             Some(Duration::from_secs(1)),
         )
         .await;
-        assert_eq!(resumed.unwrap(), 1);
+        let completion = resumed.unwrap();
+        assert_eq!(completion.processed_count, 1);
+        assert_eq!(completion.range.end_ordinal, 1);
     }
 
     #[tokio::test]
@@ -1236,7 +1521,7 @@ mod tests {
                 cancelled: Arc::clone(&cancelled),
             }),
             broadcast::channel(1).0,
-            vec![create_post_message(4)],
+            test_ingress_batch(vec![create_post_message(4)]),
             Arc::clone(&progress),
             batch_id,
             Some(Duration::from_millis(20)),
@@ -1246,5 +1531,46 @@ mod tests {
             matches!(result, Err(TurboError::BatchStageTimeout { stage, .. }) if stage == "publication")
         );
         assert!(cancelled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn completed_replay_duplicate_skips_hydration_and_storage() {
+        let message = create_post_message(5);
+        let source_event_id = SourceEventId::from_message(&message);
+        let store_called = Arc::new(AtomicBool::new(false));
+        let progress = progress();
+        let batch_id = progress.batch_started();
+        let result = TurboCharger::<
+            MockMessageSource,
+            BlockingProfileFetcher,
+            MockPostFetcher,
+            DuplicateAwareRecordStore,
+            MockEventPublisher,
+        >::process_batch_internal(
+            Hydrator::new(
+                TurboCache::new(10, 10),
+                Arc::new(BlockingProfileFetcher {
+                    started: Arc::new(Notify::new()),
+                    cancelled: Arc::new(AtomicBool::new(false)),
+                }),
+                Arc::new(MockPostFetcher::new()),
+            ),
+            Arc::new(DuplicateAwareRecordStore {
+                completed: source_event_id,
+                store_called: Arc::clone(&store_called),
+            }),
+            Arc::new(MockEventPublisher::new()),
+            broadcast::channel(1).0,
+            test_ingress_batch(vec![message]),
+            progress,
+            batch_id,
+            Some(Duration::from_millis(20)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.processed_count, 0);
+        assert!(!store_called.load(Ordering::SeqCst));
+        assert_eq!(result.range.end_ordinal, 1);
     }
 }

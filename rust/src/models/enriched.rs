@@ -1,3 +1,4 @@
+use crate::models::recovery::SourceEventId;
 use crate::models::{bluesky::BlueskyProfile, jetstream::JetstreamMessage};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
@@ -129,6 +130,10 @@ impl EnrichedRecord {
     #[inline(always)]
     pub fn get_did(&self) -> &str {
         self.message.extract_did()
+    }
+
+    pub fn source_event_id(&self) -> SourceEventId {
+        SourceEventId::from_message(&self.message)
     }
 
     #[inline(always)]

@@ -46,6 +46,14 @@ Successfully created a comprehensive Rust implementation of jetstream-turbo, a h
 
 ## 📡 API Endpoints
 
+## Recovery delivery semantics
+
+Jetstream replay and stream publication are at-least-once. If the process stops after a
+publication is accepted but before the SQLite ingestion checkpoint advances, the event is
+published again after restart. Every published entry includes `source_event_id`, derived only
+from portable Jetstream source fields, so downstream consumers should use it as their
+idempotency key.
+
 The server runs on port 8080 by default.
 
 | Endpoint | Method | Description |
@@ -563,13 +571,25 @@ Pipeline diagnostics are always present at `/api/v1/health`; that endpoint remai
 
 | Environment variable | Default | Purpose |
 | --- | ---: | --- |
-| `JETSTREAM_DATA_IDLE_TIMEOUT_SECS` | `120` | Maximum useful-data age before endpoint rotation; control and malformed frames do not refresh it. |
+| `JETSTREAM_DATA_IDLE_TIMEOUT_SECS` | `30` | Maximum useful-data age before endpoint rotation; control, malformed, and out-of-scope frames do not refresh it. |
+| `JETSTREAM_CONNECT_TIMEOUT_SECS` | `10` | Maximum WebSocket handshake duration for one endpoint. |
+| `JETSTREAM_CURSOR_OVERLAP_SECS` | `10` | Safety overlap subtracted from the durable timestamp cursor on reconnect. |
+| `JETSTREAM_ENDPOINT_BACKOFF_MIN_SECS` | `1` | Minimum per-endpoint penalty and exhausted-sweep backoff. |
+| `JETSTREAM_ENDPOINT_BACKOFF_MAX_SECS` | `30` | Maximum endpoint penalty and exhausted-sweep backoff. |
+| `JETSTREAM_COMMITTED_LAG_THRESHOLD_SECS` | `30` | Maximum committed event-time lag eligible for `Live`. |
+| `JETSTREAM_LIVE_STABILITY_OBSERVATIONS` | `3` | Consecutive low-committed-lag observations required for `Live`. |
+| `JETSTREAM_RECOVERY_DEADLINES_ENABLED` | `true` | Dedicated rollback control for connection and useful-data deadlines. Independent of pipeline flags. |
+| `JETSTREAM_CURSOR_REPLAY_ENABLED` | `true` | Dedicated rollback control for timestamp-cursor replay. Checkpoint persistence remains enabled. |
 | `BATCH_EXECUTION_TIMEOUT_SECS` | `60` | Outer deadline across hydration, storage, publication, and broadcast preparation. |
 | `PIPELINE_STARTUP_GRACE_SECS` | `300` | Grace period before missing first ingress is stale. |
 | `READINESS_RECOVERY_SUCCESSES` | `3` | Consecutive healthy observations required after staleness. |
-| `PIPELINE_DEADLINES_ENABLED` | `false` | Enables upstream idle and batch deadlines. |
+| `PIPELINE_DEADLINES_ENABLED` | `false` | Enables the legacy batch execution deadline only; it does not control Jetstream recovery safety. |
 | `PIPELINE_PROGRESS_READINESS_ENABLED` | `false` | Makes progress participate in `/ready`. |
 
-The health snapshot includes readiness state/stage/reason, stage ages, active batches, capacity, input drops, reconnect reasons, and broadcast state. Prometheus exposes the corresponding ages, totals, capacity, timeout, drop, receiver/send, and reconnect-reason metrics.
+The health snapshot includes transport connectivity, recovery phase, received and committed cursor lag, endpoint attempts/failures, replay and duplicate totals, queue pressure, input drops, reconnect reasons, and any unrecoverable cursor gap. A connected transport can still be `Replaying` or `CatchingUp`; readiness reports recovery until committed lag converges. Any input drop or unrecoverable gap is a correctness failure.
 
-Alert separately on stale delivery, oldest batch age, timeouts/input drops, and transport loss. Roll out with both flags off, measure normal stage-age percentiles, enable deadlines, then enable progress-aware readiness. Roll back by setting both flags to `false`; diagnostics remain available.
+Alert on `UnrecoverableGap` immediately. Alert separately on non-converging committed lag, prolonged `Connecting`/`Replaying`/`CatchingUp`, exhausted endpoint sweeps, useful-data/connect timeouts, sustained blocked-send duration, duplicate spikes, and any nonzero input-drop counter. Page on committed lag and correctness failures; transport disconnects that fail over and reconverge can remain lower severity.
+
+For rollout, retain the defaults, deploy the additive SQLite schema first, and watch committed lag, duplicate rate, hydration pressure, and blocked-send duration while replay converges. Downstream consumers must deduplicate on `source_event_id`; Redis stream IDs are not stable across the publish-before-checkpoint crash boundary.
+
+For emergency rollback, set `JETSTREAM_CURSOR_REPLAY_ENABLED=false` to reconnect at the live tip and `JETSTREAM_RECOVERY_DEADLINES_ENABLED=false` to disable the dedicated connection/useful-data deadlines. The additive checkpoint and source-ID columns remain safe for older behavior to ignore. This rollback can skip uncommitted upstream traffic, so use it only with explicit incident authorization and retain the database for later reconciliation.
