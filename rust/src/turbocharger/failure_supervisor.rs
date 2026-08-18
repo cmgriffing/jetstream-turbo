@@ -1,5 +1,8 @@
 use crate::client::{ContainmentPolicy, IsolationOutcome};
-use crate::models::errors::TurboError;
+use crate::models::{
+    errors::TurboError,
+    recovery::{IngestionCheckpoint, IngressRange, SourceCursor},
+};
 use serde::Serialize;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -33,6 +36,7 @@ pub struct RecoveryDecision {
 #[derive(Debug)]
 struct FailureState {
     snapshot: FailureContainmentSnapshot,
+    failed_boundary: Option<SourceCursor>,
 }
 
 #[derive(Debug)]
@@ -47,6 +51,7 @@ impl FailureSupervisor {
             policy,
             state: Mutex::new(FailureState {
                 snapshot: FailureContainmentSnapshot::default(),
+                failed_boundary: None,
             }),
         }
     }
@@ -54,7 +59,7 @@ impl FailureSupervisor {
     pub fn record_failure(
         &self,
         error: &TurboError,
-        checkpoint_ordinal: Option<u64>,
+        failed_range: Option<&IngressRange>,
     ) -> RecoveryDecision {
         let descriptor = FailureDescriptor::from_error(error);
         let now = unix_ms();
@@ -62,13 +67,8 @@ impl FailureSupervisor {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous = &state.snapshot;
-        let checkpoint_advanced = previous
-            .blocked_checkpoint_ordinal
-            .zip(checkpoint_ordinal)
-            .is_some_and(|(blocked, current)| current > blocked);
+        let previous = state.snapshot.clone();
         let same_incident = previous.active
-            && !checkpoint_advanced
             && previous.fingerprint.as_deref() == Some(descriptor.fingerprint.as_str());
         let recurrence = if same_incident {
             previous.recurrence.saturating_add(1)
@@ -86,6 +86,15 @@ impl FailureSupervisor {
             || recurrence == self.policy.persistence_threshold
             || (reached_cap && recurrence % 10 == 0);
 
+        let failed_boundary = if same_incident {
+            state
+                .failed_boundary
+                .clone()
+                .or_else(|| failed_range.map(|range| range.end_cursor.clone()))
+        } else {
+            failed_range.map(|range| range.end_cursor.clone())
+        };
+        state.failed_boundary = failed_boundary;
         state.snapshot = FailureContainmentSnapshot {
             active: true,
             persistent,
@@ -101,7 +110,7 @@ impl FailureSupervisor {
             },
             last_occurrence_unix_ms: Some(now),
             current_delay_ms: Some(duration_ms(delay)),
-            blocked_checkpoint_ordinal: Some(checkpoint_ordinal.unwrap_or(0)),
+            blocked_checkpoint_ordinal: failed_range.map(|range| range.end_ordinal),
             isolation: descriptor.isolation,
         };
 
@@ -114,22 +123,23 @@ impl FailureSupervisor {
         }
     }
 
-    /// Clears containment only after the durable completion frontier moves past
-    /// the checkpoint recorded when the incident blocked the pipeline.
+    /// Clears containment only after durable source progress reaches or passes
+    /// the failed portable boundary. Process-local ordinals are not considered.
     pub fn observe_checkpoint(
         &self,
-        checkpoint_ordinal: u64,
+        checkpoint: &IngestionCheckpoint,
     ) -> Option<FailureContainmentSnapshot> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let blocked = state.snapshot.blocked_checkpoint_ordinal?;
-        if !state.snapshot.active || checkpoint_ordinal <= blocked {
+        let boundary = state.failed_boundary.as_ref()?;
+        if !state.snapshot.active || !checkpoint_passes_boundary(&checkpoint.cursor, boundary) {
             return None;
         }
         let recovered = state.snapshot.clone();
         state.snapshot = FailureContainmentSnapshot::default();
+        state.failed_boundary = None;
         Some(recovered)
     }
 
@@ -140,6 +150,10 @@ impl FailureSupervisor {
             .snapshot
             .clone()
     }
+}
+
+fn checkpoint_passes_boundary(checkpoint: &SourceCursor, boundary: &SourceCursor) -> bool {
+    checkpoint.source_event_id == boundary.source_event_id || checkpoint.time_us > boundary.time_us
 }
 
 #[derive(Debug)]
@@ -249,8 +263,10 @@ mod tests {
             operation: BlueskyOperation::Profiles,
             status: Some(502),
             category: UpstreamFailureCategory::ServerError,
-            body_excerpt: None,
+            diagnostic_summary: None,
             attempts: 2,
+            retry_limit: 1,
+            request_cardinality: 2,
             transient: true,
             request_fingerprint: hash.to_string(),
             isolation: None,
@@ -261,9 +277,10 @@ mod tests {
     #[test]
     fn identical_failures_grow_and_cap_without_connection_reset() {
         let supervisor = FailureSupervisor::new(policy());
-        let first = supervisor.record_failure(&failure("same"), Some(10));
-        let second = supervisor.record_failure(&failure("same"), Some(10));
-        let third = supervisor.record_failure(&failure("same"), Some(10));
+        let failed_range = range(9, 10);
+        let first = supervisor.record_failure(&failure("same"), Some(&failed_range));
+        let second = supervisor.record_failure(&failure("same"), Some(&failed_range));
+        let third = supervisor.record_failure(&failure("same"), Some(&failed_range));
         assert_eq!(first.recurrence, 1);
         assert_eq!(second.recurrence, 2);
         assert!(second.delay > first.delay);
@@ -274,20 +291,82 @@ mod tests {
     #[test]
     fn distinct_fingerprint_starts_a_new_sequence() {
         let supervisor = FailureSupervisor::new(policy());
-        supervisor.record_failure(&failure("one"), Some(10));
-        let decision = supervisor.record_failure(&failure("two"), Some(10));
+        let failed_range = range(9, 10);
+        supervisor.record_failure(&failure("one"), Some(&failed_range));
+        let decision = supervisor.record_failure(&failure("two"), Some(&failed_range));
         assert_eq!(decision.recurrence, 1);
     }
 
     #[test]
-    fn only_checkpoint_progress_clears_containment() {
+    fn portable_checkpoint_progress_clears_containment() {
         let supervisor = FailureSupervisor::new(policy());
-        supervisor.record_failure(&failure("same"), Some(10));
-        assert!(supervisor.observe_checkpoint(10).is_none());
+        let failed_range = range(9, 10);
+        supervisor.record_failure(&failure("same"), Some(&failed_range));
+        assert!(supervisor
+            .observe_checkpoint(&checkpoint(99, 9_999, "earlier"))
+            .is_none());
         assert!(supervisor.snapshot().active);
-        assert!(supervisor.observe_checkpoint(11).is_some());
+        assert!(supervisor
+            .observe_checkpoint(&checkpoint(100, 10_000, "event-10"))
+            .is_some());
         assert!(!supervisor.snapshot().active);
-        let decision = supervisor.record_failure(&failure("same"), Some(11));
+        let decision = supervisor.record_failure(&failure("same"), Some(&failed_range));
         assert_eq!(decision.recurrence, 1);
+    }
+
+    #[test]
+    fn higher_replay_ordinal_does_not_clear_before_failed_source_boundary() {
+        let supervisor = FailureSupervisor::new(policy());
+        let failed_range = range(9, 10);
+        supervisor.record_failure(&failure("same"), Some(&failed_range));
+        assert!(supervisor
+            .observe_checkpoint(&checkpoint(1_000, 9_000, "replayed-earlier"))
+            .is_none());
+        assert!(supervisor.snapshot().active);
+    }
+
+    #[test]
+    fn strictly_later_source_time_clears_with_different_event_identity() {
+        let supervisor = FailureSupervisor::new(policy());
+        let failed_range = range(9, 10);
+        supervisor.record_failure(&failure("same"), Some(&failed_range));
+        assert!(supervisor
+            .observe_checkpoint(&checkpoint(1, 10_001, "different-event"))
+            .is_some());
+    }
+
+    #[test]
+    fn boundaryless_failure_is_not_cleared_by_checkpoint_movement() {
+        let supervisor = FailureSupervisor::new(policy());
+        supervisor.record_failure(&failure("same"), None);
+        assert!(supervisor
+            .observe_checkpoint(&checkpoint(1_000, u64::MAX, "later"))
+            .is_none());
+        assert!(supervisor.snapshot().active);
+    }
+
+    fn range(start: u64, end: u64) -> IngressRange {
+        IngressRange {
+            start_ordinal: start,
+            end_ordinal: end,
+            start_cursor: cursor(start * 1_000, &format!("event-{start}")),
+            end_cursor: cursor(end * 1_000, &format!("event-{end}")),
+        }
+    }
+
+    fn checkpoint(ordinal: u64, time_us: u64, event_id: &str) -> IngestionCheckpoint {
+        IngestionCheckpoint {
+            ingress_ordinal: ordinal,
+            cursor: cursor(time_us, event_id),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn cursor(time_us: u64, event_id: &str) -> SourceCursor {
+        SourceCursor {
+            time_us,
+            source_seq: None,
+            source_event_id: event_id.to_string().into(),
+        }
     }
 }

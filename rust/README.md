@@ -604,6 +604,14 @@ After a matching failure recurs without durable checkpoint progress, the run-loo
 
 Containment state, recurrence, safe fingerprint, first/last occurrence, isolation outcome, and current delay are exposed in health diagnostics. Logs and metric labels contain bounded categories and safe hashes rather than raw DIDs, AT URIs, query strings, response bodies, or session credentials. Durable checkpoint advancement beyond the blocked work clears containment and restores the minimum recovery delay.
 
+Production verification queries:
+
+- Recurrence and recovery delay (PromQL): `pipeline_failure_recurrence` and `pipeline_recovery_delay_seconds`; correlate with `pipeline_failure_persistent == 1` and the safe fingerprint in the health response.
+- Isolation start/outcome (structured logs): filter messages equal to `Starting bounded Bluesky request isolation` and `TurboCharger run failure entered containment`, then group by `operation`, `request_fingerprint`, and `isolation`.
+- Sanitized retry exhaustion (structured logs): filter messages equal to `Bluesky request retry budget exhausted` and inspect `status`, `attempts`, `retry_limit`, `request_cardinality`, `request_fingerprint`, and `upstream_summary`. The summary must contain redaction markers instead of authorization values, AT-URIs, or tokens.
+- PostHog exhaustion context (HogQL): `SELECT timestamp, properties.upstream_operation, properties.upstream_category, properties.upstream_status, properties.upstream_attempts, properties.upstream_retry_limit, properties.upstream_request_cardinality, properties.upstream_failure_fingerprint, properties.upstream_summary FROM events WHERE event = '$exception' AND properties.$exception_type = 'BlueskyUpstream' ORDER BY timestamp DESC LIMIT 100`.
+- Durable clearing (structured logs and PromQL): filter messages equal to `Durable checkpoint progress cleared failure containment`; verify its fingerprint and final recurrence, then confirm `pipeline_failure_recurrence == 0` and `pipeline_failure_persistent == 0`.
+
 The health snapshot includes transport connectivity, recovery phase, received and committed cursor lag, endpoint attempts/failures, replay and duplicate totals, queue pressure, input drops, reconnect reasons, and any unrecoverable cursor gap. A connected transport can still be `Replaying` or `CatchingUp`; readiness reports recovery until committed lag converges. Any input drop or unrecoverable gap is a correctness failure.
 
 Alert on `UnrecoverableGap` immediately. Alert separately on non-converging committed lag, prolonged `Connecting`/`Replaying`/`CatchingUp`, exhausted endpoint sweeps, useful-data/connect timeouts, sustained blocked-send duration, duplicate spikes, and any nonzero input-drop counter. Page on committed lag and correctness failures; transport disconnects that fail over and reconverge can remain lower severity.

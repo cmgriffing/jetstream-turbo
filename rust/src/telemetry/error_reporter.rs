@@ -80,17 +80,7 @@ impl ErrorReporter {
             return;
         }
 
-        let event = ErrorEvent {
-            error_type: Self::error_type_name(error),
-            message: error.to_string(),
-            handled: true,
-            is_retryable: error.is_retryable(),
-            is_critical: error.is_critical(),
-            context: context
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-        };
+        let event = Self::handled_error_event(error, context);
 
         match self.tx.try_send(ReporterMessage::Event(event)) {
             Ok(()) => {}
@@ -100,6 +90,57 @@ impl ErrorReporter {
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 tracing::warn!("Error reporter unavailable, dropping error event");
             }
+        }
+    }
+
+    fn handled_error_event(error: &TurboError, context: HashMap<&str, &str>) -> ErrorEvent {
+        let mut context = context
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect::<HashMap<_, _>>();
+        if let TurboError::BlueskyUpstream(upstream) = error {
+            context.insert(
+                "upstream_operation".to_string(),
+                upstream.operation.as_str().to_string(),
+            );
+            context.insert(
+                "upstream_category".to_string(),
+                upstream.category.as_str().to_string(),
+            );
+            context.insert(
+                "upstream_status".to_string(),
+                upstream
+                    .status
+                    .map_or_else(|| "none".to_string(), |status| status.to_string()),
+            );
+            context.insert(
+                "upstream_attempts".to_string(),
+                upstream.attempts.to_string(),
+            );
+            context.insert(
+                "upstream_retry_limit".to_string(),
+                upstream.retry_limit.to_string(),
+            );
+            context.insert(
+                "upstream_request_cardinality".to_string(),
+                upstream.request_cardinality.to_string(),
+            );
+            context.insert(
+                "upstream_failure_fingerprint".to_string(),
+                upstream.failure_fingerprint(),
+            );
+            if let Some(summary) = &upstream.diagnostic_summary {
+                context.insert("upstream_summary".to_string(), summary.clone());
+            }
+        }
+
+        ErrorEvent {
+            error_type: Self::error_type_name(error),
+            message: error.to_string(),
+            handled: true,
+            is_retryable: error.is_retryable(),
+            is_critical: error.is_critical(),
+            context,
         }
     }
 
@@ -376,6 +417,7 @@ impl ErrorReporter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::{BlueskyOperation, UpstreamFailureCategory, UpstreamHttpError};
     use serde_json::Value;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -410,6 +452,45 @@ mod tests {
             event.context.get("operation"),
             Some(&"panic_hook".to_string())
         );
+    }
+
+    #[test]
+    fn bluesky_error_event_contains_only_safe_structured_upstream_context() {
+        let error = TurboError::from(UpstreamHttpError {
+            operation: BlueskyOperation::Posts,
+            status: Some(502),
+            category: UpstreamFailureCategory::ServerError,
+            diagnostic_summary: Some("safe [redacted-at-uri] [redacted-token]".to_string()),
+            attempts: 4,
+            retry_limit: 3,
+            request_cardinality: 25,
+            transient: true,
+            request_fingerprint: "safe-request-hash".to_string(),
+            isolation: None,
+        });
+        let event = ErrorReporter::handled_error_event(&error, HashMap::new());
+
+        assert_eq!(
+            event.context.get("upstream_status"),
+            Some(&"502".to_string())
+        );
+        assert_eq!(
+            event.context.get("upstream_attempts"),
+            Some(&"4".to_string())
+        );
+        assert_eq!(
+            event.context.get("upstream_retry_limit"),
+            Some(&"3".to_string())
+        );
+        assert_eq!(
+            event.context.get("upstream_request_cardinality"),
+            Some(&"25".to_string())
+        );
+        assert_eq!(
+            event.context.get("upstream_summary"),
+            Some(&"safe [redacted-at-uri] [redacted-token]".to_string())
+        );
+        assert!(event.context.values().all(|value| !value.contains("at://")));
     }
 
     #[tokio::test]

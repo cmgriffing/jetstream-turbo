@@ -1,5 +1,5 @@
 use crate::client::resilience::{
-    bounded_body_excerpt, bounded_exponential_jitter, retry_after_delta,
+    bounded_exponential_jitter, retry_after_delta, sanitize_diagnostic_summary,
     stable_identifier_fingerprint, transient_category, BlueskyOperation, ContainmentPolicy,
     RequestRetryPolicy, UpstreamFailureCategory, UpstreamHttpError,
 };
@@ -160,15 +160,23 @@ fn upstream_error(
     category: UpstreamFailureCategory,
     body: Option<&str>,
     attempts: u32,
-    transient: bool,
+    retry_limit: u32,
 ) -> TurboError {
     UpstreamHttpError {
         operation,
         status: status.map(|status| status.as_u16()),
         category,
-        body_excerpt: body.map(bounded_body_excerpt),
+        diagnostic_summary: body.map(sanitize_diagnostic_summary),
         attempts,
-        transient,
+        retry_limit,
+        request_cardinality: identifiers.len(),
+        transient: matches!(
+            category,
+            UpstreamFailureCategory::Transport
+                | UpstreamFailureCategory::RequestTimeout
+                | UpstreamFailureCategory::RateLimited
+                | UpstreamFailureCategory::ServerError
+        ),
         request_fingerprint: stable_identifier_fingerprint(identifiers),
         isolation: None,
     }
@@ -206,24 +214,26 @@ fn record_request_retry(
     );
 }
 
-fn record_request_exhaustion(
-    operation: BlueskyOperation,
-    category: UpstreamFailureCategory,
-    attempts: u32,
-    request_fingerprint: &str,
-) {
+fn record_request_exhaustion(error: &TurboError) {
+    let TurboError::BlueskyUpstream(error) = error else {
+        return;
+    };
     metrics::counter!(
         "bluesky_request_exhaustions_total",
-        "operation" => operation.as_str(),
-        "category" => category.as_str(),
-        "attempts" => attempts.to_string(),
+        "operation" => error.operation.as_str(),
+        "category" => error.category.as_str(),
+        "attempts" => error.attempts.to_string(),
     )
     .increment(1);
     error!(
-        operation = operation.as_str(),
-        category = category.as_str(),
-        attempts,
-        request_fingerprint,
+        operation = error.operation.as_str(),
+        category = error.category.as_str(),
+        status = error.status,
+        attempts = error.attempts,
+        retry_limit = error.retry_limit,
+        request_cardinality = error.request_cardinality,
+        request_fingerprint = error.request_fingerprint,
+        upstream_summary = error.diagnostic_summary.as_deref(),
         "Bluesky request retry budget exhausted"
     );
 }
@@ -649,7 +659,7 @@ impl ProfileBatchCollector {
                                 UpstreamFailureCategory::Authentication,
                                 None,
                                 attempts,
-                                false,
+                                self.retry_policy.max_retries,
                             ));
                         }
                         if self.refresh_session_with_fallback().await.is_err() {
@@ -672,7 +682,7 @@ impl ProfileBatchCollector {
                                     UpstreamFailureCategory::Authentication,
                                     Some(&error_text),
                                     attempts,
-                                    false,
+                                    self.retry_policy.max_retries,
                                 ));
                             }
                             if self.refresh_session_with_fallback().await.is_err() {
@@ -690,7 +700,7 @@ impl ProfileBatchCollector {
                             UpstreamFailureCategory::PermanentResponse,
                             Some(&error_text),
                             attempts,
-                            false,
+                            self.retry_policy.max_retries,
                         ));
                     }
                     status => {
@@ -721,14 +731,9 @@ impl ProfileBatchCollector {
                                 category,
                                 Some(&body),
                                 attempts,
-                                true,
+                                self.retry_policy.max_retries,
                             );
-                            record_request_exhaustion(
-                                operation,
-                                category,
-                                attempts,
-                                &request_fingerprint,
-                            );
+                            record_request_exhaustion(&error);
                             return Err(error);
                         }
                         let body = resp.text().await.unwrap_or_default();
@@ -743,22 +748,24 @@ impl ProfileBatchCollector {
                             },
                             Some(&body),
                             attempts,
-                            false,
+                            self.retry_policy.max_retries,
                         ));
                     }
                 },
                 Err(_error) => {
                     let category = UpstreamFailureCategory::Transport;
                     if attempts > self.retry_policy.max_retries {
-                        record_request_exhaustion(
+                        let error = upstream_error(
                             operation,
+                            dids,
+                            None,
                             category,
+                            None,
                             attempts,
-                            &request_fingerprint,
+                            self.retry_policy.max_retries,
                         );
-                        return Err(upstream_error(
-                            operation, dids, None, category, None, attempts, true,
-                        ));
+                        record_request_exhaustion(&error);
+                        return Err(error);
                     }
                     let delay = retry_delay(
                         None,
@@ -1173,7 +1180,7 @@ impl PostBatchCollector {
                                 UpstreamFailureCategory::Authentication,
                                 None,
                                 attempts,
-                                false,
+                                self.retry_policy.max_retries,
                             ));
                         }
                         if self.refresh_session_with_fallback().await.is_err() {
@@ -1196,7 +1203,7 @@ impl PostBatchCollector {
                                     UpstreamFailureCategory::Authentication,
                                     Some(&error_text),
                                     attempts,
-                                    false,
+                                    self.retry_policy.max_retries,
                                 ));
                             }
                             if self.refresh_session_with_fallback().await.is_err() {
@@ -1214,7 +1221,7 @@ impl PostBatchCollector {
                             UpstreamFailureCategory::PermanentResponse,
                             Some(&error_text),
                             attempts,
-                            false,
+                            self.retry_policy.max_retries,
                         ));
                     }
                     status => {
@@ -1245,14 +1252,9 @@ impl PostBatchCollector {
                                 category,
                                 Some(&body),
                                 attempts,
-                                true,
+                                self.retry_policy.max_retries,
                             );
-                            record_request_exhaustion(
-                                operation,
-                                category,
-                                attempts,
-                                &request_fingerprint,
-                            );
+                            record_request_exhaustion(&error);
                             return Err(error);
                         }
                         let body = resp.text().await.unwrap_or_default();
@@ -1267,22 +1269,24 @@ impl PostBatchCollector {
                             },
                             Some(&body),
                             attempts,
-                            false,
+                            self.retry_policy.max_retries,
                         ));
                     }
                 },
                 Err(_error) => {
                     let category = UpstreamFailureCategory::Transport;
                     if attempts > self.retry_policy.max_retries {
-                        record_request_exhaustion(
+                        let error = upstream_error(
                             operation,
+                            uris,
+                            None,
                             category,
+                            None,
                             attempts,
-                            &request_fingerprint,
+                            self.retry_policy.max_retries,
                         );
-                        return Err(upstream_error(
-                            operation, uris, None, category, None, attempts, true,
-                        ));
+                        record_request_exhaustion(&error);
+                        return Err(error);
                     }
                     let delay = retry_delay(
                         None,
@@ -1519,6 +1523,8 @@ impl PostBatchCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::recovery::{IngestionCheckpoint, IngressRange, SourceCursor, SourceEventId};
+    use crate::turbocharger::FailureSupervisor;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
@@ -1834,6 +1840,74 @@ mod tests {
             Some(crate::client::IsolationOutcome::BudgetExhausted)
         );
         assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn replayed_502_recurrence_activates_isolation_at_threshold() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.feed.getPosts"))
+            .respond_with(PoisonResponder {
+                mode: PoisonMode::All,
+            })
+            .mount(&server)
+            .await;
+        let containment = ContainmentPolicy {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(8),
+            persistence_threshold: 2,
+            isolation_request_budget: 8,
+        };
+        let client = client_for_server(&server, 0, containment).await;
+        let supervisor = FailureSupervisor::new(containment);
+        let uris = [
+            "at://did:plc:a/app.bsky.feed.post/one".to_string(),
+            "at://did:plc:b/app.bsky.feed.post/two".to_string(),
+        ];
+        let failed_range = IngressRange {
+            start_ordinal: 10,
+            end_ordinal: 11,
+            start_cursor: source_cursor(10_000, "failed-start"),
+            end_cursor: source_cursor(11_000, "failed-end"),
+        };
+
+        let first_error = client.bulk_fetch_posts(&uris).await.unwrap_err();
+        let first = supervisor.record_failure(&first_error, Some(&failed_range));
+        client.set_failure_recurrence(first.recurrence);
+        assert_eq!(first.recurrence, 1);
+        assert!(!first.persistent);
+
+        let replay_checkpoint = IngestionCheckpoint {
+            ingress_ordinal: 1_000,
+            cursor: source_cursor(10_500, "replayed-before-boundary"),
+            updated_at: chrono::Utc::now(),
+        };
+        assert!(supervisor.observe_checkpoint(&replay_checkpoint).is_none());
+
+        let replay_error = client.bulk_fetch_posts(&uris).await.unwrap_err();
+        let replay = supervisor.record_failure(&replay_error, Some(&failed_range));
+        client.set_failure_recurrence(replay.recurrence);
+        assert_eq!(replay.recurrence, 2);
+        assert!(replay.persistent);
+        assert!(replay.delay > first.delay);
+
+        let isolation_error = client.bulk_fetch_posts(&uris).await.unwrap_err();
+        let TurboError::BlueskyUpstream(isolation_error) = isolation_error else {
+            panic!("expected typed upstream error");
+        };
+        assert!(matches!(
+            isolation_error.isolation,
+            Some(crate::client::IsolationOutcome::BroadOutage { .. })
+        ));
+        assert_eq!(server.received_requests().await.unwrap().len(), 5);
+    }
+
+    fn source_cursor(time_us: u64, event_id: &str) -> SourceCursor {
+        SourceCursor {
+            time_us,
+            source_seq: None,
+            source_event_id: SourceEventId::from(event_id.to_string()),
+        }
     }
 
     #[tokio::test]

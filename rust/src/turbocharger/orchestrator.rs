@@ -26,6 +26,7 @@ use crate::turbocharger::{FailureSupervisor, RecoveryDecision};
 use futures::StreamExt;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex, Semaphore};
@@ -42,6 +43,53 @@ const BATCH_REPORT_LOG_TARGET: &str = "jetstream_turbo.batch_report";
 // longer to fill without changing the API-imposed batch size of 25.
 const MAX_WAIT_TIME_MS: u64 = 250;
 const BATCH_REPORT_INTERVAL_SECS: u64 = 5 * 60;
+
+pub type RunResult<T> = Result<T, RunFailure>;
+
+/// Internal run-loop failure context retaining the portable range of failed batch work.
+#[derive(Debug)]
+pub struct RunFailure {
+    error: Box<TurboError>,
+    failed_range: Option<IngressRange>,
+}
+
+impl RunFailure {
+    fn batch(error: TurboError, failed_range: IngressRange) -> Self {
+        Self {
+            error: Box::new(error),
+            failed_range: Some(failed_range),
+        }
+    }
+
+    pub fn error(&self) -> &TurboError {
+        self.error.as_ref()
+    }
+
+    pub fn failed_range(&self) -> Option<&IngressRange> {
+        self.failed_range.as_ref()
+    }
+}
+
+impl From<TurboError> for RunFailure {
+    fn from(error: TurboError) -> Self {
+        Self {
+            error: Box::new(error),
+            failed_range: None,
+        }
+    }
+}
+
+impl fmt::Display for RunFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for RunFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error.as_ref())
+    }
+}
 
 pub struct TurboCharger<M, P, Po, S, E> {
     settings: Settings,
@@ -215,7 +263,7 @@ where
     S: RecordStore + Send + Sync + 'static,
     E: EventPublisher + Send + Sync + 'static,
 {
-    pub async fn run(&self) -> TurboResult<()> {
+    pub async fn run(&self) -> RunResult<()> {
         info!("Starting TurboCharger main loop");
 
         let message_stream = self.message_source.stream_messages().await?;
@@ -230,7 +278,7 @@ where
         let mut buffer: Vec<IngressEvent> = Vec::with_capacity(BATCH_SIZE);
         let mut flush_interval = interval(Duration::from_millis(MAX_WAIT_TIME_MS));
         let mut batch_buffer: Vec<IngressEvent> = Vec::with_capacity(BATCH_SIZE);
-        let mut batch_tasks: JoinSet<TurboResult<BatchCompletion>> = JoinSet::new();
+        let mut batch_tasks: JoinSet<RunResult<BatchCompletion>> = JoinSet::new();
 
         tokio::pin!(message_stream);
 
@@ -338,20 +386,13 @@ where
         self.drain_batch_tasks(&mut batch_tasks).await?;
 
         error!("Jetstream stream ended unexpectedly");
-        Err(TurboError::Internal("Jetstream stream ended".to_string()))
+        Err(TurboError::Internal("Jetstream stream ended".to_string()).into())
     }
 
-    pub async fn record_run_failure(&self, error: &TurboError) -> RecoveryDecision {
-        let checkpoint_ordinal = match self.sqlite_store.load_ingestion_checkpoint().await {
-            Ok(checkpoint) => checkpoint.map(|checkpoint| checkpoint.ingress_ordinal),
-            Err(checkpoint_error) => {
-                error!(error = %checkpoint_error, "Could not load checkpoint while recording run failure");
-                None
-            }
-        };
+    pub async fn record_run_failure(&self, failure: &RunFailure) -> RecoveryDecision {
         let decision = self
             .failure_supervisor
-            .record_failure(error, checkpoint_ordinal);
+            .record_failure(failure.error(), failure.failed_range());
         self.bluesky_client
             .set_failure_recurrence(decision.recurrence);
         let snapshot = self.failure_supervisor.snapshot();
@@ -392,7 +433,7 @@ where
     async fn spawn_batch_processing(
         &self,
         batch: IngressBatch,
-        batch_tasks: &mut JoinSet<TurboResult<BatchCompletion>>,
+        batch_tasks: &mut JoinSet<RunResult<BatchCompletion>>,
     ) -> TurboResult<()> {
         let hydrator = self.hydrator.clone();
         let record_store = Arc::clone(&self.record_store);
@@ -408,6 +449,7 @@ where
             TurboError::Internal(format!("Batch semaphore closed unexpectedly: {e}"))
         })?;
 
+        let failed_range = batch.range().clone();
         batch_tasks.spawn(async move {
             let _permit = permit;
             Self::process_batch_internal(
@@ -421,24 +463,25 @@ where
                 timeout,
             )
             .await
+            .map_err(|error| RunFailure::batch(error, failed_range))
         });
 
         Ok(())
     }
 
     pub(crate) fn resolve_batch_task_result(
-        task_result: Result<TurboResult<BatchCompletion>, tokio::task::JoinError>,
-    ) -> TurboResult<BatchCompletion> {
+        task_result: Result<RunResult<BatchCompletion>, tokio::task::JoinError>,
+    ) -> RunResult<BatchCompletion> {
         match task_result {
             Ok(result) => result,
-            Err(e) => Err(TurboError::TaskJoin(Box::new(e))),
+            Err(e) => Err(TurboError::TaskJoin(Box::new(e)).into()),
         }
     }
 
     async fn handle_batch_task_result(
         &self,
-        task_result: Result<TurboResult<BatchCompletion>, tokio::task::JoinError>,
-    ) -> TurboResult<()> {
+        task_result: Result<RunResult<BatchCompletion>, tokio::task::JoinError>,
+    ) -> RunResult<()> {
         match Self::resolve_batch_task_result(task_result) {
             Ok(completion) => {
                 trace!(
@@ -449,21 +492,21 @@ where
                 self.persist_batch_completion(completion).await?;
                 Ok(())
             }
-            Err(e) => {
-                error!("Batch processing failed: {}", e);
+            Err(failure) => {
+                error!("Batch processing failed: {}", failure);
                 let mut ctx = HashMap::new();
                 ctx.insert("component", "turbocharger");
                 ctx.insert("operation", "batch_processing");
-                self.error_reporter.capture_error(&e, ctx);
-                Err(e)
+                self.error_reporter.capture_error(failure.error(), ctx);
+                Err(failure)
             }
         }
     }
 
     async fn drain_batch_tasks(
         &self,
-        batch_tasks: &mut JoinSet<TurboResult<BatchCompletion>>,
-    ) -> TurboResult<()> {
+        batch_tasks: &mut JoinSet<RunResult<BatchCompletion>>,
+    ) -> RunResult<()> {
         while let Some(task_result) = batch_tasks.join_next().await {
             self.handle_batch_task_result(task_result).await?;
         }
@@ -471,15 +514,16 @@ where
         Ok(())
     }
 
-    async fn abort_and_drain_batch_tasks(batch_tasks: &mut JoinSet<TurboResult<BatchCompletion>>) {
+    async fn abort_and_drain_batch_tasks(batch_tasks: &mut JoinSet<RunResult<BatchCompletion>>) {
         batch_tasks.abort_all();
         while batch_tasks.join_next().await.is_some() {}
     }
 
-    async fn process_batch(&self, batch: IngressBatch) -> TurboResult<BatchCompletion> {
+    async fn process_batch(&self, batch: IngressBatch) -> RunResult<BatchCompletion> {
         let permit = self.semaphore.acquire().await.map_err(|e| {
             TurboError::Internal(format!("Batch semaphore closed unexpectedly: {e}"))
         })?;
+        let failed_range = batch.range().clone();
         let count = Self::process_batch_internal(
             self.hydrator.clone(),
             Arc::clone(&self.record_store),
@@ -492,7 +536,8 @@ where
                 .pipeline_deadlines_enabled
                 .then(|| Duration::from_secs(self.settings.batch_execution_timeout_secs)),
         )
-        .await?;
+        .await
+        .map_err(|error| RunFailure::batch(error, failed_range))?;
         drop(permit);
         Ok(count)
     }
@@ -505,10 +550,7 @@ where
         )
         .await?
         {
-            if let Some(recovered) = self
-                .failure_supervisor
-                .observe_checkpoint(checkpoint.ingress_ordinal)
-            {
+            if let Some(recovered) = self.failure_supervisor.observe_checkpoint(&checkpoint) {
                 self.bluesky_client.set_failure_recurrence(0);
                 metrics::gauge!("pipeline_failure_recurrence").set(0.0);
                 metrics::gauge!("pipeline_failure_persistent").set(0.0);
@@ -1384,8 +1426,10 @@ mod tests {
             operation: BlueskyOperation::Profiles,
             status: Some(502),
             category: UpstreamFailureCategory::ServerError,
-            body_excerpt: None,
+            diagnostic_summary: None,
             attempts: 2,
+            retry_limit: 1,
+            request_cardinality: 2,
             transient: true,
             request_fingerprint: "safe-replayed-batch".to_string(),
             isolation: None,
@@ -1418,8 +1462,9 @@ mod tests {
         let frontier = Mutex::new(CompletionFrontier::new(None));
         let supervisor = FailureSupervisor::new(containment_policy());
 
-        let first = supervisor.record_failure(&replay_failure(), None);
-        let replay = supervisor.record_failure(&replay_failure(), None);
+        let failed_range = test_ingress_range(9, 10);
+        let first = supervisor.record_failure(&replay_failure(), Some(&failed_range));
+        let replay = supervisor.record_failure(&replay_failure(), Some(&failed_range));
         persist_batch_completion(
             &frontier,
             &store,
@@ -1455,8 +1500,9 @@ mod tests {
         .unwrap();
         let frontier = Mutex::new(CompletionFrontier::new(None));
         let supervisor = FailureSupervisor::new(containment_policy());
-        supervisor.record_failure(&replay_failure(), None);
-        supervisor.record_failure(&replay_failure(), None);
+        let failed_range = test_ingress_range(1, 2);
+        supervisor.record_failure(&replay_failure(), Some(&failed_range));
+        supervisor.record_failure(&replay_failure(), Some(&failed_range));
 
         let checkpoint = persist_batch_completion(
             &frontier,
@@ -1469,22 +1515,27 @@ mod tests {
         .await
         .unwrap()
         .expect("formerly blocked replay should advance checkpoint");
-        assert!(supervisor
-            .observe_checkpoint(checkpoint.ingress_ordinal)
-            .is_some());
+        assert!(supervisor.observe_checkpoint(&checkpoint).is_some());
         assert!(!supervisor.snapshot().active);
 
-        let next = supervisor.record_failure(&replay_failure(), Some(checkpoint.ingress_ordinal));
+        let next = supervisor.record_failure(&replay_failure(), Some(&failed_range));
         assert_eq!(next.recurrence, 1);
         assert_eq!(next.delay, containment_policy().min_delay);
     }
 
     #[test]
-    fn resolve_batch_task_result_propagates_worker_error() {
-        let result = ProductionTurboCharger::resolve_batch_task_result(Ok(Err(
+    fn resolve_batch_task_result_preserves_worker_error_and_failed_range() {
+        let failed_range = test_ingress_range(7, 9);
+        let result = ProductionTurboCharger::resolve_batch_task_result(Ok(Err(RunFailure::batch(
             TurboError::Internal("batch failed".to_string()),
-        )));
-        assert!(matches!(result, Err(TurboError::Internal(msg)) if msg == "batch failed"));
+            failed_range.clone(),
+        ))));
+        let failure = result.unwrap_err();
+        assert!(matches!(
+            failure.error(),
+            TurboError::Internal(msg) if msg == "batch failed"
+        ));
+        assert_eq!(failure.failed_range(), Some(&failed_range));
     }
 
     #[tokio::test]
@@ -1498,7 +1549,10 @@ mod tests {
         .expect_err("task should panic");
 
         let result = ProductionTurboCharger::resolve_batch_task_result(Err(join_error));
-        assert!(matches!(result, Err(TurboError::TaskJoin(_))));
+        assert!(matches!(
+            result,
+            Err(failure) if matches!(failure.error(), TurboError::TaskJoin(_))
+        ));
     }
 
     #[tokio::test]

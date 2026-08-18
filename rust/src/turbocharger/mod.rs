@@ -10,7 +10,7 @@ pub use diagnostics::{
     ReadinessDiagnostics, SQLiteStateDiagnostics,
 };
 pub use failure_supervisor::{FailureContainmentSnapshot, FailureSupervisor, RecoveryDecision};
-pub use orchestrator::{ProductionTurboCharger, TurboCharger, TurboStats};
+pub use orchestrator::{ProductionTurboCharger, RunFailure, RunResult, TurboCharger, TurboStats};
 pub use progress::{
     PipelineProgress, PipelineProgressSnapshot, PipelineReadinessState, PipelineStage,
     ProgressThresholds,

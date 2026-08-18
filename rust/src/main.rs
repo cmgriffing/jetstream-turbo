@@ -120,13 +120,13 @@ async fn main() -> Result<()> {
                     tracing::warn!("Turbocharger run loop ended unexpectedly; restarting");
                     turbocharger_clone.minimum_recovery_delay()
                 }
-                Err(e) => {
-                    let decision = turbocharger_clone.record_run_failure(&e).await;
+                Err(failure) => {
+                    let decision = turbocharger_clone.record_run_failure(&failure).await;
                     if decision.log_terminal {
                         let mut ctx = HashMap::new();
                         ctx.insert("component", "main");
                         ctx.insert("operation", "turbocharger_run");
-                        error_reporter_clone.capture_error(&e, ctx);
+                        error_reporter_clone.capture_error(failure.error(), ctx);
                     }
                     decision.delay
                 }
