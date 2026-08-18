@@ -13,13 +13,15 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  REGRESSION_THRESHOLD: 2.0
+  TIER1_THRESHOLD: 2.0
+  TIER2_THRESHOLD: 5.0
+  TIER3_THRESHOLD: 5.0
 
 jobs:
   benchmark:
     name: Run Benchmarks
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -53,44 +55,58 @@ jobs:
           path: rust/target
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Run benchmarks
+      - name: Run benchmarks (main baseline)
         working-directory: main-baseline/rust
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/main-baseline/rust/target
         run: |
-          cargo bench --bench hydration_benchmark
+          cargo bench --bench cpu_hot_path --bench regression
+          cargo bench --bench cpu_throughput 2>&1 | tee throughput_main.txt
 
       - name: Run benchmarks (candidate)
         working-directory: rust
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/rust/target
         run: |
-          cargo bench --bench hydration_benchmark
+          cargo bench --bench cpu_hot_path --bench regression
+          cargo bench --bench cpu_throughput 2>&1 | tee throughput_candidate.txt
 
-      - name: Compare with baseline
+      - name: Compare criterion benchmarks
         id: compare
         working-directory: rust
         run: |
           chmod +x scripts/benchmarks/check.sh
           BASELINE_DIR="${{ github.workspace }}/main-baseline/rust/target/criterion" \
           BENCHMARK_OUTPUT="${{ github.workspace }}/rust/target/criterion" \
-          REGRESSION_THRESHOLD="${{ env.REGRESSION_THRESHOLD }}" \
+          TIER1_THRESHOLD="${{ env.TIER1_THRESHOLD }}" \
+          TIER2_THRESHOLD="${{ env.TIER2_THRESHOLD }}" \
+          TIER3_THRESHOLD="${{ env.TIER3_THRESHOLD }}" \
           scripts/benchmarks/check.sh 2>&1 | tee compare_output.txt
           exit ${PIPESTATUS[0]}
         continue-on-error: true
 
+      - name: Compare throughput
+        id: compare-throughput
+        working-directory: rust
+        run: |
+          chmod +x scripts/benchmarks/compare_throughput.sh
+          TIER2_THRESHOLD="${{ env.TIER2_THRESHOLD }}" \
+          scripts/benchmarks/compare_throughput.sh \
+            "${{ github.workspace }}/main-baseline/rust/throughput_main.txt" \
+            "${{ github.workspace }}/rust/throughput_candidate.txt" 2>&1 | tee throughput_compare.txt
+          exit ${PIPESTATUS[0]}
+        continue-on-error: true
+
       - name: Post regression comment on PR
-        if: github.event_name == 'pull_request' && steps.compare.outcome == 'failure'
+        if: github.event_name == 'pull_request' && (steps.compare.outcome == 'failure' || steps.compare-throughput.outcome == 'failure')
         uses: actions/github-script@v7
         with:
           script: |
-            const { execSync } = require('child_process');
             const fs = require('fs');
-            
+
             let comment = '## ⚠️ Benchmark Regression Detected\n\n';
-            comment += 'The following benchmarks have regressed beyond the ' + process.env.REGRESSION_THRESHOLD + '% threshold:\n\n';
-            
-            // Try to get detailed comparison
+
+            // Criterion comparison
             try {
               const output = fs.readFileSync('./rust/compare_output.txt', 'utf8');
               const lines = output.split('\n').filter(l => l.includes('[REGRESSION]'));
@@ -98,11 +114,20 @@ jobs:
                 comment += '- ' + line.replace('[REGRESSION]', '').trim() + '\n';
               }
             } catch (e) {}
-            
+
+            // Throughput comparison
+            try {
+              const output = fs.readFileSync('./rust/throughput_compare.txt', 'utf8');
+              const lines = output.split('\n').filter(l => l.includes('[REGRESSION]'));
+              for (const line of lines) {
+                comment += '- ' + line.replace('[REGRESSION]', '').trim() + '\n';
+              }
+            } catch (e) {}
+
             comment += '\n**Action Required:**\n';
             comment += '- If this is intentional, include rationale in the PR description and expected impact\n';
             comment += '- If unintended, please investigate and fix the performance regression\n';
-            
+
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
@@ -111,5 +136,5 @@ jobs:
             });
 
       - name: Fail on regression
-        if: steps.compare.outcome == 'failure'
+        if: steps.compare.outcome == 'failure' || steps.compare-throughput.outcome == 'failure'
         run: exit 1

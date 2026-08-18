@@ -106,9 +106,13 @@ path = "src/main.rs"
 debug = true
 
 [[bench]]
-name = "hydration_benchmark"
+name = "cpu_hot_path"
 harness = false
 
 [[bench]]
-name = "pipeline_benchmark"
+name = "cpu_throughput"
+harness = false
+
+[[bench]]
+name = "regression"
 harness = false
