@@ -13,8 +13,8 @@ if [ -z "$BIN" ]; then
 fi
 
 # Run the bench several times; the bench itself reports the median of 3 timed batches.
-# We take the median across invocations to absorb cross-run noise (machine load 2-4).
-RUNS=7
+# We take the median across invocations to absorb cross-run noise (machine load 5-9).
+RUNS=11
 values=""
 for i in $(seq 1 "$RUNS"); do
   out=$($BIN)
