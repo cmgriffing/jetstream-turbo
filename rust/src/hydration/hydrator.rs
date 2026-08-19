@@ -133,8 +133,8 @@ where
         profiles: &[Option<Arc<BlueskyProfile>>],
         post_outcomes: &AHashMap<String, PostFetchOutcome>,
         processed_at: chrono::DateTime<chrono::Utc>,
+        span: &tracing::Span,
     ) -> TurboResult<EnrichedRecord> {
-        let span = tracing::Span::current();
         span.record("did", dids[author_index as usize].as_ref());
 
         let author_profile = if is_post {
@@ -327,6 +327,7 @@ where
     ) -> TurboResult<Vec<EnrichedRecord>> {
         let mut results = Vec::with_capacity(contexts.len());
         let processed_at = chrono::Utc::now();
+        let span = tracing::Span::current();
         for ctx in contexts {
             let enriched = self.hydrate_one(
                 ctx.message,
@@ -338,6 +339,7 @@ where
                 profiles,
                 post_outcomes,
                 processed_at,
+                &span,
             )?;
             results.push(enriched);
         }
