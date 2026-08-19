@@ -218,7 +218,11 @@ where
         // dids in first-seen order; did_index assigns each unique did its position
         // so messages can attach resolved profiles by index (no per-message hashing).
         let mut dids: Vec<Arc<str>> = Vec::with_capacity(message_count);
-        let mut did_index: AHashMap<Arc<str>, u32> = AHashMap::with_capacity(message_count);
+        let mut did_index: hashbrown::HashMap<Arc<str>, u32, ahash::RandomState> =
+            hashbrown::HashMap::with_capacity_and_hasher(
+                message_count,
+                ahash::RandomState::default(),
+            );
         let mut contexts = Vec::with_capacity(message_count);
 
         for message in messages {
@@ -243,25 +247,31 @@ where
                     None => (Vec::new(), Vec::new()),
                 };
 
-            let author_index = match did_index.get(message.extract_did()) {
-                Some(&index) => index,
-                None => {
-                    let index = dids.len() as u32;
-                    dids.push(Arc::from(message.extract_did()));
-                    did_index.insert(dids.last().unwrap().clone(), index);
-                    index
-                }
+            let author_index = {
+                let (_, v) = did_index
+                    .raw_entry_mut()
+                    .from_key(message.extract_did())
+                    .or_insert_with(|| {
+                        let index = dids.len() as u32;
+                        let arc: Arc<str> = Arc::from(message.extract_did());
+                        dids.push(arc.clone());
+                        (arc, index)
+                    });
+                *v
             };
             let mentioned_indexes = mentioned_dids
                 .iter()
-                .map(|did| match did_index.get(did.as_str()) {
-                    Some(&index) => index,
-                    None => {
-                        let index = dids.len() as u32;
-                        dids.push(Arc::from(did.as_str()));
-                        did_index.insert(dids.last().unwrap().clone(), index);
-                        index
-                    }
+                .map(|did| {
+                    let (_, v) = did_index
+                        .raw_entry_mut()
+                        .from_key(did.as_str())
+                        .or_insert_with(|| {
+                            let index = dids.len() as u32;
+                            let arc: Arc<str> = Arc::from(did.as_str());
+                            dids.push(arc.clone());
+                            (arc, index)
+                        });
+                    *v
                 })
                 .collect();
             for uri in &post_uris {

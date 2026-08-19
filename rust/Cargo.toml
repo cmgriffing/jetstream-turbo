@@ -70,6 +70,8 @@ chrono = { version = "0.4", features = ["serde"] }
 compact_str = { version = "0.10", features = ["serde"] }
 # SIMD byte search for the fast envelope parsers.
 memchr = "2.7"
+# raw_entry API for single-hash dedup lookups (same hashbrown 0.14 as ahash).
+hashbrown = { version = "0.14", features = ["raw"] }
 
 # Metrics
 metrics = "0.24"
