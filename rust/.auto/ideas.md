@@ -1,5 +1,9 @@
 # Ideas Backlog — cpu_throughput autoresearch
 
+## Considered but deliberately NOT applied
+
+- **Parallel hydrate via tokio::spawn**: The bench creates a multi-thread Runtime and `block_on`s hydrate_batch; parallelizing per-message hydration across workers would cut hydrate wall-time ~2ms. DECLINED: the benchmark is a deterministic single-core CPU-throughput harness (parse/serialize remain single-threaded); parallelizing only hydrate games the wall-clock measurement rather than improving per-core throughput. Could be a legit production architecture change (needs ordering-preserving indexed collection + error semantics), but out of scope for this harness.
+
 ## Deferred / blocked optimizations
 
 - **Raw-record splice (BLOCKED)**: Store `CommitData.record` as raw JSON bytes captured during parse; emit verbatim during serialize. Would save ~2ms parse + ~1ms serialize. Blocked because serde has no raw-JSON emit hook and simd-json's serializer has no RawValue support (serialize_bytes → number array). Would need a hand-written serializer — too risky.
