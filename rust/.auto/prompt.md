@@ -56,8 +56,15 @@ Core hot path (parse → hydrate → serialize):
 
 ## Current state (12 experiments kept)
 
-- **~700-735k msgs/sec** (474k baseline → +48-55%). Confidence 13.6× noise floor. Load-dependent: machine load 2-4 modulates measurements ±15%.
-- Phases (10k batch, quiet machine): parse ~4.8ms (tape floor), hydrate ~3.3ms, serialize ~5.2ms (bench `to_string` per-call alloc ~0.8ms locked; `to_writer` shared buffer measures 4.6ms but bench-inaccessible).
+- **~723k msgs/sec median** (474k baseline → +52%). Confidence ~10-13× noise floor. Machine load 2-4 modulates measurements ±10% (transient dips to 650k look like regressions — always re-measure). measure.sh runs 7× + median.
+- **hydration_time_ms dead-measure removed (KEPT)**: batch design resolves fetches in resolve_profiles BEFORE hydrate_one, so per-message elapsed always rounded to 0 — the clock reads were pure overhead (~0.4ms).
+- **from_slice_with_buffers (KEPT, neutral)**: single-call parse instead of to_tape_with_buffers + tape.deserialize.
+
+## Walls (measured, with reasons)
+
+- Serialize ~5.2ms: bench calls `simd_json::to_string` per record (per-call Vec alloc ~0.7ms locked; generic serde event walk at ~1.35GB/s; serde_json slower; no raw-JSON emit hook in serde; OwnedValue Writable generator exists but can't be used inside a typed struct's serde path).
+- Parse ~4.6ms: simd-json tape floor for 300B messages (~880MB/s); tape-Vec reuse blocked (Deserializer fields pub(crate)); KnownKey is BorrowedValue-only; halfbrown pre-hash needs &mut entry API.
+- Hydrate ~3.0ms: moka gets (10k, ~60-80ns each) are the resolution minimum; index-based attachment washes out (extra map-key allocs).
 
 ## Profiling notes (10k batch, post-optimizations)
 
