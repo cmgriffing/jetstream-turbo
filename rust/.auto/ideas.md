@@ -37,3 +37,9 @@
 - **hydrate_batch sub-phase instrumentation**: prepass ~1.5-1.8ms (did_index + 3x memchr contains + message moves), resolve ~0.7-0.85ms (moka floor), per_msg ~0.5-0.7ms (metadata build floor). The prepass did_index (~0.6-0.7ms of hashing/inserts) is the largest remaining hydrate item but is the production dedup design — no honest lever found.
 
 - **Parse from warm Arc copy (REVERTED, round 157)**: parse_envelope_shape/find_record_span/scratch read `raw_json.as_ref()` (the just-copied Arc, L1-warm) instead of the caller's cold buffer. Official 1.189M == pre-change 1.189M — neutral (saving ~10-20ns/message, inside load noise). Reverted.
+
+## Remaining candidates (all ~2-5%, at the load-noise edge — deferred)
+
+- **Lazy cid**: `CommitData.cid: Option<String>` (58B, the last per-message heap String in parse) is read ONLY in `SourceEventId::from_message` (recovery) + tests. A span-into-raw_json lazy type (like RecordValue) would remove ~30ns/message from parse. Cost: parser return-type changes (shape + generic), tape skip_deserializing + find_cid_span wiring, ~10 construction sites, CidValue Serialize/PartialEq. Estimated ~4-5% — but two recent 3-5% changes (dids CompactString, warm-parse) measured neutral at load 4-7, so EV is marginal.
+- **memchr in read_unescaped**: byte-loop quote scan -> memchr for '"' and '\\'. ~3-4% of parse. Same noise-edge class.
+- **entry()-API single-hash in did_index**: dedup inserts hash twice today (get + insert); entry() hashes once. ~0.15ms (~2%).
