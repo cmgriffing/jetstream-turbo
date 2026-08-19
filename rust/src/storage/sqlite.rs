@@ -711,11 +711,29 @@ impl RecordStore for SQLiteStore {
         &self,
         source_event_ids: &[SourceEventId],
     ) -> TurboResult<HashSet<SourceEventId>> {
-        let mut completed = HashSet::new();
+        if source_event_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+
+        let placeholders: String = std::iter::repeat_n("?", source_event_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let query = format!(
+            "SELECT source_event_id FROM records WHERE source_event_id IN ({placeholders})"
+        );
+
+        let mut sql_query = sqlx::query(&query);
         for source_event_id in source_event_ids {
-            if self.has_completed_source_event(source_event_id).await? {
-                completed.insert(source_event_id.clone());
-            }
+            sql_query = sql_query.bind(source_event_id.as_str());
+        }
+
+        let rows = sql_query.fetch_all(&self.pool).await?;
+
+        let mut completed = HashSet::with_capacity(rows.len());
+        for row in rows {
+            let id: String = row.try_get("source_event_id")?;
+            completed.insert(SourceEventId::from(id));
         }
         Ok(completed)
     }
