@@ -1133,7 +1133,7 @@ mod tests {
             time_us: Some(1640995200000000),
             seq: Some(1),
             kind: MessageKind::Commit,
-            commit: Some(CommitData {
+            commit: Some(Box::new(CommitData {
                 rev: Some("rev-1".to_string()),
                 operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
@@ -1142,7 +1142,7 @@ mod tests {
                     simd_json::json!({ "text": "hello" }),
                 )),
                 cid: Some("bafyrei".to_string()),
-            }),
+            })),
             raw_json: None,
         })
     }

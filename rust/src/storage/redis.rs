@@ -176,7 +176,7 @@ mod tests {
                 seq: Some(12345),
                 time_us: Some(1640995200000000),
                 kind: crate::models::jetstream::MessageKind::Commit,
-                commit: Some(crate::models::jetstream::CommitData {
+                commit: Some(Box::new(crate::models::jetstream::CommitData {
                     rev: Some("test-rev".to_string()),
                     operation_type: crate::models::jetstream::OperationType::Create,
                     collection: Some("app.bsky.feed.post".to_string()),
@@ -185,7 +185,7 @@ mod tests {
                         simd_json::json!({"text": "Hello world"}),
                     )),
                     cid: Some("bafyrei".to_string()),
-                }),
+                })),
                 raw_json: None,
             },
             hydrated_metadata: crate::models::enriched::HydratedMetadata::default(),

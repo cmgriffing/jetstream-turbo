@@ -55,7 +55,7 @@ fn realistic_message() -> JetstreamMessage {
         time_us: Some(1770949213790196),
         seq: Some(100000),
         kind: MessageKind::Commit,
-        commit: Some(CommitData {
+        commit: Some(Box::new(CommitData {
             rev: Some("3mepgzgimkv23".to_string()),
             operation_type: OperationType::Create,
             collection: Some("app.bsky.feed.post".to_string()),
@@ -64,7 +64,7 @@ fn realistic_message() -> JetstreamMessage {
                 jetstream_turbo_rs::models::jetstream::RecordValue::from_value(realistic_record()),
             ),
             cid: Some("bafyreiassbuahzdwy64xwlefqcwh6zk4stb4lhht24oozhxn3fhzomrxg4".to_string()),
-        }),
+        })),
         raw_json: None,
     }
 }

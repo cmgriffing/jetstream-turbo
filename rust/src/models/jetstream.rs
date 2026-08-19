@@ -73,7 +73,7 @@ pub struct JetstreamMessage {
     pub seq: Option<u64>,
     pub kind: MessageKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commit: Option<CommitData>,
+    pub commit: Option<Box<CommitData>>,
     /// The original wire JSON this message was parsed from, when available.
     /// Serializing the message then emits these bytes verbatim (identical JSON,
     /// no re-walk through serde). `None` for programmatically-built messages.

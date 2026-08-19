@@ -845,14 +845,14 @@ mod tests {
                 time_us: Some(1_000_000 + seq),
                 seq: Some(seq),
                 kind: MessageKind::Commit,
-                commit: Some(CommitData {
+                commit: Some(Box::new(CommitData {
                     rev: Some("rev-1".to_string()),
                     operation_type: OperationType::Create,
                     collection: Some("app.bsky.feed.post".to_string()),
                     rkey: Some(format!("post-{seq}")),
                     record: None,
                     cid: Some(format!("cid-{seq}")),
-                }),
+                })),
                 raw_json: None,
             },
             Utc::now(),

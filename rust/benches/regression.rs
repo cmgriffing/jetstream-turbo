@@ -77,7 +77,7 @@ fn create_test_message(i: usize) -> JetstreamMessage {
         time_us: Some(1640995200000000 + i as u64),
         seq: Some(i as u64),
         kind: MessageKind::Commit,
-        commit: Some(CommitData {
+        commit: Some(Box::new(CommitData {
             rev: Some(format!("3x{i}")),
             operation_type: OperationType::Create,
             collection: Some("app.bsky.feed.post".to_string()),
@@ -87,7 +87,7 @@ fn create_test_message(i: usize) -> JetstreamMessage {
                 "createdAt": "2024-01-01T00:00:00.000Z"
             }))),
             cid: Some(format!("bafyrei{i}")),
-        }),
+        })),
         raw_json: None,
     }
 }

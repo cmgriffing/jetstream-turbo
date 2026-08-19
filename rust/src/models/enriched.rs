@@ -262,7 +262,7 @@ mod tests {
             time_us: Some(1640995200000000),
             seq: Some(12345),
             kind: MessageKind::Commit,
-            commit: Some(CommitData {
+            commit: Some(Box::new(CommitData {
                 rev: Some("test-rev".to_string()),
                 operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
@@ -271,7 +271,7 @@ mod tests {
                     simd_json::json!({"text": "Hello world"}),
                 )),
                 cid: Some("bafyrei".to_string()),
-            }),
+            })),
             raw_json: None,
         };
 
@@ -287,14 +287,14 @@ mod tests {
             time_us: Some(1640995200000000),
             seq: Some(12345),
             kind: MessageKind::Commit,
-            commit: Some(CommitData {
+            commit: Some(Box::new(CommitData {
                 rev: Some("test-rev".to_string()),
                 operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("test123".to_string()),
                 record: Some(RecordValue::from_value(simd_json::json!({"text": "Hello"}))),
                 cid: Some("bafyrei".to_string()),
-            }),
+            })),
             raw_json: None,
         });
 
@@ -312,7 +312,7 @@ mod tests {
             time_us: Some(1640995200000000),
             seq: Some(12345),
             kind: MessageKind::Commit,
-            commit: Some(CommitData {
+            commit: Some(Box::new(CommitData {
                 rev: Some("test-rev".to_string()),
                 operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
@@ -321,7 +321,7 @@ mod tests {
                     simd_json::json!({"text": "Hello world"}),
                 )),
                 cid: Some("bafyrei".to_string()),
-            }),
+            })),
             raw_json: None,
         };
 

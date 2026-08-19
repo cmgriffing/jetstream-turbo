@@ -16,7 +16,7 @@ pub fn create_post_message(index: usize) -> JetstreamMessage {
         time_us: Some(1770949213790196 + (index as u64 * 1000)),
         seq: Some(100000 + index as u64),
         kind: MessageKind::Commit,
-        commit: Some(CommitData {
+        commit: Some(Box::new(CommitData {
             rev: Some(format!("3mepgzgimkv{index:04}")),
             operation_type: OperationType::Create,
             collection: Some("app.bsky.feed.post".to_string()),
@@ -28,7 +28,7 @@ pub fn create_post_message(index: usize) -> JetstreamMessage {
                 "langs": ["en"]
             }))),
             cid: Some(format!("bafyreia{}", &format!("{index:032x}")[..32])),
-        }),
+        })),
         raw_json: None,
     }
 }
@@ -44,7 +44,7 @@ pub fn create_reply_message(index: usize, parent_did: &str, parent_rkey: &str) -
         time_us: Some(1770949213800000 + (index as u64 * 1000)),
         seq: Some(200000 + index as u64),
         kind: MessageKind::Commit,
-        commit: Some(CommitData {
+        commit: Some(Box::new(CommitData {
             rev: Some(format!("3replrev{index:06}")),
             operation_type: OperationType::Create,
             collection: Some("app.bsky.feed.post".to_string()),
@@ -65,7 +65,7 @@ pub fn create_reply_message(index: usize, parent_did: &str, parent_rkey: &str) -
                 }
             }))),
             cid: Some(format!("bafyreireply{index:06}")),
-        }),
+        })),
         raw_json: None,
     }
 }

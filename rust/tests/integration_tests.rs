@@ -222,16 +222,18 @@ mod tests {
             seq: Some(1),
             time_us: Some(1704067200000000),
             kind: MessageKind::Commit,
-            commit: Some(jetstream_turbo_rs::models::jetstream::CommitData {
-                rev: Some("test-rev".to_string()),
-                operation_type: OperationType::Create,
-                collection: Some("app.bsky.feed.post".to_string()),
-                rkey: Some("1".to_string()),
-                record: Some(RecordValue::from_value(
-                    simd_json::json!({"text": "Hello world"}),
-                )),
-                cid: Some("cid1".to_string()),
-            }),
+            commit: Some(Box::new(
+                jetstream_turbo_rs::models::jetstream::CommitData {
+                    rev: Some("test-rev".to_string()),
+                    operation_type: OperationType::Create,
+                    collection: Some("app.bsky.feed.post".to_string()),
+                    rkey: Some("1".to_string()),
+                    record: Some(RecordValue::from_value(
+                        simd_json::json!({"text": "Hello world"}),
+                    )),
+                    cid: Some("cid1".to_string()),
+                },
+            )),
             raw_json: None,
         }];
 
