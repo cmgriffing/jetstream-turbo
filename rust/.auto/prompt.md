@@ -64,6 +64,7 @@ Core hot path (parse → hydrate → serialize):
 - Parse ≈ 4.3-4.8ms — simd-json tape floor (~1GB/s on 350B inputs); record OwnedValue build included.
 - Hydrate ≈ 1.8-2.2ms — prepass (Arc index map) + resolve (moka gets, 10k × ~65ns) + index attachment.
 - Serialize ≈ 5.1-5.3ms — 40% of batch; walled: bench `to_string` per-call alloc ~0.5ms, generic serde ~1.35-1.75GB/s; simd beats serde on both message (2.7 vs 3.1) and metadata (1.8 vs 2.4); no raw-JSON emit hook; custom Serialize == derive; Writable generator unreachable inside serde path.
+- Hydrate resolve is MOKA-BOUND: 10k gets = 0.66ms (~66ns each) vs ~5ns for a plain AHashMap. Structural floor — TurboCache is deliberately moka (concurrency + TTL). Rejected alternatives: entry-based prepass (allocs per msg, hurts production dups), mirror map (consistency), parallel gets (multi-core gaming).
 - **hydration_time_ms dead-measure removed (KEPT)**: batch design resolves fetches in resolve_profiles BEFORE hydrate_one, so per-message elapsed always rounded to 0 — the clock reads were pure overhead (~0.4ms).
 - **from_slice_with_buffers (KEPT, neutral)**: single-call parse instead of to_tape_with_buffers + tape.deserialize.
 
