@@ -130,8 +130,6 @@ where
         post_outcomes: &AHashMap<String, PostFetchOutcome>,
         processed_at: chrono::DateTime<chrono::Utc>,
     ) -> TurboResult<EnrichedRecord> {
-        let start_time = Instant::now();
-
         let span = tracing::Span::current();
         // Borrow the did from the message; the lookup below returns owned clones
         // so the borrow ends before `message` is moved into the enriched record.
@@ -199,7 +197,10 @@ where
             metrics::counter!("optional_hydration_partial_records_total").increment(1);
         }
 
-        enriched.metrics.hydration_time_ms = start_time.elapsed().as_millis() as u64;
+        // Note: hydration_time_ms is intentionally left at its default (0). In the
+        // batch design, cache-miss fetching happens inside resolve_profiles/resolve_posts
+        // before hydrate_one runs, so a per-message Instant measurement here would
+        // always round to 0 while costing a clock read per message.
         Ok(enriched)
     }
 
@@ -208,7 +209,6 @@ where
         messages: Vec<JetstreamMessage>,
     ) -> TurboResult<Vec<EnrichedRecord>> {
         let start_time = Instant::now();
-        let prepass_start = Instant::now();
 
         let message_count = messages.len();
         tracing::Span::current().record("message_count", message_count);
@@ -252,7 +252,6 @@ where
         tracing::Span::current().record("unique_dids", unique_dids_count);
         tracing::Span::current().record("unique_uris", unique_uris_count);
 
-        let prepass_ms = prepass_start.elapsed().as_secs_f64() * 1000.0;
         let dids: Vec<String> = unique_dids.into_iter().collect();
         let uris: Vec<String> = unique_uris.into_iter().collect();
 
@@ -270,9 +269,8 @@ where
             .into_iter()
             .zip(post_outcomes)
             .collect::<AHashMap<_, _>>();
-        let api_fetch_time = cache_check_start.elapsed().as_secs_f64() * 1000.0;
-        println!("    hydrate_batch: prepass={prepass_ms:.2}ms resolve={api_fetch_time:.2}ms");
-        tracing::Span::current().record("api_fetch_time_ms", api_fetch_time as u64);
+        let api_fetch_time = cache_check_start.elapsed().as_millis() as u64;
+        tracing::Span::current().record("api_fetch_time_ms", api_fetch_time);
 
         let hydrate_start = Instant::now();
         let results = self.hydrate_contexts(contexts, &profiles, &post_outcomes)?;
