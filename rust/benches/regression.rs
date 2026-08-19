@@ -18,7 +18,7 @@ use jetstream_turbo_rs::testing::{
     MockProfileFetcher, MockRecordStore,
 };
 use jetstream_turbo_rs::turbocharger::{PipelineProgress, PipelineStage};
-use serde_json::json;
+
 use std::hint::black_box;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -81,7 +81,7 @@ fn create_test_message(i: usize) -> JetstreamMessage {
             operation_type: OperationType::Create,
             collection: Some("app.bsky.feed.post".to_string()),
             rkey: Some(format!("{i}")),
-            record: Some(json!({
+            record: Some(simd_json::json!({
                 "text": format!("Hello world {}", i),
                 "createdAt": "2024-01-01T00:00:00.000Z"
             })),

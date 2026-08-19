@@ -16,8 +16,8 @@ use std::hint::black_box;
 use std::sync::Arc;
 
 /// A realistic Bluesky post record with reply, embed, and facet references.
-fn realistic_record() -> serde_json::Value {
-    serde_json::json!({
+fn realistic_record() -> simd_json::OwnedValue {
+    simd_json::json!({
         "$type": "app.bsky.feed.post",
         "createdAt": "2026-02-13T02:20:02.89585500Z",
         "text": "Hello world #testing with a mention and a link",

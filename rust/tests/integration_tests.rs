@@ -222,7 +222,7 @@ mod tests {
                 operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("1".to_string()),
-                record: Some(serde_json::json!({"text": "Hello world"})),
+                record: Some(simd_json::json!({"text": "Hello world"})),
                 cid: Some("cid1".to_string()),
             }),
         }];

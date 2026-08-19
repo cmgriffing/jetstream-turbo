@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize, Serializer};
+use simd_json::OwnedValue;
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, Deserialize, PartialEq, Eq)]
@@ -80,7 +81,7 @@ pub struct CommitData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rkey: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub record: Option<serde_json::Value>,
+    pub record: Option<OwnedValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
 }

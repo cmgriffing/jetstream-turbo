@@ -1136,7 +1136,7 @@ mod tests {
                 operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("rkey-1".to_string()),
-                record: Some(serde_json::json!({ "text": "hello" })),
+                record: Some(simd_json::json!({ "text": "hello" })),
                 cid: Some("bafyrei".to_string()),
             }),
         })

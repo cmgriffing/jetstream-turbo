@@ -1,4 +1,5 @@
-use serde_json::Value;
+use simd_json::prelude::*;
+use simd_json::OwnedValue;
 
 /// A zero-allocation, read-only lens over a Bluesky record's raw JSON.
 ///
@@ -6,13 +7,13 @@ use serde_json::Value;
 /// without duplicating JSON traversal across callers.
 #[derive(Debug, Clone, Copy)]
 pub struct RecordView<'a> {
-    record: &'a Value,
+    record: &'a OwnedValue,
 }
 
 impl<'a> RecordView<'a> {
     /// Create a new `RecordView` wrapping a record JSON value.
     #[inline(always)]
-    pub fn new(record: &'a Value) -> Self {
+    pub fn new(record: &'a OwnedValue) -> Self {
         Self { record }
     }
 
@@ -68,7 +69,7 @@ pub struct ReplyRefs<'a> {
 /// Iterator over facets in a record.
 #[derive(Debug, Clone)]
 pub struct FacetIter<'a> {
-    facets: Option<&'a Vec<Value>>,
+    facets: Option<&'a Vec<OwnedValue>>,
     index: usize,
 }
 
@@ -108,7 +109,7 @@ impl<'a> Iterator for FacetIter<'a> {
 pub struct FacetRef<'a> {
     pub byte_start: u32,
     pub byte_end: u32,
-    features: Option<&'a Vec<Value>>,
+    features: Option<&'a Vec<OwnedValue>>,
 }
 
 impl<'a> FacetRef<'a> {
@@ -125,7 +126,7 @@ impl<'a> FacetRef<'a> {
 /// Iterator over typed features within a facet.
 #[derive(Debug, Clone)]
 pub struct FacetFeatureIter<'a> {
-    features: Option<&'a Vec<Value>>,
+    features: Option<&'a Vec<OwnedValue>>,
     index: usize,
 }
 
@@ -163,7 +164,7 @@ pub enum FacetFeature<'a> {
 
 /// Parse a single feature JSON value into a typed `FacetFeature`.
 /// Returns `None` for unknown or malformed feature types.
-fn parse_facet_feature(feature: &Value) -> Option<FacetFeature<'_>> {
+fn parse_facet_feature(feature: &OwnedValue) -> Option<FacetFeature<'_>> {
     let feature_type = feature.get("$type")?.as_str()?;
     match feature_type {
         "app.bsky.richtext.facet#tag" => {
@@ -185,9 +186,9 @@ fn parse_facet_feature(feature: &Value) -> Option<FacetFeature<'_>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use simd_json::json;
 
-    fn sample_post_record() -> Value {
+    fn sample_post_record() -> OwnedValue {
         json!({
             "$type": "app.bsky.feed.post",
             "createdAt": "2026-02-13T02:20:02.89585500Z",
@@ -218,14 +219,14 @@ mod tests {
         })
     }
 
-    fn minimal_post_record() -> Value {
+    fn minimal_post_record() -> OwnedValue {
         json!({
             "$type": "app.bsky.feed.post",
             "text": "Minimal post"
         })
     }
 
-    fn non_object_record() -> Value {
+    fn non_object_record() -> OwnedValue {
         json!("not_an_object")
     }
 
