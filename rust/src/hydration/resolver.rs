@@ -100,26 +100,24 @@ where
 
     // ---- Batch resolution ----
 
-    /// Ensure all given profiles are in cache. Returns a map of every resolved
-    /// profile (cache hits plus anything fetched). Absent entries mean the
-    /// profile does not exist upstream. Keys borrow from `dids` (caller-owned).
-    pub async fn resolve_profiles<'a>(
+    /// Ensure all given profiles are in cache. Returns one outcome per input
+    /// did, aligned with `dids` order (cache hits plus anything fetched).
+    /// `None` means the profile does not exist upstream.
+    pub async fn resolve_profiles(
         &self,
-        dids: &'a [String],
-    ) -> TurboResult<ahash::AHashMap<&'a str, Arc<BlueskyProfile>>> {
+        dids: &[Arc<str>],
+    ) -> TurboResult<Vec<Option<Arc<BlueskyProfile>>>> {
         if dids.is_empty() {
-            return Ok(ahash::AHashMap::new());
+            return Ok(Vec::new());
         }
 
         // Single cache pass: get (not contains_key) so hits are returned directly
         // and misses are known for fetching — no second lookup later.
         let cached = self.cache.get_user_profiles(dids);
-        let mut resolved = ahash::AHashMap::with_capacity(dids.len());
+        let mut resolved = cached;
         let mut uncached_indexes = Vec::new();
-        for (i, (did, maybe_profile)) in dids.iter().zip(cached).enumerate() {
-            if let Some(profile) = maybe_profile {
-                resolved.insert(did.as_str(), profile);
-            } else {
+        for (i, maybe_profile) in resolved.iter().enumerate() {
+            if maybe_profile.is_none() {
                 uncached_indexes.push(i);
             }
         }
@@ -128,16 +126,19 @@ where
             return Ok(resolved);
         }
 
-        let uncached: Vec<String> = uncached_indexes.iter().map(|&i| dids[i].clone()).collect();
+        let uncached: Vec<String> = uncached_indexes
+            .iter()
+            .map(|&i| dids[i].to_string())
+            .collect();
         let profiles = self.profile_fetcher.bulk_fetch_profiles(&uncached).await?;
         let mut fetched = 0;
 
         for (&i, maybe_profile) in uncached_indexes.iter().zip(profiles) {
             if let Some(profile) = maybe_profile {
-                let did = &dids[i];
+                let did = dids[i].to_string();
                 let arc = Arc::new(profile);
-                self.cache.set_user_profile(did.clone(), Arc::clone(&arc));
-                resolved.insert(did.as_str(), arc);
+                self.cache.set_user_profile(did, Arc::clone(&arc));
+                resolved[i] = Some(arc);
                 fetched += 1;
             }
         }
@@ -337,11 +338,11 @@ mod tests {
         let post_fetcher = Arc::new(MockPostFetcher::new());
         let resolver = CacheMissResolver::new(cache, Arc::clone(&profile_fetcher), post_fetcher);
 
-        let dids = vec!["did:plc:alice".to_string(), "did:plc:bob".to_string()];
+        let dids: Vec<Arc<str>> = vec!["did:plc:alice".into(), "did:plc:bob".into()];
         let resolved = resolver.resolve_profiles(&dids).await.unwrap();
         assert_eq!(resolved.len(), 2);
-        assert!(resolved.contains_key("did:plc:alice"));
-        assert!(resolved.contains_key("did:plc:bob"));
+        assert!(resolved[0].is_some());
+        assert!(resolved[1].is_some());
 
         assert_eq!(
             profile_fetcher

@@ -195,7 +195,9 @@ fn bench_cache_operations(c: &mut Criterion) {
 
             cache
         });
-        let dids: Vec<String> = (0..100).map(|i| format!("did:plc:test{i}")).collect();
+        let dids: Vec<Arc<str>> = (0..100)
+            .map(|i| Arc::from(format!("did:plc:test{i}")))
+            .collect();
 
         b.iter(|| {
             black_box(cache.get_user_profiles(&dids));

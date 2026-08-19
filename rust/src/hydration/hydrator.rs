@@ -17,7 +17,9 @@ use tracing::info;
 struct MessageContext {
     message: JetstreamMessage,
     is_post: bool,
-    mentioned_dids: Vec<String>,
+    /// Index into the batch's `dids` Vec (and the aligned resolved-profiles slice).
+    author_index: u32,
+    mentioned_indexes: Vec<u32>,
     post_uris: Vec<String>,
 }
 
@@ -124,20 +126,19 @@ where
         &self,
         message: JetstreamMessage,
         is_post: bool,
-        mentioned_dids: Vec<String>,
+        author_index: u32,
+        mentioned_indexes: Vec<u32>,
         post_uris: Vec<String>,
-        profiles: &AHashMap<&str, Arc<BlueskyProfile>>,
+        dids: &[Arc<str>],
+        profiles: &[Option<Arc<BlueskyProfile>>],
         post_outcomes: &AHashMap<String, PostFetchOutcome>,
         processed_at: chrono::DateTime<chrono::Utc>,
     ) -> TurboResult<EnrichedRecord> {
         let span = tracing::Span::current();
-        // Borrow the did from the message; the lookup below returns owned clones
-        // so the borrow ends before `message` is moved into the enriched record.
-        let author_did = message.extract_did();
-        span.record("did", author_did);
+        span.record("did", dids[author_index as usize].as_ref());
 
         let author_profile = if is_post {
-            match profiles.get(author_did) {
+            match &profiles[author_index as usize] {
                 Some(profile) => {
                     span.record("cache_hit", true);
                     Some(Arc::clone(profile))
@@ -155,8 +156,8 @@ where
         enriched.hydrated_metadata.hydration_quality = HydrationQuality::Complete;
         enriched.hydrated_metadata.author_profile = author_profile;
 
-        for did in &mentioned_dids {
-            if let Some(profile) = profiles.get(did.as_str()) {
+        for index in mentioned_indexes {
+            if let Some(profile) = &profiles[index as usize] {
                 enriched
                     .hydrated_metadata
                     .add_mentioned_profile(Arc::clone(profile));
@@ -213,8 +214,11 @@ where
         let message_count = messages.len();
         tracing::Span::current().record("message_count", message_count);
 
-        let mut unique_dids = AHashSet::new();
         let mut unique_uris = AHashSet::new();
+        // dids in first-seen order; did_index assigns each unique did its position
+        // so messages can attach resolved profiles by index (no per-message hashing).
+        let mut dids: Vec<Arc<str>> = Vec::with_capacity(message_count);
+        let mut did_index: AHashMap<Arc<str>, u32> = AHashMap::with_capacity(message_count);
         let mut contexts = Vec::with_capacity(message_count);
 
         for message in messages {
@@ -231,10 +235,27 @@ where
                 .map(|r| extract_refs_from_view(&RecordView::new(r)))
                 .unwrap_or_default();
 
-            unique_dids.insert(message.extract_did().to_string());
-            for did in &mentioned_dids {
-                unique_dids.insert(did.clone());
-            }
+            let author_index = match did_index.get(message.extract_did()) {
+                Some(&index) => index,
+                None => {
+                    let index = dids.len() as u32;
+                    dids.push(Arc::from(message.extract_did()));
+                    did_index.insert(dids.last().unwrap().clone(), index);
+                    index
+                }
+            };
+            let mentioned_indexes = mentioned_dids
+                .iter()
+                .map(|did| match did_index.get(did.as_str()) {
+                    Some(&index) => index,
+                    None => {
+                        let index = dids.len() as u32;
+                        dids.push(Arc::from(did.as_str()));
+                        did_index.insert(dids.last().unwrap().clone(), index);
+                        index
+                    }
+                })
+                .collect();
             for uri in &post_uris {
                 unique_uris.insert(uri.clone());
             }
@@ -242,17 +263,17 @@ where
             contexts.push(MessageContext {
                 message,
                 is_post,
-                mentioned_dids,
+                author_index,
+                mentioned_indexes,
                 post_uris,
             });
         }
 
-        let unique_dids_count = unique_dids.len();
+        let unique_dids_count = dids.len();
         let unique_uris_count = unique_uris.len();
         tracing::Span::current().record("unique_dids", unique_dids_count);
         tracing::Span::current().record("unique_uris", unique_uris_count);
 
-        let dids: Vec<String> = unique_dids.into_iter().collect();
         let uris: Vec<String> = unique_uris.into_iter().collect();
 
         let cache_check_start = Instant::now();
@@ -273,7 +294,7 @@ where
         tracing::Span::current().record("api_fetch_time_ms", api_fetch_time);
 
         let hydrate_start = Instant::now();
-        let results = self.hydrate_contexts(contexts, &profiles, &post_outcomes)?;
+        let results = self.hydrate_contexts(contexts, &dids, &profiles, &post_outcomes)?;
         let hydrate_time = hydrate_start.elapsed().as_millis() as u64;
         tracing::Span::current().record("hydrate_time_ms", hydrate_time);
 
@@ -292,7 +313,8 @@ where
     fn hydrate_contexts(
         &self,
         contexts: Vec<MessageContext>,
-        profiles: &AHashMap<&str, Arc<BlueskyProfile>>,
+        dids: &[Arc<str>],
+        profiles: &[Option<Arc<BlueskyProfile>>],
         post_outcomes: &AHashMap<String, PostFetchOutcome>,
     ) -> TurboResult<Vec<EnrichedRecord>> {
         let mut results = Vec::with_capacity(contexts.len());
@@ -301,8 +323,10 @@ where
             let enriched = self.hydrate_one(
                 ctx.message,
                 ctx.is_post,
-                ctx.mentioned_dids,
+                ctx.author_index,
+                ctx.mentioned_indexes,
                 ctx.post_uris,
+                dids,
                 profiles,
                 post_outcomes,
                 processed_at,
