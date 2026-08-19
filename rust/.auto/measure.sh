@@ -12,9 +12,9 @@ if [ -z "$BIN" ]; then
   exit 1
 fi
 
-# Run the bench a few times; the bench itself reports the median of 3 timed batches.
+# Run the bench several times; the bench itself reports the median of 3 timed batches.
 # We take the median across invocations to absorb cross-run noise.
-RUNS=3
+RUNS=5
 values=""
 for i in $(seq 1 "$RUNS"); do
   out=$($BIN)

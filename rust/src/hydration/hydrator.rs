@@ -2,12 +2,15 @@ use crate::client::{PostFetchOutcome, PostFetcher, ProfileFetcher};
 use crate::hydration::resolver::CacheMissResolver;
 use crate::hydration::TurboCache;
 use crate::models::{
+    bluesky::BlueskyProfile,
     enriched::{EnrichedRecord, HydrationQuality, ReferencedPost},
     jetstream::JetstreamMessage,
     record_view::{FacetFeature, RecordView},
     TurboResult,
 };
 use crate::utils::serde_utils::string_utils::is_valid_at_uri;
+use ahash::AHashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::info;
@@ -138,14 +141,15 @@ where
             })
     }
 
-    async fn hydrate_one(
+    fn hydrate_one(
         &self,
         message: JetstreamMessage,
         author_did: String,
         is_post: bool,
         mentioned_dids: Vec<String>,
         post_uris: Vec<String>,
-        post_outcomes: &std::collections::HashMap<String, PostFetchOutcome>,
+        profiles: &HashMap<String, Arc<BlueskyProfile>>,
+        post_outcomes: &HashMap<String, PostFetchOutcome>,
         processed_at: chrono::DateTime<chrono::Utc>,
     ) -> TurboResult<EnrichedRecord> {
         let start_time = Instant::now();
@@ -156,16 +160,15 @@ where
         enriched.hydrated_metadata.hydration_quality = HydrationQuality::Complete;
 
         if is_post {
-            let author_profile = self.resolver.resolve_profile(&author_did).await?;
-            let hit = author_profile.is_some();
+            let hit = profiles.contains_key(&author_did);
             tracing::Span::current().record("cache_hit", hit);
 
-            enriched.hydrated_metadata.author_profile = author_profile;
+            enriched.hydrated_metadata.author_profile = profiles.get(&author_did).cloned();
         }
 
         for did in &mentioned_dids {
-            if let Some(profile) = self.resolver.cache().get_user_profile(did) {
-                enriched.hydrated_metadata.add_mentioned_profile(profile);
+            if let Some(profile) = profiles.get(did) {
+                enriched.hydrated_metadata.add_mentioned_profile(Arc::clone(profile));
             }
         }
 
@@ -212,12 +215,13 @@ where
         messages: Vec<JetstreamMessage>,
     ) -> TurboResult<Vec<EnrichedRecord>> {
         let start_time = Instant::now();
+        let prepass_start = Instant::now();
 
         let message_count = messages.len();
         tracing::Span::current().record("message_count", message_count);
 
-        let mut unique_dids = std::collections::HashSet::new();
-        let mut unique_uris = std::collections::HashSet::new();
+        let mut unique_dids = AHashSet::new();
+        let mut unique_uris = AHashSet::new();
         let mut contexts = Vec::with_capacity(message_count);
 
         for message in messages {
@@ -263,11 +267,12 @@ where
         tracing::Span::current().record("unique_dids", unique_dids_count);
         tracing::Span::current().record("unique_uris", unique_uris_count);
 
+        let prepass_ms = prepass_start.elapsed().as_secs_f64() * 1000.0;
         let dids: Vec<String> = unique_dids.into_iter().collect();
         let uris: Vec<String> = unique_uris.into_iter().collect();
 
         let cache_check_start = Instant::now();
-        self.resolver.resolve_profiles(&dids).await?;
+        let profiles = self.resolver.resolve_profiles(&dids).await?;
         let post_outcomes = self.resolver.resolve_posts(&uris).await?;
         if post_outcomes.len() != uris.len() {
             return Err(crate::models::TurboError::InvalidApiResponse(format!(
@@ -280,11 +285,12 @@ where
             .into_iter()
             .zip(post_outcomes)
             .collect::<std::collections::HashMap<_, _>>();
-        let api_fetch_time = cache_check_start.elapsed().as_millis() as u64;
-        tracing::Span::current().record("api_fetch_time_ms", api_fetch_time);
+        let api_fetch_time = cache_check_start.elapsed().as_secs_f64() * 1000.0;
+        println!("    hydrate_batch: prepass={prepass_ms:.2}ms resolve={api_fetch_time:.2}ms");
+        tracing::Span::current().record("api_fetch_time_ms", api_fetch_time as u64);
 
         let hydrate_start = Instant::now();
-        let results = self.hydrate_contexts(contexts, &post_outcomes).await?;
+        let results = self.hydrate_contexts(contexts, &profiles, &post_outcomes)?;
         let hydrate_time = hydrate_start.elapsed().as_millis() as u64;
         tracing::Span::current().record("hydrate_time_ms", hydrate_time);
 
@@ -300,25 +306,25 @@ where
         Ok(results)
     }
 
-    async fn hydrate_contexts(
+    fn hydrate_contexts(
         &self,
         contexts: Vec<MessageContext>,
+        profiles: &HashMap<String, Arc<BlueskyProfile>>,
         post_outcomes: &std::collections::HashMap<String, PostFetchOutcome>,
     ) -> TurboResult<Vec<EnrichedRecord>> {
         let mut results = Vec::with_capacity(contexts.len());
         let processed_at = chrono::Utc::now();
         for ctx in contexts {
-            let enriched = self
-                .hydrate_one(
-                    ctx.message,
-                    ctx.author_did,
-                    ctx.is_post,
-                    ctx.mentioned_dids,
-                    ctx.post_uris,
-                    post_outcomes,
-                    processed_at,
-                )
-                .await?;
+            let enriched = self.hydrate_one(
+                ctx.message,
+                ctx.author_did,
+                ctx.is_post,
+                ctx.mentioned_dids,
+                ctx.post_uris,
+                profiles,
+                post_outcomes,
+                processed_at,
+            )?;
             results.push(enriched);
         }
         Ok(results)

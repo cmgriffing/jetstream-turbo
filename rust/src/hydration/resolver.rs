@@ -100,36 +100,47 @@ where
 
     // ---- Batch resolution ----
 
-    /// Ensure all given profiles are in cache. Returns the number successfully
-    /// fetched (cache hits are not counted).
-    pub async fn resolve_profiles(&self, dids: &[String]) -> TurboResult<usize> {
+    /// Ensure all given profiles are in cache. Returns a map of every resolved
+    /// profile (cache hits plus anything fetched). Absent entries mean the
+    /// profile does not exist upstream.
+    pub async fn resolve_profiles(
+        &self,
+        dids: &[String],
+    ) -> TurboResult<std::collections::HashMap<String, Arc<BlueskyProfile>>> {
         if dids.is_empty() {
-            return Ok(0);
+            return Ok(std::collections::HashMap::new());
         }
 
-        let cached_flags = self.cache.check_user_profiles_cached(dids);
-        let uncached: Vec<String> = dids
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !cached_flags[*i])
-            .map(|(_, did)| did.clone())
-            .collect();
-
-        if uncached.is_empty() {
-            return Ok(0);
-        }
-
-        let profiles = self.profile_fetcher.bulk_fetch_profiles(&uncached).await?;
-        let mut resolved = 0;
-
-        for (did, maybe_profile) in uncached.iter().zip(profiles) {
+        // Single cache pass: get (not contains_key) so hits are returned directly
+        // and misses are known for fetching — no second lookup later.
+        let cached = self.cache.get_user_profiles(dids);
+        let mut resolved = std::collections::HashMap::with_capacity(dids.len());
+        let mut uncached = Vec::new();
+        for (did, maybe_profile) in dids.iter().zip(cached) {
             if let Some(profile) = maybe_profile {
-                self.cache.set_user_profile(did.clone(), Arc::new(profile));
-                resolved += 1;
+                resolved.insert(did.clone(), profile);
+            } else {
+                uncached.push(did.clone());
             }
         }
 
-        trace!("Resolved {}/{} missing profiles", resolved, uncached.len());
+        if uncached.is_empty() {
+            return Ok(resolved);
+        }
+
+        let profiles = self.profile_fetcher.bulk_fetch_profiles(&uncached).await?;
+        let mut fetched = 0;
+
+        for (did, maybe_profile) in uncached.iter().zip(profiles) {
+            if let Some(profile) = maybe_profile {
+                let arc = Arc::new(profile);
+                self.cache.set_user_profile(did.clone(), Arc::clone(&arc));
+                resolved.insert(did.clone(), arc);
+                fetched += 1;
+            }
+        }
+
+        trace!("Fetched {}/{} missing profiles", fetched, uncached.len());
         Ok(resolved)
     }
 
@@ -326,7 +337,9 @@ mod tests {
 
         let dids = vec!["did:plc:alice".to_string(), "did:plc:bob".to_string()];
         let resolved = resolver.resolve_profiles(&dids).await.unwrap();
-        assert_eq!(resolved, 1);
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved.contains_key("did:plc:alice"));
+        assert!(resolved.contains_key("did:plc:bob"));
 
         assert_eq!(
             profile_fetcher
@@ -346,7 +359,7 @@ mod tests {
         );
 
         let resolved = resolver.resolve_profiles(&[]).await.unwrap();
-        assert_eq!(resolved, 0);
+        assert!(resolved.is_empty());
     }
 
     #[tokio::test]
