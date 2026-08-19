@@ -137,10 +137,15 @@ where
         enriched.hydrated_metadata.hydration_quality = HydrationQuality::Complete;
 
         if is_post {
-            let hit = profiles.contains_key(&author_did);
-            tracing::Span::current().record("cache_hit", hit);
-
-            enriched.hydrated_metadata.author_profile = profiles.get(&author_did).cloned();
+            match profiles.get(&author_did) {
+                Some(profile) => {
+                    tracing::Span::current().record("cache_hit", true);
+                    enriched.hydrated_metadata.author_profile = Some(Arc::clone(profile));
+                }
+                None => {
+                    tracing::Span::current().record("cache_hit", false);
+                }
+            }
         }
 
         for did in &mentioned_dids {
