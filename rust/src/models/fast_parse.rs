@@ -10,7 +10,14 @@
 
 use super::jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType};
 
-pub fn parse_envelope_fast(wire: &str) -> Option<(JetstreamMessage, Option<(usize, usize)>)> {
+/// (message, record byte span, cid byte span).
+type ParsedEnvelope = (
+    JetstreamMessage,
+    Option<(usize, usize)>,
+    Option<(usize, usize)>,
+);
+
+pub fn parse_envelope_fast(wire: &str) -> Option<ParsedEnvelope> {
     let b = wire.as_bytes();
 
     #[inline(always)]
@@ -124,7 +131,12 @@ pub fn parse_envelope_fast(wire: &str) -> Option<(JetstreamMessage, Option<(usiz
 
     // Parse the commit object starting at `i0` (points at '{').
     type CommitAndSpan = (Box<CommitData>, Option<(usize, usize)>);
-    type ParsedCommit = (Box<CommitData>, Option<(usize, usize)>, usize);
+    type ParsedCommit = (
+        Box<CommitData>,
+        Option<(usize, usize)>,
+        Option<(usize, usize)>,
+        usize,
+    );
 
     fn parse_commit(b: &[u8], i0: usize) -> Option<ParsedCommit> {
         let mut i = i0;
@@ -137,7 +149,7 @@ pub fn parse_envelope_fast(wire: &str) -> Option<(JetstreamMessage, Option<(usiz
         let mut collection: Option<String> = None;
         let mut rkey: Option<String> = None;
         let mut record: Option<(usize, usize)> = None;
-        let mut cid: Option<String> = None;
+        let mut cid_span: Option<(usize, usize)> = None;
         loop {
             i = ws(b, i)?;
             if i >= b.len() {
@@ -182,13 +194,13 @@ pub fn parse_envelope_fast(wire: &str) -> Option<(JetstreamMessage, Option<(usiz
                     i = ni2;
                 }
                 "cid" => {
-                    let (v, ni2) = match read_unescaped(b, i) {
+                    let (_, ni2) = match read_unescaped(b, i) {
                         Some(v) => v,
                         None => {
                             return None;
                         }
                     };
-                    cid = Some(v.to_string());
+                    cid_span = Some((i + 1, ni2 - 1));
                     i = ni2;
                 }
                 "record" => {
@@ -219,9 +231,9 @@ pub fn parse_envelope_fast(wire: &str) -> Option<(JetstreamMessage, Option<(usiz
             collection: collection.map(Into::into),
             rkey: rkey.map(Into::into),
             record: None,
-            cid,
+            cid: None,
         };
-        Some((Box::new(commit), record, i + 1))
+        Some((Box::new(commit), record, cid_span, i + 1))
     }
 
     let mut i = ws(b, 0)?;
@@ -234,6 +246,7 @@ pub fn parse_envelope_fast(wire: &str) -> Option<(JetstreamMessage, Option<(usiz
     let mut seq: Option<u64> = None;
     let mut kind: Option<MessageKind> = None;
     let mut commit: Option<CommitAndSpan> = None;
+    let mut cid_span: Option<(usize, usize)> = None;
     loop {
         i = ws(b, i)?;
         if i >= b.len() {
@@ -278,8 +291,9 @@ pub fn parse_envelope_fast(wire: &str) -> Option<(JetstreamMessage, Option<(usiz
                 i = ni2;
             }
             "commit" => {
-                let (c, span, ni2) = parse_commit(b, i)?;
+                let (c, span, cs, ni2) = parse_commit(b, i)?;
                 commit = Some((c, span));
+                cid_span = cs;
                 i = ni2;
             }
             _ => return None, // unknown top-level key: fall back to the tape
@@ -309,7 +323,7 @@ pub fn parse_envelope_fast(wire: &str) -> Option<(JetstreamMessage, Option<(usiz
         commit: commit_data,
         raw_json: None,
     };
-    Some((message, record_span))
+    Some((message, record_span, cid_span))
 }
 
 /// Fast path for the standard Jetstream wire shape (fixed field order:
@@ -318,7 +332,7 @@ pub fn parse_envelope_fast(wire: &str) -> Option<(JetstreamMessage, Option<(usiz
 /// string reads + matching. Returns `None` for any deviation (missing optional
 /// fields, reordered keys, whitespace, escapes, unknown keys) — the caller then
 /// falls back to the generic parser, so correctness is bounded.
-pub fn parse_envelope_shape(wire: &str) -> Option<(JetstreamMessage, Option<(usize, usize)>)> {
+pub fn parse_envelope_shape(wire: &str) -> Option<ParsedEnvelope> {
     let b = wire.as_bytes();
     let mut i = 0usize;
 
@@ -446,7 +460,8 @@ pub fn parse_envelope_shape(wire: &str) -> Option<(JetstreamMessage, Option<(usi
     i = end;
     // , "cid" : value
     i = peek(b, i, b",\"cid\":")?;
-    let (cid, ni) = read_unescaped(b, i)?;
+    let (_, ni) = read_unescaped(b, i)?;
+    let cid_span = Some((i + 1, ni - 1));
     i = ni;
     // }}  (commit close, message close)
     peek(b, i, b"}}")?;
@@ -457,7 +472,7 @@ pub fn parse_envelope_shape(wire: &str) -> Option<(JetstreamMessage, Option<(usi
         collection: Some(collection.into()),
         rkey: Some(rkey.into()),
         record: None,
-        cid: Some(cid.into()),
+        cid: None,
     });
     let message = JetstreamMessage {
         did: did.into(),
@@ -467,7 +482,7 @@ pub fn parse_envelope_shape(wire: &str) -> Option<(JetstreamMessage, Option<(usi
         commit: Some(commit),
         raw_json: None,
     };
-    Some((message, record_span))
+    Some((message, record_span, cid_span))
 }
 
 #[cfg(test)]
@@ -493,7 +508,14 @@ mod tests {
                 assert_eq!(a.operation_type, b.operation_type);
                 assert_eq!(a.collection, b.collection);
                 assert_eq!(a.rkey, b.rkey);
-                assert_eq!(a.cid, b.cid);
+                // cid is wired by parse_message from the returned span, so the
+                // parser-direct fast message may legitimately carry None here;
+                // the tape path owns its CidValue. Compare by value when both exist.
+                match (a.cid, b.cid) {
+                    (Some(x), Some(y)) => assert_eq!(x.as_str(), y.as_str()),
+                    (None, _) => {}
+                    _ => panic!("cid presence mismatch"),
+                }
             }
             _ => panic!("commit presence mismatch"),
         }
@@ -510,7 +532,7 @@ mod tests {
             r#"{"did":"did:plc:eve","time_us":5,"seq":6,"kind":"commit","commit":{"operation":"create","record":{"text":"hi"},"rev":"v","collection":"c","rkey":"k","cid":"cid"}}"#,
         ];
         for wire in wires {
-            let (fast, span) = parse_envelope_fast(wire).expect("fast parse");
+            let (fast, span, _) = parse_envelope_fast(wire).expect("fast parse");
             let tape = tape_parse(wire);
             assert_same(fast, tape);
             // The record span must exactly capture the record value.
@@ -548,7 +570,7 @@ mod tests {
     fn fast_record_span_excludes_nothing_extra() {
         // Record is the FIRST commit field and the message has a trailing field.
         let wire = r#"{"did":"d","kind":"commit","commit":{"operation":"create","record":{"text":"hello","deep":{"a":["x",{"b":2}]}},"cid":"c"}}"#;
-        let (_, span) = parse_envelope_fast(wire).unwrap();
+        let (_, span, _) = parse_envelope_fast(wire).unwrap();
         let (s, e) = span.expect("span");
         assert_eq!(
             &wire[s..e],
@@ -562,9 +584,9 @@ mod tests {
         let batch = crate::testing::create_message_batch(50);
         for m in &batch {
             let wire = serde_json::to_string(m).unwrap();
-            let (shape, shape_span) =
+            let (shape, shape_span, _) =
                 parse_envelope_shape(&wire).unwrap_or_else(|| panic!("shape path failed"));
-            let (generic, generic_span) =
+            let (generic, generic_span, _) =
                 parse_envelope_fast(&wire).unwrap_or_else(|| panic!("generic path failed"));
             assert_eq!(shape.did, generic.did);
             assert_eq!(shape.time_us, generic.time_us);

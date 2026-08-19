@@ -74,7 +74,10 @@ impl SourceEventId {
                 commit.collection.as_deref().unwrap_or_default(),
             );
             push_component(&mut identity, commit.rkey.as_deref().unwrap_or_default());
-            push_component(&mut identity, commit.cid.as_deref().unwrap_or_default());
+            push_component(
+                &mut identity,
+                commit.cid.as_ref().map(|c| c.as_str()).unwrap_or_default(),
+            );
         }
 
         Self(identity)
@@ -237,7 +240,7 @@ mod tests {
                 collection: Some("app.bsky.feed.post".into()),
                 rkey: Some("post-1".into()),
                 record: None,
-                cid: Some("bafy-test".to_string()),
+                cid: Some("bafy-test".to_string().into()),
             })),
             raw_json: None,
         }

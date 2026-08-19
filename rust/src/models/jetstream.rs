@@ -195,6 +195,79 @@ impl Serialize for RecordValue {
     }
 }
 
+/// The commit's content-address (CID), kept as a byte span into the message's
+/// wire JSON (shared backing, no per-message heap copy). Only recovery paths
+/// read the CID, so materializing a `String` at parse time is pure waste.
+/// Programmatically-built messages use the `From` constructors (owned buffer).
+#[derive(Debug, Clone)]
+pub struct CidValue {
+    backing: Arc<str>,
+    start: usize,
+    end: usize,
+}
+
+impl CidValue {
+    /// Build from a byte span into a shared backing buffer (the message's wire JSON).
+    #[inline(always)]
+    pub fn from_span(backing: Arc<str>, start: usize, end: usize) -> Self {
+        Self {
+            backing,
+            start,
+            end,
+        }
+    }
+
+    /// The CID string.
+    #[inline(always)]
+    pub fn as_str(&self) -> &str {
+        &self.backing[self.start..self.end]
+    }
+}
+
+impl From<String> for CidValue {
+    fn from(value: String) -> Self {
+        let backing: Arc<str> = Arc::from(value);
+        let end = backing.len();
+        Self {
+            backing,
+            start: 0,
+            end,
+        }
+    }
+}
+
+impl From<&str> for CidValue {
+    fn from(value: &str) -> Self {
+        let backing: Arc<str> = Arc::from(value);
+        let end = backing.len();
+        Self {
+            backing,
+            start: 0,
+            end,
+        }
+    }
+}
+
+impl PartialEq for CidValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for CidValue {}
+
+impl Serialize for CidValue {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for CidValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::from)
+    }
+}
+
 /// Find the byte span of the first object-valued `"record"` key in a Jetstream
 /// wire message (the commit's record). String-aware: keys inside string values
 /// (including escaped quotes) do not match.
@@ -290,7 +363,7 @@ pub struct CommitData {
     #[serde(skip_deserializing)]
     pub record: Option<RecordValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cid: Option<String>,
+    pub cid: Option<CidValue>,
 }
 
 impl JetstreamMessage {

@@ -86,7 +86,7 @@ fn create_test_message(i: usize) -> JetstreamMessage {
                 "text": format!("Hello world {}", i),
                 "createdAt": "2024-01-01T00:00:00.000Z"
             }))),
-            cid: Some(format!("bafyrei{i}")),
+            cid: Some(format!("bafyrei{i}").into()),
         })),
         raw_json: None,
     }

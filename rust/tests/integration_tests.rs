@@ -231,7 +231,7 @@ mod tests {
                     record: Some(RecordValue::from_value(
                         simd_json::json!({"text": "Hello world"}),
                     )),
-                    cid: Some("cid1".to_string()),
+                    cid: Some("cid1".to_string().into()),
                 },
             )),
             raw_json: None,

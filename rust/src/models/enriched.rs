@@ -270,7 +270,7 @@ mod tests {
                 record: Some(RecordValue::from_value(
                     simd_json::json!({"text": "Hello world"}),
                 )),
-                cid: Some("bafyrei".to_string()),
+                cid: Some("bafyrei".to_string().into()),
             })),
             raw_json: None,
         };
@@ -293,7 +293,7 @@ mod tests {
                 collection: Some("app.bsky.feed.post".into()),
                 rkey: Some("test123".into()),
                 record: Some(RecordValue::from_value(simd_json::json!({"text": "Hello"}))),
-                cid: Some("bafyrei".to_string()),
+                cid: Some("bafyrei".to_string().into()),
             })),
             raw_json: None,
         });
@@ -320,7 +320,7 @@ mod tests {
                 record: Some(RecordValue::from_value(
                     simd_json::json!({"text": "Hello world"}),
                 )),
-                cid: Some("bafyrei".to_string()),
+                cid: Some("bafyrei".to_string().into()),
             })),
             raw_json: None,
         };

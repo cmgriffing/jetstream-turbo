@@ -851,7 +851,7 @@ mod tests {
                     collection: Some("app.bsky.feed.post".into()),
                     rkey: Some(format!("post-{seq}").into()),
                     record: None,
-                    cid: Some(format!("cid-{seq}")),
+                    cid: Some(format!("cid-{seq}").into()),
                 })),
                 raw_json: None,
             },

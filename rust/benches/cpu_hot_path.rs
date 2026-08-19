@@ -63,7 +63,7 @@ fn realistic_message() -> JetstreamMessage {
             record: Some(
                 jetstream_turbo_rs::models::jetstream::RecordValue::from_value(realistic_record()),
             ),
-            cid: Some("bafyreiassbuahzdwy64xwlefqcwh6zk4stb4lhht24oozhxn3fhzomrxg4".to_string()),
+            cid: Some("bafyreiassbuahzdwy64xwlefqcwh6zk4stb4lhht24oozhxn3fhzomrxg4".to_string().into()),
         })),
         raw_json: None,
     }

@@ -184,7 +184,7 @@ mod tests {
                     record: Some(crate::models::jetstream::RecordValue::from_value(
                         simd_json::json!({"text": "Hello world"}),
                     )),
-                    cid: Some("bafyrei".to_string()),
+                    cid: Some("bafyrei".to_string().into()),
                 })),
                 raw_json: None,
             },

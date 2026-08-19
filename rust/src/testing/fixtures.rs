@@ -27,7 +27,7 @@ pub fn create_post_message(index: usize) -> JetstreamMessage {
                 "text": text,
                 "langs": ["en"]
             }))),
-            cid: Some(format!("bafyreia{}", &format!("{index:032x}")[..32])),
+            cid: Some(format!("bafyreia{}", &format!("{index:032x}")[..32]).into()),
         })),
         raw_json: None,
     }
@@ -64,7 +64,7 @@ pub fn create_reply_message(index: usize, parent_did: &str, parent_rkey: &str) -
                     }
                 }
             }))),
-            cid: Some(format!("bafyreireply{index:06}")),
+            cid: Some(format!("bafyreireply{index:06}").into()),
         })),
         raw_json: None,
     }
