@@ -68,6 +68,8 @@ uuid = { version = "1.11", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 # Small-string type: keeps short DIDs/keys in an inline buffer (no heap alloc).
 compact_str = { version = "0.10", features = ["serde"] }
+# SIMD byte search for the fast envelope parsers.
+memchr = "2.7"
 
 # Metrics
 metrics = "0.24"

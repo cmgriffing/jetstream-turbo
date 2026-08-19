@@ -22,21 +22,19 @@ pub fn parse_envelope_fast(wire: &str) -> Option<(JetstreamMessage, Option<(usiz
     }
 
     // Read an unescaped string starting at b[i] == '"'; returns (content, next).
+    // memchr (SIMD) finds the closing quote; any backslash before it means an
+    // escape, so we fall back to the tape parser (same behavior as the old
+    // byte loop: the first escape aborts the fast path).
     #[inline(always)]
     fn read_unescaped(b: &[u8], i: usize) -> Option<(&str, usize)> {
         if b.get(i)? != &b'"' {
             return None;
         }
         let start = i + 1;
-        let mut j = i + 1;
-        while j < b.len() && b[j] != b'"' {
-            if b[j] == b'\\' {
-                return None; // escapes: fall back to the tape parser
-            }
-            j += 1;
-        }
-        if j >= b.len() {
-            return None;
+        let rel = memchr::memchr(b'"', &b[start..])?;
+        let j = start + rel;
+        if memchr::memchr(b'\\', &b[start..j]).is_some() {
+            return None; // escapes: fall back to the tape parser
         }
         Some((std::str::from_utf8(&b[start..j]).ok()?, j + 1))
     }
@@ -334,20 +332,18 @@ pub fn parse_envelope_shape(wire: &str) -> Option<(JetstreamMessage, Option<(usi
     }
 
     // Read an unescaped string starting at b[i] == '"'; returns (content, next).
+    // memchr (SIMD) finds the closing quote; any backslash before it means an
+    // escape, so we fall back to the tape parser (same behavior as the old
+    // byte loop: the first escape aborts the fast path).
     #[inline(always)]
     fn read_unescaped(b: &[u8], i: usize) -> Option<(&str, usize)> {
         if b.get(i)? != &b'"' {
             return None;
         }
         let start = i + 1;
-        let mut j = i + 1;
-        while j < b.len() && b[j] != b'"' {
-            if b[j] == b'\\' {
-                return None;
-            }
-            j += 1;
-        }
-        if j >= b.len() {
+        let rel = memchr::memchr(b'"', &b[start..])?;
+        let j = start + rel;
+        if memchr::memchr(b'\\', &b[start..j]).is_some() {
             return None;
         }
         Some((std::str::from_utf8(&b[start..j]).ok()?, j + 1))

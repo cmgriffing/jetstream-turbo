@@ -1798,6 +1798,7 @@ dependencies = [
  "hostname",
  "jetstream-turbo-rs",
  "lru",
+ "memchr",
  "metrics 0.24.3",
  "metrics-exporter-prometheus",
  "moka",
