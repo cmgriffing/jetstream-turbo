@@ -56,8 +56,8 @@ Core hot path (parse → hydrate → serialize):
 
 ## Current state (12 experiments kept)
 
-- **~712k msgs/sec** (474k baseline → +50%). Confidence 8.1× noise floor.
-- Phases (10k batch ~14ms): parse ~4.6ms (tape floor), hydrate ~2.8ms, serialize ~5.3ms (bench `to_string` = per-call alloc; `to_writer` shared buffer measures 4.6ms but bench-inaccessible).
+- **~700-735k msgs/sec** (474k baseline → +48-55%). Confidence 13.6× noise floor. Load-dependent: machine load 2-4 modulates measurements ±15%.
+- Phases (10k batch, quiet machine): parse ~4.8ms (tape floor), hydrate ~3.3ms, serialize ~5.2ms (bench `to_string` per-call alloc ~0.8ms locked; `to_writer` shared buffer measures 4.6ms but bench-inaccessible).
 
 ## Profiling notes (10k batch, post-optimizations)
 
