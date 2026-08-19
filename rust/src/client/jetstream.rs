@@ -543,6 +543,25 @@ fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
     // Keep a pristine copy of the wire JSON so serializing the message can splice
     // it verbatim instead of re-walking the struct through serde.
     let raw_json: Box<str> = Box::from(text);
+
+    // Fast path: strict envelope parser (validated subset, no tape). Anything it
+    // does not fully handle falls back to the tape below, so correctness is
+    // bounded by the tape.
+    if let Some((mut message, record_span)) = crate::models::fast_parse::parse_envelope_fast(text) {
+        message.raw_json = Some(raw_json.clone());
+        if message.commit.is_some() {
+            if let Some((start, end)) = record_span {
+                message.commit.as_mut().unwrap().record = Some(
+                    crate::models::jetstream::RecordValue::from_raw(raw_json[start..end].into()),
+                );
+            }
+        }
+        if !message.did.is_empty() {
+            return Ok(message);
+        }
+        return Err(TurboError::InvalidMessage("DID is empty".to_string()));
+    }
+
     let record_span = find_record_span(text);
     let mut message: JetstreamMessage = PARSE_SCRATCH.with(|scratch| {
         let mut scratch = scratch.borrow_mut();
