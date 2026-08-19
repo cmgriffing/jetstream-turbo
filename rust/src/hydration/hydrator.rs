@@ -9,8 +9,7 @@ use crate::models::{
     TurboResult,
 };
 use crate::utils::serde_utils::string_utils::is_valid_at_uri;
-use ahash::AHashSet;
-use std::collections::HashMap;
+use ahash::{AHashMap, AHashSet};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::info;
@@ -23,28 +22,46 @@ struct MessageContext {
     post_uris: Vec<String>,
 }
 
-/// Extract mentioned DIDs from a record view.
-///
-/// Sources: reply parent/root URIs, mention facets, and embed record URIs.
-/// All DIDs are parsed from AT-URIs (`at://did:plc:.../...`).
-fn extract_mentioned_dids_from_view(rv: &RecordView<'_>) -> Vec<String> {
+/// Extract mentioned DIDs and referenced post URIs from a record view in a
+/// single traversal (reply refs, mention facets, embed record URI).
+fn extract_refs_from_view(rv: &RecordView<'_>) -> (Vec<String>, Vec<String>) {
     let mut mentioned_dids = Vec::new();
+    let mut uris = Vec::new();
 
-    // From reply references
     if let Some(refs) = rv.reply_refs() {
-        if let Some(did) = refs.parent_uri.and_then(extract_did_from_at_uri) {
-            if did.starts_with("did:plc:") {
-                mentioned_dids.push(did.to_string());
+        if let Some(uri) = refs.parent_uri {
+            if !uri.is_empty() && is_valid_at_uri(uri) {
+                uris.push(uri.to_string());
+            }
+            if let Some(did) = extract_did_from_at_uri(uri) {
+                if did.starts_with("did:plc:") {
+                    mentioned_dids.push(did.to_string());
+                }
             }
         }
-        if let Some(did) = refs.root_uri.and_then(extract_did_from_at_uri) {
+        if let Some(uri) = refs.root_uri {
+            if !uri.is_empty() && is_valid_at_uri(uri) {
+                uris.push(uri.to_string());
+            }
+            if let Some(did) = extract_did_from_at_uri(uri) {
+                if did.starts_with("did:plc:") {
+                    mentioned_dids.push(did.to_string());
+                }
+            }
+        }
+    }
+
+    if let Some(uri) = rv.embed_record_uri() {
+        if !uri.is_empty() && is_valid_at_uri(uri) {
+            uris.push(uri.to_string());
+        }
+        if let Some(did) = extract_did_from_at_uri(uri) {
             if did.starts_with("did:plc:") {
                 mentioned_dids.push(did.to_string());
             }
         }
     }
 
-    // From mention facets
     for facet in rv.facets() {
         for feature in facet.features() {
             if let FacetFeature::Mention { did } = feature {
@@ -55,51 +72,11 @@ fn extract_mentioned_dids_from_view(rv: &RecordView<'_>) -> Vec<String> {
         }
     }
 
-    // From embed record
-    if let Some(uri) = rv.embed_record_uri() {
-        if let Some(did) = extract_did_from_at_uri(uri) {
-            if did.starts_with("did:plc:") {
-                mentioned_dids.push(did.to_string());
-            }
-        }
-    }
-
     mentioned_dids.sort();
     mentioned_dids.dedup();
-    mentioned_dids
-}
-
-/// Extract referenced post URIs from a record view.
-///
-/// Sources: reply parent/root URIs and embed record URIs.
-/// All URIs are validated with `is_valid_at_uri`.
-fn extract_post_uris_from_view(rv: &RecordView<'_>) -> Vec<String> {
-    let mut uris = Vec::new();
-
-    // From reply references
-    if let Some(refs) = rv.reply_refs() {
-        if let Some(uri) = refs.parent_uri {
-            if !uri.is_empty() && is_valid_at_uri(uri) {
-                uris.push(uri.to_string());
-            }
-        }
-        if let Some(uri) = refs.root_uri {
-            if !uri.is_empty() && is_valid_at_uri(uri) {
-                uris.push(uri.to_string());
-            }
-        }
-    }
-
-    // From embed record
-    if let Some(uri) = rv.embed_record_uri() {
-        if !uri.is_empty() && is_valid_at_uri(uri) {
-            uris.push(uri.to_string());
-        }
-    }
-
     uris.sort();
     uris.dedup();
-    uris
+    (mentioned_dids, uris)
 }
 
 /// Extract the DID from an AT-URI (`at://did:plc:abc123/...`).
@@ -148,8 +125,8 @@ where
         is_post: bool,
         mentioned_dids: Vec<String>,
         post_uris: Vec<String>,
-        profiles: &HashMap<String, Arc<BlueskyProfile>>,
-        post_outcomes: &HashMap<String, PostFetchOutcome>,
+        profiles: &AHashMap<String, Arc<BlueskyProfile>>,
+        post_outcomes: &AHashMap<String, PostFetchOutcome>,
         processed_at: chrono::DateTime<chrono::Utc>,
     ) -> TurboResult<EnrichedRecord> {
         let start_time = Instant::now();
@@ -236,13 +213,7 @@ where
                 .commit
                 .as_ref()
                 .and_then(|c| c.record.as_ref())
-                .map(|r| {
-                    let rv = RecordView::new(r);
-                    (
-                        extract_mentioned_dids_from_view(&rv),
-                        extract_post_uris_from_view(&rv),
-                    )
-                })
+                .map(|r| extract_refs_from_view(&RecordView::new(r)))
                 .unwrap_or_default();
 
             unique_dids.insert(author_did.clone());
@@ -284,7 +255,7 @@ where
         let post_outcomes = uris
             .into_iter()
             .zip(post_outcomes)
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<AHashMap<_, _>>();
         let api_fetch_time = cache_check_start.elapsed().as_secs_f64() * 1000.0;
         println!("    hydrate_batch: prepass={prepass_ms:.2}ms resolve={api_fetch_time:.2}ms");
         tracing::Span::current().record("api_fetch_time_ms", api_fetch_time as u64);
@@ -309,8 +280,8 @@ where
     fn hydrate_contexts(
         &self,
         contexts: Vec<MessageContext>,
-        profiles: &HashMap<String, Arc<BlueskyProfile>>,
-        post_outcomes: &std::collections::HashMap<String, PostFetchOutcome>,
+        profiles: &AHashMap<String, Arc<BlueskyProfile>>,
+        post_outcomes: &AHashMap<String, PostFetchOutcome>,
     ) -> TurboResult<Vec<EnrichedRecord>> {
         let mut results = Vec::with_capacity(contexts.len());
         let processed_at = chrono::Utc::now();

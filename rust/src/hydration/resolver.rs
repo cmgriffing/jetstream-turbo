@@ -106,15 +106,15 @@ where
     pub async fn resolve_profiles(
         &self,
         dids: &[String],
-    ) -> TurboResult<std::collections::HashMap<String, Arc<BlueskyProfile>>> {
+    ) -> TurboResult<ahash::AHashMap<String, Arc<BlueskyProfile>>> {
         if dids.is_empty() {
-            return Ok(std::collections::HashMap::new());
+            return Ok(ahash::AHashMap::new());
         }
 
         // Single cache pass: get (not contains_key) so hits are returned directly
         // and misses are known for fetching — no second lookup later.
         let cached = self.cache.get_user_profiles(dids);
-        let mut resolved = std::collections::HashMap::with_capacity(dids.len());
+        let mut resolved = ahash::AHashMap::with_capacity(dids.len());
         let mut uncached = Vec::new();
         for (did, maybe_profile) in dids.iter().zip(cached) {
             if let Some(profile) = maybe_profile {
