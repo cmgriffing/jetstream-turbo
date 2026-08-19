@@ -234,10 +234,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::OnceLock;
     use crate::client::{BlueskyOperation, HydrationFailure, UpstreamFailureCategory};
     use crate::models::bluesky::{BlueskyPost, BlueskyProfile};
     use crate::testing::mocks::{MockPostFetcher, MockProfileFetcher};
+    use std::sync::OnceLock;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 

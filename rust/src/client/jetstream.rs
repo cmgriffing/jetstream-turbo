@@ -1,3 +1,4 @@
+use crate::models::jetstream::find_record_span;
 use crate::models::{
     errors::TurboError, jetstream::JetstreamMessage, recovery::IngestionCheckpoint,
     recovery::ReconnectReason, TurboResult,
@@ -542,15 +543,31 @@ fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
     // Keep a pristine copy of the wire JSON so serializing the message can splice
     // it verbatim instead of re-walking the struct through serde.
     let raw_json: Box<str> = Box::from(text);
+    let record_span = find_record_span(text);
     let mut message: JetstreamMessage = PARSE_SCRATCH.with(|scratch| {
         let mut scratch = scratch.borrow_mut();
+        // Strip the record out of the tape input (replace it with `{}`) so the
+        // tape doesn't build tokens for it; the record stays in raw wire form
+        // and is materialized lazily only when actually read.
         scratch.input.clear();
-        scratch.input.extend_from_slice(text.as_bytes());
+        if let Some((start, end)) = record_span {
+            scratch.input.extend_from_slice(&text.as_bytes()[..start]);
+            scratch.input.extend_from_slice(b"{}");
+            scratch.input.extend_from_slice(&text.as_bytes()[end..]);
+        } else {
+            scratch.input.extend_from_slice(text.as_bytes());
+        }
         let ParseScratch { buffers, input } = &mut *scratch;
         simd_json::serde::from_slice_with_buffers(input, buffers).map_err(TurboError::from)
     })?;
     message.raw_json = Some(raw_json.clone());
-    message.populate_record_from_wire(&raw_json);
+    if message.commit.is_some() {
+        if let Some((start, end)) = record_span {
+            message.commit.as_mut().unwrap().record = Some(
+                crate::models::jetstream::RecordValue::from_raw(raw_json[start..end].into()),
+            );
+        }
+    }
 
     // Validate required fields
     if message.did.is_empty() {

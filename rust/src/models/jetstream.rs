@@ -170,7 +170,7 @@ impl Serialize for RecordValue {
 /// Find the byte span of the first object-valued `"record"` key in a Jetstream
 /// wire message (the commit's record). String-aware: keys inside string values
 /// (including escaped quotes) do not match.
-pub(crate) fn find_record_span(wire: &str) -> Option<(usize, usize)> {
+pub fn find_record_span(wire: &str) -> Option<(usize, usize)> {
     let bytes = wire.as_bytes();
     let n = bytes.len();
     let mut i = 0;

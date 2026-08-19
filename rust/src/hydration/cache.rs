@@ -482,8 +482,8 @@ pub struct CacheMetricsSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::OnceLock;
     use crate::client::{BlueskyOperation, UpstreamFailureCategory};
+    use std::sync::OnceLock;
 
     fn failure(fingerprint: &str) -> HydrationFailure {
         HydrationFailure {
