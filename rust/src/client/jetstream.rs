@@ -548,12 +548,13 @@ fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
     // does not fully handle falls back to the tape below, so correctness is
     // bounded by the tape.
     if let Some((mut message, record_span)) = crate::models::fast_parse::parse_envelope_fast(text) {
-        message.raw_json = Some(raw_json.clone());
+        let record_raw: Option<Box<str>> =
+            record_span.map(|(start, end)| raw_json[start..end].into());
+        message.raw_json = Some(raw_json);
         if message.commit.is_some() {
-            if let Some((start, end)) = record_span {
-                message.commit.as_mut().unwrap().record = Some(
-                    crate::models::jetstream::RecordValue::from_raw(raw_json[start..end].into()),
-                );
+            if let Some(raw) = record_raw {
+                message.commit.as_mut().unwrap().record =
+                    Some(crate::models::jetstream::RecordValue::from_raw(raw));
             }
         }
         if !message.did.is_empty() {
