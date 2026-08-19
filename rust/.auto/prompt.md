@@ -49,6 +49,13 @@ Core hot path (parse → hydrate → serialize):
 - **Hydrate micro-opts (KEPT)**: AHashSet for did/uri dedup; `resolve_profiles` returns `AHashMap<String, Arc<BlueskyProfile>>` via a single `get_user_profiles` pass; `hydrate_one` is sync with a single AHashMap get (merged contains_key+get); merged the two RecordView extraction passes into `extract_refs_from_view`; clippy/fmt clean.
 - **record: serde_json::Value → simd_json::OwnedValue (KEPT)**: Parse builds OwnedValue straight off the simd-json tape; serialize faster. `RecordView` is a lens over `&OwnedValue` (same API via `simd_json::prelude`). Fixtures/tests use `simd_json::json!`.
 - **Buffered parse (KEPT, big win)**: `parse_message` reuses a thread-local `simd_json::Buffers` via `to_tape_with_buffers` + `Tape::deserialize` instead of `from_str` (which re-allocated all scratch buffers per message). Parse dropped ~8.4ms → ~5.0ms per 10k.
+- **ParseScratch (KEPT)**: buffers + reusable input `Vec<u8>` in ONE thread-local; eliminates the per-message heap String copy (~0.3ms) and removed the unsafe.
+- **hydrate_one span hoist (KEPT)**: single `Span::current()` handle per message.
+
+## Current state (9 experiments kept)
+
+- **~685k msgs/sec typical** (474k baseline → +45%). Machine load ~4 (sysmond/Chrome/opencode) causes ±10% run-to-run noise; measure.sh runs 5× and takes the median.
+- All three phases near their practical floors: parse ~4.6ms (tape floor), hydrate ~3.1ms, serialize ~5.3ms (bench uses `to_string` = per-call alloc; `to_writer` shared buffer measures 4.6ms but is bench-inaccessible).
 
 ## Profiling notes (10k batch, post-optimizations)
 
