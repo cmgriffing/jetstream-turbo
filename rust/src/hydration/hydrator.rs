@@ -126,7 +126,7 @@ where
         is_post: bool,
         mentioned_dids: Vec<String>,
         post_uris: Vec<String>,
-        profiles: &AHashMap<String, Arc<BlueskyProfile>>,
+        profiles: &AHashMap<&str, Arc<BlueskyProfile>>,
         post_outcomes: &AHashMap<String, PostFetchOutcome>,
         processed_at: chrono::DateTime<chrono::Utc>,
     ) -> TurboResult<EnrichedRecord> {
@@ -158,7 +158,7 @@ where
         enriched.hydrated_metadata.author_profile = author_profile;
 
         for did in &mentioned_dids {
-            if let Some(profile) = profiles.get(did) {
+            if let Some(profile) = profiles.get(did.as_str()) {
                 enriched
                     .hydrated_metadata
                     .add_mentioned_profile(Arc::clone(profile));
@@ -294,7 +294,7 @@ where
     fn hydrate_contexts(
         &self,
         contexts: Vec<MessageContext>,
-        profiles: &AHashMap<String, Arc<BlueskyProfile>>,
+        profiles: &AHashMap<&str, Arc<BlueskyProfile>>,
         post_outcomes: &AHashMap<String, PostFetchOutcome>,
     ) -> TurboResult<Vec<EnrichedRecord>> {
         let mut results = Vec::with_capacity(contexts.len());

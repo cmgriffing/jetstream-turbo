@@ -102,11 +102,11 @@ where
 
     /// Ensure all given profiles are in cache. Returns a map of every resolved
     /// profile (cache hits plus anything fetched). Absent entries mean the
-    /// profile does not exist upstream.
-    pub async fn resolve_profiles(
+    /// profile does not exist upstream. Keys borrow from `dids` (caller-owned).
+    pub async fn resolve_profiles<'a>(
         &self,
-        dids: &[String],
-    ) -> TurboResult<ahash::AHashMap<String, Arc<BlueskyProfile>>> {
+        dids: &'a [String],
+    ) -> TurboResult<ahash::AHashMap<&'a str, Arc<BlueskyProfile>>> {
         if dids.is_empty() {
             return Ok(ahash::AHashMap::new());
         }
@@ -115,27 +115,29 @@ where
         // and misses are known for fetching — no second lookup later.
         let cached = self.cache.get_user_profiles(dids);
         let mut resolved = ahash::AHashMap::with_capacity(dids.len());
-        let mut uncached = Vec::new();
-        for (did, maybe_profile) in dids.iter().zip(cached) {
+        let mut uncached_indexes = Vec::new();
+        for (i, (did, maybe_profile)) in dids.iter().zip(cached).enumerate() {
             if let Some(profile) = maybe_profile {
-                resolved.insert(did.clone(), profile);
+                resolved.insert(did.as_str(), profile);
             } else {
-                uncached.push(did.clone());
+                uncached_indexes.push(i);
             }
         }
 
-        if uncached.is_empty() {
+        if uncached_indexes.is_empty() {
             return Ok(resolved);
         }
 
+        let uncached: Vec<String> = uncached_indexes.iter().map(|&i| dids[i].clone()).collect();
         let profiles = self.profile_fetcher.bulk_fetch_profiles(&uncached).await?;
         let mut fetched = 0;
 
-        for (did, maybe_profile) in uncached.iter().zip(profiles) {
+        for (&i, maybe_profile) in uncached_indexes.iter().zip(profiles) {
             if let Some(profile) = maybe_profile {
+                let did = &dids[i];
                 let arc = Arc::new(profile);
                 self.cache.set_user_profile(did.clone(), Arc::clone(&arc));
-                resolved.insert(did.clone(), arc);
+                resolved.insert(did.as_str(), arc);
                 fetched += 1;
             }
         }
