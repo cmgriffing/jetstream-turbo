@@ -878,7 +878,9 @@ mod tests {
         prometheus_metrics_from_diagnostics, readiness_http_status,
     };
     use crate::models::enriched::EnrichedRecord;
-    use crate::models::jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType};
+    use crate::models::jetstream::{
+        CommitData, JetstreamMessage, MessageKind, OperationType, RecordValue,
+    };
     use crate::turbocharger::{
         CacheStateDiagnostics, HealthDiagnostics, HealthStatus, MemoryPeakDiagnostics,
         NotRedisStateDiagnostics, PipelineProgress, PipelineReadinessState,
@@ -1127,18 +1129,21 @@ mod tests {
 
     fn sample_record() -> EnrichedRecord {
         EnrichedRecord::new(JetstreamMessage {
-            did: "did:plc:test".to_string(),
+            did: "did:plc:test".into(),
             time_us: Some(1640995200000000),
             seq: Some(1),
             kind: MessageKind::Commit,
-            commit: Some(CommitData {
-                rev: Some("rev-1".to_string()),
+            commit: Some(Box::new(CommitData {
+                rev: Some("rev-1".into()),
                 operation_type: OperationType::Create,
-                collection: Some("app.bsky.feed.post".to_string()),
-                rkey: Some("rkey-1".to_string()),
-                record: Some(serde_json::json!({ "text": "hello" })),
-                cid: Some("bafyrei".to_string()),
-            }),
+                collection: Some("app.bsky.feed.post".into()),
+                rkey: Some("rkey-1".into()),
+                record: Some(RecordValue::from_value(
+                    simd_json::json!({ "text": "hello" }),
+                )),
+                cid: Some("bafyrei".to_string().into()),
+            })),
+            raw_json: None,
         })
     }
 

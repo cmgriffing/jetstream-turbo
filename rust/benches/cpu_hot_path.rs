@@ -16,8 +16,8 @@ use std::hint::black_box;
 use std::sync::Arc;
 
 /// A realistic Bluesky post record with reply, embed, and facet references.
-fn realistic_record() -> serde_json::Value {
-    serde_json::json!({
+fn realistic_record() -> simd_json::OwnedValue {
+    simd_json::json!({
         "$type": "app.bsky.feed.post",
         "createdAt": "2026-02-13T02:20:02.89585500Z",
         "text": "Hello world #testing with a mention and a link",
@@ -51,18 +51,25 @@ fn realistic_record() -> serde_json::Value {
 /// A realistic Jetstream commit message wrapping the post record.
 fn realistic_message() -> JetstreamMessage {
     JetstreamMessage {
-        did: "did:plc:author123".to_string(),
+        did: "did:plc:author123".into(),
         time_us: Some(1770949213790196),
         seq: Some(100000),
         kind: MessageKind::Commit,
-        commit: Some(CommitData {
-            rev: Some("3mepgzgimkv23".to_string()),
+        commit: Some(Box::new(CommitData {
+            rev: Some("3mepgzgimkv23".into()),
             operation_type: OperationType::Create,
-            collection: Some("app.bsky.feed.post".to_string()),
-            rkey: Some("3mepgzgiatv23".to_string()),
-            record: Some(realistic_record()),
-            cid: Some("bafyreiassbuahzdwy64xwlefqcwh6zk4stb4lhht24oozhxn3fhzomrxg4".to_string()),
-        }),
+            collection: Some("app.bsky.feed.post".into()),
+            rkey: Some("3mepgzgiatv23".into()),
+            record: Some(
+                jetstream_turbo_rs::models::jetstream::RecordValue::from_value(realistic_record()),
+            ),
+            cid: Some(
+                "bafyreiassbuahzdwy64xwlefqcwh6zk4stb4lhht24oozhxn3fhzomrxg4"
+                    .to_string()
+                    .into(),
+            ),
+        })),
+        raw_json: None,
     }
 }
 

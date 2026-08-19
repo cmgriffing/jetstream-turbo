@@ -238,7 +238,7 @@ async fn test_profile_fetcher_tracks_requested_dids() {
     let did = message.did.clone();
     pipeline
         .profile_fetcher
-        .add_profile(create_profile(&did))
+        .add_profile(create_profile(did.as_str()))
         .await;
 
     let _results = pipeline.process_batch(vec![message]).await;
@@ -247,7 +247,7 @@ async fn test_profile_fetcher_tracks_requested_dids() {
     // At least one call should include our DID
     let all_dids: Vec<String> = requested.iter().flat_map(|v| v.iter().cloned()).collect();
     assert!(
-        all_dids.contains(&did),
+        all_dids.iter().any(|d| d == did.as_str()),
         "profile fetcher should have been asked for the message DID"
     );
 }

@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize, Serializer};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 fn serialize_did<S>(did: &Arc<str>, serializer: S) -> Result<S::Ok, S::Error>
 where
@@ -32,6 +32,21 @@ pub struct BlueskyProfile {
     pub created_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<Label>>,
+    /// Lazily-computed serialized JSON form, used to splice the profile into
+    /// hydrated metadata without re-walking the struct through serde.
+    #[serde(skip)]
+    pub serialized: OnceLock<Box<str>>,
+}
+
+impl BlueskyProfile {
+    /// The profile's serialized JSON fragment, computed once on first access.
+    pub fn serialized_json(&self) -> &str {
+        self.serialized.get_or_init(|| {
+            simd_json::to_string(self)
+                .map(String::into_boxed_str)
+                .unwrap_or_default()
+        })
+    }
 }
 
 impl<'de> Deserialize<'de> for BlueskyProfile {
@@ -214,6 +229,7 @@ impl<'de> Deserialize<'de> for BlueskyProfile {
                     indexed_at: indexed_at.unwrap_or_default(),
                     created_at: created_at.unwrap_or_default(),
                     labels: labels.unwrap_or_default(),
+                    serialized: OnceLock::new(),
                 })
             }
         }
@@ -444,6 +460,7 @@ impl From<GetProfileResponse> for BlueskyProfile {
                     .map(|dt| dt.with_timezone(&Utc))
             }),
             labels: profile.labels,
+            serialized: OnceLock::new(),
         }
     }
 }

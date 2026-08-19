@@ -1,8 +1,9 @@
+use crate::models::jetstream::RecordValue;
 use crate::models::{
     bluesky::BlueskyProfile,
     jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType},
 };
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Create a realistic Bluesky post creation message.
 pub fn create_post_message(index: usize) -> JetstreamMessage {
@@ -11,23 +12,24 @@ pub fn create_post_message(index: usize) -> JetstreamMessage {
     let text = sample_post_text(index);
 
     JetstreamMessage {
-        did,
+        did: did.into(),
         time_us: Some(1770949213790196 + (index as u64 * 1000)),
         seq: Some(100000 + index as u64),
         kind: MessageKind::Commit,
-        commit: Some(CommitData {
-            rev: Some(format!("3mepgzgimkv{index:04}")),
+        commit: Some(Box::new(CommitData {
+            rev: Some(format!("3mepgzgimkv{index:04}").into()),
             operation_type: OperationType::Create,
-            collection: Some("app.bsky.feed.post".to_string()),
-            rkey: Some(rkey),
-            record: Some(serde_json::json!({
+            collection: Some("app.bsky.feed.post".into()),
+            rkey: Some(rkey.into()),
+            record: Some(RecordValue::from_value(simd_json::json!({
                 "$type": "app.bsky.feed.post",
                 "createdAt": format!("2026-02-13T02:20:{:02}.895Z", index % 60),
                 "text": text,
                 "langs": ["en"]
-            })),
-            cid: Some(format!("bafyreia{}", &format!("{index:032x}")[..32])),
-        }),
+            }))),
+            cid: Some(format!("bafyreia{}", &format!("{index:032x}")[..32]).into()),
+        })),
+        raw_json: None,
     }
 }
 
@@ -38,16 +40,16 @@ pub fn create_reply_message(index: usize, parent_did: &str, parent_rkey: &str) -
     let parent_uri = format!("at://{parent_did}/app.bsky.feed.post/{parent_rkey}");
 
     JetstreamMessage {
-        did,
+        did: did.into(),
         time_us: Some(1770949213800000 + (index as u64 * 1000)),
         seq: Some(200000 + index as u64),
         kind: MessageKind::Commit,
-        commit: Some(CommitData {
-            rev: Some(format!("3replrev{index:06}")),
+        commit: Some(Box::new(CommitData {
+            rev: Some(format!("3replrev{index:06}").into()),
             operation_type: OperationType::Create,
-            collection: Some("app.bsky.feed.post".to_string()),
-            rkey: Some(rkey),
-            record: Some(serde_json::json!({
+            collection: Some("app.bsky.feed.post".into()),
+            rkey: Some(rkey.into()),
+            record: Some(RecordValue::from_value(simd_json::json!({
                 "$type": "app.bsky.feed.post",
                 "createdAt": format!("2026-02-13T02:21:{:02}.000Z", index % 60),
                 "text": format!("Replying to the post #{}", index),
@@ -61,9 +63,10 @@ pub fn create_reply_message(index: usize, parent_did: &str, parent_rkey: &str) -
                         "uri": parent_uri
                     }
                 }
-            })),
-            cid: Some(format!("bafyreireply{index:06}")),
-        }),
+            }))),
+            cid: Some(format!("bafyreireply{index:06}").into()),
+        })),
+        raw_json: None,
     }
 }
 
@@ -91,6 +94,7 @@ pub fn create_profile(did: &str) -> BlueskyProfile {
         indexed_at: None,
         created_at: None,
         labels: None,
+        serialized: OnceLock::new(),
     }
 }
 

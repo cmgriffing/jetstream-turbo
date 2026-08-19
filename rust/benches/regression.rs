@@ -10,7 +10,7 @@ use jetstream_turbo_rs::hydration::{Hydrator, TurboCache};
 use jetstream_turbo_rs::models::bluesky::{BlueskyPost, BlueskyProfile};
 use jetstream_turbo_rs::models::enriched::{EnrichedRecord, HydratedMetadata, ProcessingMetrics};
 use jetstream_turbo_rs::models::jetstream::{
-    CommitData, JetstreamMessage, MessageKind, OperationType,
+    CommitData, JetstreamMessage, MessageKind, OperationType, RecordValue,
 };
 use jetstream_turbo_rs::storage::{EventPublisher, RecordStore, SQLitePragmaConfig, SQLiteStore};
 use jetstream_turbo_rs::testing::{
@@ -18,9 +18,9 @@ use jetstream_turbo_rs::testing::{
     MockProfileFetcher, MockRecordStore,
 };
 use jetstream_turbo_rs::turbocharger::{PipelineProgress, PipelineStage};
-use serde_json::json;
+
 use std::hint::black_box;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 use tokio::sync::broadcast;
@@ -50,6 +50,7 @@ fn create_test_profile(i: usize) -> BlueskyProfile {
         indexed_at: None,
         created_at: None,
         labels: None,
+        serialized: OnceLock::new(),
     }
 }
 
@@ -72,21 +73,22 @@ fn create_test_post(i: usize) -> BlueskyPost {
 
 fn create_test_message(i: usize) -> JetstreamMessage {
     JetstreamMessage {
-        did: format!("did:plc:test{i}"),
+        did: format!("did:plc:test{i}").into(),
         time_us: Some(1640995200000000 + i as u64),
         seq: Some(i as u64),
         kind: MessageKind::Commit,
-        commit: Some(CommitData {
-            rev: Some(format!("3x{i}")),
+        commit: Some(Box::new(CommitData {
+            rev: Some(format!("3x{i}").into()),
             operation_type: OperationType::Create,
-            collection: Some("app.bsky.feed.post".to_string()),
-            rkey: Some(format!("{i}")),
-            record: Some(json!({
+            collection: Some("app.bsky.feed.post".into()),
+            rkey: Some(format!("{i}").into()),
+            record: Some(RecordValue::from_value(simd_json::json!({
                 "text": format!("Hello world {}", i),
                 "createdAt": "2024-01-01T00:00:00.000Z"
-            })),
-            cid: Some(format!("bafyrei{i}")),
-        }),
+            }))),
+            cid: Some(format!("bafyrei{i}").into()),
+        })),
+        raw_json: None,
     }
 }
 
@@ -195,7 +197,9 @@ fn bench_cache_operations(c: &mut Criterion) {
 
             cache
         });
-        let dids: Vec<String> = (0..100).map(|i| format!("did:plc:test{i}")).collect();
+        let dids: Vec<Arc<str>> = (0..100)
+            .map(|i| Arc::from(format!("did:plc:test{i}")))
+            .collect();
 
         b.iter(|| {
             black_box(cache.get_user_profiles(&dids));

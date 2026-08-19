@@ -100,36 +100,50 @@ where
 
     // ---- Batch resolution ----
 
-    /// Ensure all given profiles are in cache. Returns the number successfully
-    /// fetched (cache hits are not counted).
-    pub async fn resolve_profiles(&self, dids: &[String]) -> TurboResult<usize> {
+    /// Ensure all given profiles are in cache. Returns one outcome per input
+    /// did, aligned with `dids` order (cache hits plus anything fetched).
+    /// `None` means the profile does not exist upstream.
+    pub async fn resolve_profiles(
+        &self,
+        dids: &[Arc<str>],
+    ) -> TurboResult<Vec<Option<Arc<BlueskyProfile>>>> {
         if dids.is_empty() {
-            return Ok(0);
+            return Ok(Vec::new());
         }
 
-        let cached_flags = self.cache.check_user_profiles_cached(dids);
-        let uncached: Vec<String> = dids
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !cached_flags[*i])
-            .map(|(_, did)| did.clone())
-            .collect();
-
-        if uncached.is_empty() {
-            return Ok(0);
-        }
-
-        let profiles = self.profile_fetcher.bulk_fetch_profiles(&uncached).await?;
-        let mut resolved = 0;
-
-        for (did, maybe_profile) in uncached.iter().zip(profiles) {
-            if let Some(profile) = maybe_profile {
-                self.cache.set_user_profile(did.clone(), Arc::new(profile));
-                resolved += 1;
+        // Single cache pass: get (not contains_key) so hits are returned directly
+        // and misses are known for fetching — no second lookup later.
+        let cached = self.cache.get_user_profiles(dids);
+        let mut resolved = cached;
+        let mut uncached_indexes = Vec::new();
+        for (i, maybe_profile) in resolved.iter().enumerate() {
+            if maybe_profile.is_none() {
+                uncached_indexes.push(i);
             }
         }
 
-        trace!("Resolved {}/{} missing profiles", resolved, uncached.len());
+        if uncached_indexes.is_empty() {
+            return Ok(resolved);
+        }
+
+        let uncached: Vec<String> = uncached_indexes
+            .iter()
+            .map(|&i| dids[i].to_string())
+            .collect();
+        let profiles = self.profile_fetcher.bulk_fetch_profiles(&uncached).await?;
+        let mut fetched = 0;
+
+        for (&i, maybe_profile) in uncached_indexes.iter().zip(profiles) {
+            if let Some(profile) = maybe_profile {
+                let did = dids[i].to_string();
+                let arc = Arc::new(profile);
+                self.cache.set_user_profile(did, Arc::clone(&arc));
+                resolved[i] = Some(arc);
+                fetched += 1;
+            }
+        }
+
+        trace!("Fetched {}/{} missing profiles", fetched, uncached.len());
         Ok(resolved)
     }
 
@@ -223,6 +237,7 @@ mod tests {
     use crate::client::{BlueskyOperation, HydrationFailure, UpstreamFailureCategory};
     use crate::models::bluesky::{BlueskyPost, BlueskyProfile};
     use crate::testing::mocks::{MockPostFetcher, MockProfileFetcher};
+    use std::sync::OnceLock;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -248,6 +263,7 @@ mod tests {
             indexed_at: None,
             created_at: None,
             labels: None,
+            serialized: OnceLock::new(),
         }
     }
 
@@ -324,9 +340,11 @@ mod tests {
         let post_fetcher = Arc::new(MockPostFetcher::new());
         let resolver = CacheMissResolver::new(cache, Arc::clone(&profile_fetcher), post_fetcher);
 
-        let dids = vec!["did:plc:alice".to_string(), "did:plc:bob".to_string()];
+        let dids: Vec<Arc<str>> = vec!["did:plc:alice".into(), "did:plc:bob".into()];
         let resolved = resolver.resolve_profiles(&dids).await.unwrap();
-        assert_eq!(resolved, 1);
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved[0].is_some());
+        assert!(resolved[1].is_some());
 
         assert_eq!(
             profile_fetcher
@@ -346,7 +364,7 @@ mod tests {
         );
 
         let resolved = resolver.resolve_profiles(&[]).await.unwrap();
-        assert_eq!(resolved, 0);
+        assert!(resolved.is_empty());
     }
 
     #[tokio::test]

@@ -183,12 +183,12 @@ impl TurboCache {
         None
     }
 
-    pub fn get_user_profiles(&self, dids: &[String]) -> Vec<Option<Arc<BlueskyProfile>>> {
+    pub fn get_user_profiles(&self, dids: &[Arc<str>]) -> Vec<Option<Arc<BlueskyProfile>>> {
         let mut profiles = Vec::with_capacity(dids.len());
         let mut misses = 0_u64;
 
         for did in dids {
-            match self.user_cache.get(did) {
+            match self.user_cache.get(did.as_ref()) {
                 Some(profile) => profiles.push(Some(profile)),
                 None => {
                     misses += 1;
@@ -210,7 +210,11 @@ impl TurboCache {
         profiles
     }
 
-    pub fn set_user_profile(&self, did: String, profile: Arc<BlueskyProfile>) {
+    pub fn set_user_profile(&self, did: impl Into<String>, profile: Arc<BlueskyProfile>) {
+        let did: String = did.into();
+        // Pre-compute the serialized fragment once per profile so hydrated
+        // metadata can splice it verbatim (one-time cost, amortized over reuse).
+        let _ = profile.serialized_json();
         self.user_cache.insert(did.clone(), profile);
         trace!("Cached user profile: {}", did);
     }
@@ -480,6 +484,7 @@ pub struct CacheMetricsSnapshot {
 mod tests {
     use super::*;
     use crate::client::{BlueskyOperation, UpstreamFailureCategory};
+    use std::sync::OnceLock;
 
     fn failure(fingerprint: &str) -> HydrationFailure {
         HydrationFailure {
@@ -512,6 +517,7 @@ mod tests {
             indexed_at: None,
             created_at: None,
             labels: None,
+            serialized: OnceLock::new(),
         };
 
         cache.set_user_profile("did:plc:test".to_string(), Arc::new(profile.clone()));
@@ -545,6 +551,7 @@ mod tests {
                 indexed_at: None,
                 created_at: None,
                 labels: None,
+                serialized: OnceLock::new(),
             },
             text: "Hello world".to_string(),
             created_at: chrono::Utc::now(),
@@ -593,6 +600,7 @@ mod tests {
             indexed_at: None,
             created_at: None,
             labels: None,
+            serialized: OnceLock::new(),
         };
 
         cache.set_user_profile("did:plc:test1".to_string(), Arc::new(profile));

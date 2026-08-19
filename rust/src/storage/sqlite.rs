@@ -346,7 +346,9 @@ impl SQLiteStore {
         let message: serde_json::Value = serde_json::from_str(&message_str)?;
         let hydrated_metadata: serde_json::Value = serde_json::from_str(&metadata_str)?;
 
-        let message = serde_json::from_value(message)?;
+        let mut message: crate::models::jetstream::JetstreamMessage =
+            serde_json::from_value(message)?;
+        message.populate_record_from_wire(&message_str);
         let mut hydrated_metadata: crate::models::enriched::HydratedMetadata =
             serde_json::from_value(hydrated_metadata)?;
         if let Ok(quality) = row.try_get::<String, _>("hydration_quality") {
@@ -656,7 +658,7 @@ impl SQLiteStore {
             0.0
         };
 
-        let should_vacuum = bytes_freed as i64 >= vacuum_min_bytes_freed as i64
+        let should_vacuum = bytes_freed >= vacuum_min_bytes_freed as i64
             || percent_freed >= vacuum_min_percent_freed;
 
         let mut vacuum_pending = false;
@@ -839,18 +841,19 @@ mod tests {
     fn test_record(seq: u64) -> EnrichedRecord {
         EnrichedRecord::new_with_timestamp(
             JetstreamMessage {
-                did: "did:plc:stored".to_string(),
+                did: "did:plc:stored".into(),
                 time_us: Some(1_000_000 + seq),
                 seq: Some(seq),
                 kind: MessageKind::Commit,
-                commit: Some(CommitData {
-                    rev: Some("rev-1".to_string()),
+                commit: Some(Box::new(CommitData {
+                    rev: Some("rev-1".into()),
                     operation_type: OperationType::Create,
-                    collection: Some("app.bsky.feed.post".to_string()),
-                    rkey: Some(format!("post-{seq}")),
+                    collection: Some("app.bsky.feed.post".into()),
+                    rkey: Some(format!("post-{seq}").into()),
                     record: None,
-                    cid: Some(format!("cid-{seq}")),
-                }),
+                    cid: Some(format!("cid-{seq}").into()),
+                })),
+                raw_json: None,
             },
             Utc::now(),
         )

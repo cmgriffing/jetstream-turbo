@@ -6,3 +6,5 @@ pub mod record_view;
 pub mod recovery;
 
 pub use errors::{TurboError, TurboResult};
+
+pub mod fast_parse;

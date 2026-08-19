@@ -172,18 +172,21 @@ mod tests {
     fn test_generate_message_id() {
         let record = EnrichedRecord {
             message: crate::models::jetstream::JetstreamMessage {
-                did: "did:plc:test".to_string(),
+                did: "did:plc:test".into(),
                 seq: Some(12345),
                 time_us: Some(1640995200000000),
                 kind: crate::models::jetstream::MessageKind::Commit,
-                commit: Some(crate::models::jetstream::CommitData {
-                    rev: Some("test-rev".to_string()),
+                commit: Some(Box::new(crate::models::jetstream::CommitData {
+                    rev: Some("test-rev".into()),
                     operation_type: crate::models::jetstream::OperationType::Create,
-                    collection: Some("app.bsky.feed.post".to_string()),
-                    rkey: Some("test".to_string()),
-                    record: Some(serde_json::json!({"text": "Hello world"})),
-                    cid: Some("bafyrei".to_string()),
-                }),
+                    collection: Some("app.bsky.feed.post".into()),
+                    rkey: Some("test".into()),
+                    record: Some(crate::models::jetstream::RecordValue::from_value(
+                        simd_json::json!({"text": "Hello world"}),
+                    )),
+                    cid: Some("bafyrei".to_string().into()),
+                })),
+                raw_json: None,
             },
             hydrated_metadata: crate::models::enriched::HydratedMetadata::default(),
             processed_at: chrono::Utc::now(),

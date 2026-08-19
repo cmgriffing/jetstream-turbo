@@ -25,6 +25,22 @@ pub struct EnrichedRecord {
     pub metrics: ProcessingMetrics,
 }
 
+/// Serialize the author profile by splicing its pre-computed JSON fragment
+/// (see `BlueskyProfile::serialized_json`) instead of re-walking the struct.
+fn serialize_author_profile_spliced<S>(
+    profile: &Option<Arc<BlueskyProfile>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match profile {
+        Some(profile) => serializer
+            .serialize_newtype_struct(simd_json::serde::RAW_VALUE_TOKEN, profile.serialized_json()),
+        None => serializer.serialize_none(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct HydratedMetadata {
@@ -34,7 +50,10 @@ pub struct HydratedMetadata {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub degradation_summaries: Vec<HydrationFailure>,
     /// Author profile information
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_author_profile_spliced"
+    )]
     pub author_profile: Option<Arc<BlueskyProfile>>,
     /// Profiles of mentioned users
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -175,11 +194,12 @@ impl EnrichedRecord {
 
     #[inline(always)]
     pub fn get_text(&self) -> Option<&str> {
+        use simd_json::prelude::*;
         self.message
             .commit
             .as_ref()
             .and_then(|c| c.record.as_ref())
-            .and_then(|r| r.get("text").and_then(|v| v.as_str()))
+            .and_then(|r| r.value().get("text").and_then(|v| v.as_str()))
     }
 
     #[inline(always)]
@@ -232,24 +252,27 @@ impl HydratedMetadata {
 mod tests {
     use super::*;
     use crate::client::{BlueskyOperation, UpstreamFailureCategory};
-    use crate::models::jetstream::{CommitData, MessageKind, OperationType};
+    use crate::models::jetstream::{CommitData, MessageKind, OperationType, RecordValue};
     use serde_json::json;
 
     #[test]
     fn test_enriched_record_creation() {
         let message = JetstreamMessage {
-            did: "did:plc:test".to_string(),
+            did: "did:plc:test".into(),
             time_us: Some(1640995200000000),
             seq: Some(12345),
             kind: MessageKind::Commit,
-            commit: Some(CommitData {
-                rev: Some("test-rev".to_string()),
+            commit: Some(Box::new(CommitData {
+                rev: Some("test-rev".into()),
                 operation_type: OperationType::Create,
-                collection: Some("app.bsky.feed.post".to_string()),
-                rkey: Some("test123".to_string()),
-                record: Some(json!({"text": "Hello world"})),
-                cid: Some("bafyrei".to_string()),
-            }),
+                collection: Some("app.bsky.feed.post".into()),
+                rkey: Some("test123".into()),
+                record: Some(RecordValue::from_value(
+                    simd_json::json!({"text": "Hello world"}),
+                )),
+                cid: Some("bafyrei".to_string().into()),
+            })),
+            raw_json: None,
         };
 
         let enriched = EnrichedRecord::new(message);
@@ -260,18 +283,19 @@ mod tests {
     #[test]
     fn test_cache_hit_rate_calculation() {
         let mut enriched = EnrichedRecord::new(JetstreamMessage {
-            did: "did:plc:test".to_string(),
+            did: "did:plc:test".into(),
             time_us: Some(1640995200000000),
             seq: Some(12345),
             kind: MessageKind::Commit,
-            commit: Some(CommitData {
-                rev: Some("test-rev".to_string()),
+            commit: Some(Box::new(CommitData {
+                rev: Some("test-rev".into()),
                 operation_type: OperationType::Create,
-                collection: Some("app.bsky.feed.post".to_string()),
-                rkey: Some("test123".to_string()),
-                record: Some(json!({"text": "Hello"})),
-                cid: Some("bafyrei".to_string()),
-            }),
+                collection: Some("app.bsky.feed.post".into()),
+                rkey: Some("test123".into()),
+                record: Some(RecordValue::from_value(simd_json::json!({"text": "Hello"}))),
+                cid: Some("bafyrei".to_string().into()),
+            })),
+            raw_json: None,
         });
 
         enriched.metrics.cache_hits = 8;
@@ -284,18 +308,21 @@ mod tests {
     #[test]
     fn test_empty_hydrated_metadata_serializes_compactly() {
         let message = JetstreamMessage {
-            did: "did:plc:test".to_string(),
+            did: "did:plc:test".into(),
             time_us: Some(1640995200000000),
             seq: Some(12345),
             kind: MessageKind::Commit,
-            commit: Some(CommitData {
-                rev: Some("test-rev".to_string()),
+            commit: Some(Box::new(CommitData {
+                rev: Some("test-rev".into()),
                 operation_type: OperationType::Create,
-                collection: Some("app.bsky.feed.post".to_string()),
-                rkey: Some("test123".to_string()),
-                record: Some(json!({"text": "Hello world"})),
-                cid: Some("bafyrei".to_string()),
-            }),
+                collection: Some("app.bsky.feed.post".into()),
+                rkey: Some("test123".into()),
+                record: Some(RecordValue::from_value(
+                    simd_json::json!({"text": "Hello world"}),
+                )),
+                cid: Some("bafyrei".to_string().into()),
+            })),
+            raw_json: None,
         };
 
         let enriched = EnrichedRecord::new(message);

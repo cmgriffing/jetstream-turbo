@@ -74,7 +74,10 @@ impl SourceEventId {
                 commit.collection.as_deref().unwrap_or_default(),
             );
             push_component(&mut identity, commit.rkey.as_deref().unwrap_or_default());
-            push_component(&mut identity, commit.cid.as_deref().unwrap_or_default());
+            push_component(
+                &mut identity,
+                commit.cid.as_ref().map(|c| c.as_str()).unwrap_or_default(),
+            );
         }
 
         Self(identity)
@@ -227,18 +230,19 @@ mod tests {
 
     fn message(seq: u64) -> JetstreamMessage {
         JetstreamMessage {
-            did: "did:plc:test".to_string(),
+            did: "did:plc:test".into(),
             time_us: Some(1_640_995_200_000_000),
             seq: Some(seq),
             kind: MessageKind::Commit,
-            commit: Some(CommitData {
-                rev: Some("rev-1".to_string()),
+            commit: Some(Box::new(CommitData {
+                rev: Some("rev-1".into()),
                 operation_type: OperationType::Create,
-                collection: Some("app.bsky.feed.post".to_string()),
-                rkey: Some("post-1".to_string()),
+                collection: Some("app.bsky.feed.post".into()),
+                rkey: Some("post-1".into()),
                 record: None,
-                cid: Some("bafy-test".to_string()),
-            }),
+                cid: Some("bafy-test".to_string().into()),
+            })),
+            raw_json: None,
         }
     }
 
@@ -254,7 +258,7 @@ mod tests {
     fn source_event_id_distinguishes_commit_identity() {
         let original = message(10);
         let mut changed = original.clone();
-        changed.commit.as_mut().unwrap().rkey = Some("post-2".to_string());
+        changed.commit.as_mut().unwrap().rkey = Some("post-2".into());
 
         assert_ne!(
             SourceEventId::from_message(&original),

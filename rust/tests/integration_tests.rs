@@ -5,8 +5,10 @@ mod tests {
     use jetstream_turbo_rs::hydration::TurboCache;
     use jetstream_turbo_rs::models::{
         bluesky::BlueskyProfile,
+        jetstream::RecordValue,
         jetstream::{JetstreamMessage, MessageKind, OperationType},
     };
+    use std::sync::OnceLock;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -98,6 +100,7 @@ mod tests {
             indexed_at: None,
             created_at: None,
             labels: None,
+            serialized: OnceLock::new(),
         };
 
         // Benchmark cache operations
@@ -170,13 +173,14 @@ mod tests {
         }
         "#;
 
-        let message: JetstreamMessage = serde_json::from_str(message_json).unwrap();
+        let mut message: JetstreamMessage = serde_json::from_str(message_json).unwrap();
+        message.populate_record_from_wire(message_json);
 
         // Test message extraction
         assert_eq!(message.extract_did(), "did:plc:alice");
         assert_eq!(
             message.extract_at_uri(),
-            Some("at://did:plc:alice/app.bsky.feed.post/3jk7v7mjpxq3y".to_string())
+            Some("at://did:plc:alice/app.bsky.feed.post/3jk7v7mjpxq3y".into())
         );
 
         // Test DID extraction from mentions via RecordView
@@ -186,7 +190,8 @@ mod tests {
                 .commit
                 .as_ref()
                 .and_then(|c| c.record.as_ref())
-                .unwrap(),
+                .unwrap()
+                .value(),
         );
         let mut mentioned_dids: Vec<String> = Vec::new();
         for facet in rv.facets() {
@@ -200,7 +205,7 @@ mod tests {
         }
         mentioned_dids.sort();
         mentioned_dids.dedup();
-        assert!(mentioned_dids.contains(&"did:plc:bob".to_string()));
+        assert!(mentioned_dids.contains(&"did:plc:bob".into()));
         assert!(!mentioned_dids.is_empty());
     }
 
@@ -213,18 +218,23 @@ mod tests {
 
         // 2. Simulate message reception
         let messages = vec![JetstreamMessage {
-            did: "did:plc:user1".to_string(),
+            did: "did:plc:user1".into(),
             seq: Some(1),
             time_us: Some(1704067200000000),
             kind: MessageKind::Commit,
-            commit: Some(jetstream_turbo_rs::models::jetstream::CommitData {
-                rev: Some("test-rev".to_string()),
-                operation_type: OperationType::Create,
-                collection: Some("app.bsky.feed.post".to_string()),
-                rkey: Some("1".to_string()),
-                record: Some(serde_json::json!({"text": "Hello world"})),
-                cid: Some("cid1".to_string()),
-            }),
+            commit: Some(Box::new(
+                jetstream_turbo_rs::models::jetstream::CommitData {
+                    rev: Some("test-rev".into()),
+                    operation_type: OperationType::Create,
+                    collection: Some("app.bsky.feed.post".into()),
+                    rkey: Some("1".into()),
+                    record: Some(RecordValue::from_value(
+                        simd_json::json!({"text": "Hello world"}),
+                    )),
+                    cid: Some("cid1".to_string().into()),
+                },
+            )),
+            raw_json: None,
         }];
 
         // 3. Process messages and simulate hydration
@@ -249,6 +259,7 @@ mod tests {
                     indexed_at: None,
                     created_at: None,
                     labels: None,
+                    serialized: OnceLock::new(),
                 };
 
                 cache.set_user_profile(author_did.to_string(), std::sync::Arc::new(new_profile));

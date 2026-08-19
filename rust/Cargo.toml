@@ -66,6 +66,12 @@ moka = { version = "0.12", features = ["sync", "future"] }
 dashmap = "6.1"
 uuid = { version = "1.11", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+# Small-string type: keeps short DIDs/keys in an inline buffer (no heap alloc).
+compact_str = { version = "0.10", features = ["serde"] }
+# SIMD byte search for the fast envelope parsers.
+memchr = "2.7"
+# raw_entry API for single-hash dedup lookups (same hashbrown 0.14 as ahash).
+hashbrown = { version = "0.14", features = ["raw"] }
 
 # Metrics
 metrics = "0.24"
@@ -117,3 +123,6 @@ harness = false
 [[bench]]
 name = "regression"
 harness = false
+
+[patch.crates-io]
+simd-json = { path = "vendor/simd-json" }
