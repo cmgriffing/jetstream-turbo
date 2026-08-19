@@ -38,11 +38,14 @@ pub fn parse_envelope_fast(wire: &str) -> Option<ParsedEnvelope> {
             return None;
         }
         let start = i + 1;
-        let rel = memchr::memchr(b'"', &b[start..])?;
-        let j = start + rel;
-        if memchr::memchr(b'\\', &b[start..j]).is_some() {
+        // One SIMD pass over both interesting bytes: a backslash anywhere before
+        // the closing quote means an escape (tape fallback), exactly like the
+        // original byte loop (first backslash aborts).
+        let rel = memchr::memchr2(b'"', b'\\', &b[start..])?;
+        if b[start + rel] == b'\\' {
             return None; // escapes: fall back to the tape parser
         }
+        let j = start + rel;
         Some((std::str::from_utf8(&b[start..j]).ok()?, j + 1))
     }
 
@@ -358,11 +361,11 @@ pub fn parse_envelope_shape(wire: &str) -> Option<ParsedEnvelope> {
             return None;
         }
         let start = i + 1;
-        let rel = memchr::memchr(b'"', &b[start..])?;
-        let j = start + rel;
-        if memchr::memchr(b'\\', &b[start..j]).is_some() {
+        let rel = memchr::memchr2(b'"', b'\\', &b[start..])?;
+        if b[start + rel] == b'\\' {
             return None;
         }
+        let j = start + rel;
         Some((std::str::from_utf8(&b[start..j]).ok()?, j + 1))
     }
 
