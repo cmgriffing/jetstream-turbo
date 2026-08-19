@@ -16,7 +16,6 @@ use tracing::info;
 
 struct MessageContext {
     message: JetstreamMessage,
-    author_did: String,
     is_post: bool,
     mentioned_dids: Vec<String>,
     post_uris: Vec<String>,
@@ -124,7 +123,6 @@ where
     fn hydrate_one(
         &self,
         message: JetstreamMessage,
-        author_did: String,
         is_post: bool,
         mentioned_dids: Vec<String>,
         post_uris: Vec<String>,
@@ -135,22 +133,29 @@ where
         let start_time = Instant::now();
 
         let span = tracing::Span::current();
-        span.record("did", &author_did);
+        // Borrow the did from the message; the lookup below returns owned clones
+        // so the borrow ends before `message` is moved into the enriched record.
+        let author_did = message.extract_did();
+        span.record("did", author_did);
 
-        let mut enriched = EnrichedRecord::new_with_timestamp(message, processed_at);
-        enriched.hydrated_metadata.hydration_quality = HydrationQuality::Complete;
-
-        if is_post {
-            match profiles.get(&author_did) {
+        let author_profile = if is_post {
+            match profiles.get(author_did) {
                 Some(profile) => {
                     span.record("cache_hit", true);
-                    enriched.hydrated_metadata.author_profile = Some(Arc::clone(profile));
+                    Some(Arc::clone(profile))
                 }
                 None => {
                     span.record("cache_hit", false);
+                    None
                 }
             }
-        }
+        } else {
+            None
+        };
+
+        let mut enriched = EnrichedRecord::new_with_timestamp(message, processed_at);
+        enriched.hydrated_metadata.hydration_quality = HydrationQuality::Complete;
+        enriched.hydrated_metadata.author_profile = author_profile;
 
         for did in &mentioned_dids {
             if let Some(profile) = profiles.get(did) {
@@ -213,7 +218,6 @@ where
         let mut contexts = Vec::with_capacity(message_count);
 
         for message in messages {
-            let author_did = message.extract_did().to_string();
             let is_post = message
                 .commit
                 .as_ref()
@@ -227,7 +231,7 @@ where
                 .map(|r| extract_refs_from_view(&RecordView::new(r)))
                 .unwrap_or_default();
 
-            unique_dids.insert(author_did.clone());
+            unique_dids.insert(message.extract_did().to_string());
             for did in &mentioned_dids {
                 unique_dids.insert(did.clone());
             }
@@ -237,7 +241,6 @@ where
 
             contexts.push(MessageContext {
                 message,
-                author_did,
                 is_post,
                 mentioned_dids,
                 post_uris,
@@ -299,7 +302,6 @@ where
         for ctx in contexts {
             let enriched = self.hydrate_one(
                 ctx.message,
-                ctx.author_did,
                 ctx.is_post,
                 ctx.mentioned_dids,
                 ctx.post_uris,
