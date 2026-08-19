@@ -17,13 +17,16 @@
 
 ## Done (do not re-try)
 
-- Hydrate: ahash sets/maps, single-pass profile resolution, sync hydrate_one, merged traversal, single get/match, Arc<str>-indexed profile attachment.
-- OwnedValue record (parse+serialize).
-- Thread-local ParseScratch reuse for parse_message.
-- dead per-message Instant measurement removal.
+- Hydrate: ahash sets/maps, single-pass profile resolution, sync hydrate_one, merged traversal, single get/match, Arc<str>-indexed profile attachment, per-batch span.
+- OwnedValue record, then wire-form lazy records (RecordValue) + substring-shortcut ref extraction.
+- Thread-local ParseScratch reuse; dead Instant removal; raw_json move-not-clone (both paths).
+- Raw-message splice via vendored simd-json raw-write hook; metadata profile fragment splice.
+- Fast envelope parsers: parse_envelope_shape (fixed-order, +4.6% A/B-verified) + parse_envelope_fast (generic strict) + tape fallback.
+- Box<CommitData> struct shrink.
+- **Honesty fix**: `#[serde(skip_deserializing)]` on record (was skip — omitted records from fixture wires, inflating measurements).
 
-## Final state (27+ experiments, all kept)
+## Final state (80+ experiments, all kept)
 
-- Steady state ~780-800k msgs/sec (+65-69% over 474k baseline), load-dependent. CI-clean, bench untouched.
-- All phases at measured floors: parse 4.5ms (tape), hydrate 2.0ms (moka-bound resolve 66ns/get), serialize 5.2ms (record 1.1 + envelope 1.8 + metadata 1.8 + alloc 0.5).
-- Remaining ideas ≤0.5% and rejected: banner-null skip (format change), entry-prepass (production alloc regression), mirror cache (unbounded growth), parallel hydrate (gaming), custom Serialize (== derive), ARM string path (already NEON).
+- HONEST steady state ~0.97-1.22M msgs/sec (+105-153% over the honest 474k baseline = 2x), load-dependent (4.7-9). CI-equivalent green, bench untouched.
+- All phases at measured floors: parse (fast parsers + captures), hydrate (moka-bound resolve 66ns/get), serialize (splices + harness-locked to_string allocs).
+- Declined with reasons: entry-map did_index (production dup allocs), banner-null skip (format risk), mirror cache (unbounded), parallel hydrate (gaming), memchr on short strings (two A/B-confirmed regressions), tape+manual-walk hybrid (measured no-win), skipping the escape check in the shape parser (silent-corruption risk).
