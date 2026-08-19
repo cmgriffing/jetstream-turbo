@@ -211,6 +211,9 @@ impl TurboCache {
     }
 
     pub fn set_user_profile(&self, did: String, profile: Arc<BlueskyProfile>) {
+        // Pre-compute the serialized fragment once per profile so hydrated
+        // metadata can splice it verbatim (one-time cost, amortized over reuse).
+        let _ = profile.serialized_json();
         self.user_cache.insert(did.clone(), profile);
         trace!("Cached user profile: {}", did);
     }
@@ -479,6 +482,7 @@ pub struct CacheMetricsSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::OnceLock;
     use crate::client::{BlueskyOperation, UpstreamFailureCategory};
 
     fn failure(fingerprint: &str) -> HydrationFailure {
@@ -512,6 +516,7 @@ mod tests {
             indexed_at: None,
             created_at: None,
             labels: None,
+            serialized: OnceLock::new(),
         };
 
         cache.set_user_profile("did:plc:test".to_string(), Arc::new(profile.clone()));
@@ -545,6 +550,7 @@ mod tests {
                 indexed_at: None,
                 created_at: None,
                 labels: None,
+                serialized: OnceLock::new(),
             },
             text: "Hello world".to_string(),
             created_at: chrono::Utc::now(),
@@ -593,6 +599,7 @@ mod tests {
             indexed_at: None,
             created_at: None,
             labels: None,
+            serialized: OnceLock::new(),
         };
 
         cache.set_user_profile("did:plc:test1".to_string(), Arc::new(profile));

@@ -20,7 +20,7 @@ use jetstream_turbo_rs::testing::{
 use jetstream_turbo_rs::turbocharger::{PipelineProgress, PipelineStage};
 
 use std::hint::black_box;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 use tokio::sync::broadcast;
@@ -50,6 +50,7 @@ fn create_test_profile(i: usize) -> BlueskyProfile {
         indexed_at: None,
         created_at: None,
         labels: None,
+        serialized: OnceLock::new(),
     }
 }
 

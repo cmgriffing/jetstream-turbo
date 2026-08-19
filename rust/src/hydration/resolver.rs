@@ -234,6 +234,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::OnceLock;
     use crate::client::{BlueskyOperation, HydrationFailure, UpstreamFailureCategory};
     use crate::models::bluesky::{BlueskyPost, BlueskyProfile};
     use crate::testing::mocks::{MockPostFetcher, MockProfileFetcher};
@@ -262,6 +263,7 @@ mod tests {
             indexed_at: None,
             created_at: None,
             labels: None,
+            serialized: OnceLock::new(),
         }
     }
 

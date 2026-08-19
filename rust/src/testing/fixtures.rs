@@ -3,7 +3,7 @@ use crate::models::{
     bluesky::BlueskyProfile,
     jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType},
 };
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Create a realistic Bluesky post creation message.
 pub fn create_post_message(index: usize) -> JetstreamMessage {
@@ -94,6 +94,7 @@ pub fn create_profile(did: &str) -> BlueskyProfile {
         indexed_at: None,
         created_at: None,
         labels: None,
+        serialized: OnceLock::new(),
     }
 }
 

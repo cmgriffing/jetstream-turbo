@@ -25,6 +25,22 @@ pub struct EnrichedRecord {
     pub metrics: ProcessingMetrics,
 }
 
+/// Serialize the author profile by splicing its pre-computed JSON fragment
+/// (see `BlueskyProfile::serialized_json`) instead of re-walking the struct.
+fn serialize_author_profile_spliced<S>(
+    profile: &Option<Arc<BlueskyProfile>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match profile {
+        Some(profile) => serializer
+            .serialize_newtype_struct(simd_json::serde::RAW_VALUE_TOKEN, profile.serialized_json()),
+        None => serializer.serialize_none(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct HydratedMetadata {
@@ -34,7 +50,10 @@ pub struct HydratedMetadata {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub degradation_summaries: Vec<HydrationFailure>,
     /// Author profile information
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_author_profile_spliced"
+    )]
     pub author_profile: Option<Arc<BlueskyProfile>>,
     /// Profiles of mentioned users
     #[serde(skip_serializing_if = "Vec::is_empty")]

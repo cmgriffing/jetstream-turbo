@@ -8,6 +8,7 @@ mod tests {
         jetstream::RecordValue,
         jetstream::{JetstreamMessage, MessageKind, OperationType},
     };
+    use std::sync::OnceLock;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -99,6 +100,7 @@ mod tests {
             indexed_at: None,
             created_at: None,
             labels: None,
+            serialized: OnceLock::new(),
         };
 
         // Benchmark cache operations
@@ -255,6 +257,7 @@ mod tests {
                     indexed_at: None,
                     created_at: None,
                     labels: None,
+                    serialized: OnceLock::new(),
                 };
 
                 cache.set_user_profile(author_did.to_string(), std::sync::Arc::new(new_profile));
