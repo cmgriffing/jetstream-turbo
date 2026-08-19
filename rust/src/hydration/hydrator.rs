@@ -134,13 +134,18 @@ where
         post_outcomes: &AHashMap<String, PostFetchOutcome>,
         processed_at: chrono::DateTime<chrono::Utc>,
         span: &tracing::Span,
+        span_enabled: bool,
     ) -> TurboResult<EnrichedRecord> {
-        span.record("did", dids[author_index as usize].as_ref());
+        if span_enabled {
+            span.record("did", dids[author_index as usize].as_ref());
+        }
 
         let author_profile = if is_post {
             match &profiles[author_index as usize] {
                 Some(profile) => {
-                    span.record("cache_hit", true);
+                    if span_enabled {
+                        span.record("cache_hit", true);
+                    }
                     Some(Arc::clone(profile))
                 }
                 None => {
@@ -338,6 +343,9 @@ where
         let mut results = Vec::with_capacity(contexts.len());
         let processed_at = chrono::Utc::now();
         let span = tracing::Span::current();
+        // Most callers have no tracing subscriber; skip per-message record()
+        // dispatch entirely in that case (records still happen when enabled).
+        let span_enabled = !span.is_disabled();
         for ctx in contexts {
             let enriched = self.hydrate_one(
                 ctx.message,
@@ -350,6 +358,7 @@ where
                 post_outcomes,
                 processed_at,
                 &span,
+                span_enabled,
             )?;
             results.push(enriched);
         }
