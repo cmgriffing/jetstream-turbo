@@ -49,15 +49,18 @@ pub fn parse_envelope_fast(wire: &str) -> Option<ParsedEnvelope> {
     // Read a u64 (digits only) starting at `i`; returns (value, next).
     #[inline(always)]
     fn read_u64(b: &[u8], i: usize) -> Option<(u64, usize)> {
-        let start = i;
         let mut j = i;
+        let mut value: u64 = 0;
         while j < b.len() && b[j].is_ascii_digit() {
+            // checked ops: overflow falls back to the tape parser, same as a
+            // std parse failure; digits are ASCII so no UTF-8 check needed.
+            value = value.checked_mul(10)?.checked_add((b[j] - b'0') as u64)?;
             j += 1;
         }
-        if j == start {
+        if j == i {
             return None;
         }
-        Some((std::str::from_utf8(&b[start..j]).ok()?.parse().ok()?, j))
+        Some((value, j))
     }
 
     // Skip any JSON value starting at `i`; returns (start, end). Used for the
@@ -366,15 +369,18 @@ pub fn parse_envelope_shape(wire: &str) -> Option<ParsedEnvelope> {
     // Read a u64 (digits only) starting at `i`; returns (value, next).
     #[inline(always)]
     fn read_u64(b: &[u8], i: usize) -> Option<(u64, usize)> {
-        let start = i;
         let mut j = i;
+        let mut value: u64 = 0;
         while j < b.len() && b[j].is_ascii_digit() {
+            // checked ops: overflow falls back to the tape parser, same as a
+            // std parse failure; digits are ASCII so no UTF-8 check needed.
+            value = value.checked_mul(10)?.checked_add((b[j] - b'0') as u64)?;
             j += 1;
         }
-        if j == start {
+        if j == i {
             return None;
         }
-        Some((std::str::from_utf8(&b[start..j]).ok()?.parse().ok()?, j))
+        Some((value, j))
     }
 
     // Skip a JSON object starting at `i` (points at '{'); returns (start, end).
