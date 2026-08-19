@@ -544,8 +544,7 @@ fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
         scratch.input.clear();
         scratch.input.extend_from_slice(text.as_bytes());
         let ParseScratch { buffers, input } = &mut *scratch;
-        let tape = simd_json::to_tape_with_buffers(input, buffers)?;
-        tape.deserialize().map_err(TurboError::from)
+        simd_json::serde::from_slice_with_buffers(input, buffers).map_err(TurboError::from)
     })?;
 
     // Validate required fields
