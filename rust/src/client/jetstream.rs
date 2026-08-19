@@ -541,9 +541,10 @@ fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
     // simd-json requires mutable input and uses unsafe SIMD operations internally;
     // the library handles safety internally through careful validation.
     // Keep a pristine copy of the wire JSON so serializing the message can splice
-    // it verbatim instead of re-walking the struct through serde.
-    let raw_json: Box<str> = Box::from(text);
-
+    // it verbatim instead of re-walking the struct through serde. The record's raw
+    // bytes are shared with this buffer (span into the same Arc), so there is no
+    // duplicate copy of the record sub-range.
+    let raw_json: Arc<str> = Arc::from(text);
     // Fast paths: the fixed-shape parser (standard wire order, fixed key
     // compares) and the generic strict parser (any order) avoid the tape.
     // Anything they do not fully handle falls back to the tape below, so
@@ -551,15 +552,17 @@ fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
     let fast = crate::models::fast_parse::parse_envelope_shape(text)
         .or_else(|| crate::models::fast_parse::parse_envelope_fast(text));
     if let Some((mut message, record_span)) = fast {
-        let record_raw: Option<Box<str>> =
-            record_span.map(|(start, end)| raw_json[start..end].into());
-        message.raw_json = Some(raw_json);
         if message.commit.is_some() {
-            if let Some(raw) = record_raw {
+            if let Some((start, end)) = record_span {
                 message.commit.as_mut().unwrap().record =
-                    Some(crate::models::jetstream::RecordValue::from_raw(raw));
+                    Some(crate::models::jetstream::RecordValue::from_span(
+                        Arc::clone(&raw_json),
+                        start,
+                        end,
+                    ));
             }
         }
+        message.raw_json = Some(raw_json);
         if !message.did.is_empty() {
             return Ok(message);
         }
@@ -583,14 +586,14 @@ fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
         let ParseScratch { buffers, input } = &mut *scratch;
         simd_json::serde::from_slice_with_buffers(input, buffers).map_err(TurboError::from)
     })?;
-    let record_raw: Option<Box<str>> = record_span.map(|(start, end)| raw_json[start..end].into());
-    message.raw_json = Some(raw_json);
     if message.commit.is_some() {
-        if let Some(raw) = record_raw {
-            message.commit.as_mut().unwrap().record =
-                Some(crate::models::jetstream::RecordValue::from_raw(raw));
+        if let Some((start, end)) = record_span {
+            message.commit.as_mut().unwrap().record = Some(
+                crate::models::jetstream::RecordValue::from_span(Arc::clone(&raw_json), start, end),
+            );
         }
     }
+    message.raw_json = Some(raw_json);
 
     // Validate required fields
     if message.did.is_empty() {

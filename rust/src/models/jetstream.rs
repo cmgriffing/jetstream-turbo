@@ -1,7 +1,7 @@
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 use simd_json::OwnedValue;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 /// Sentinel used by the vendored simd-json serializer to splice pre-serialized
 /// JSON verbatim (see vendor/simd-json RAW_VALUE_TOKEN).
@@ -78,7 +78,7 @@ pub struct JetstreamMessage {
     /// Serializing the message then emits these bytes verbatim (identical JSON,
     /// no re-walk through serde). `None` for programmatically-built messages.
     #[serde(skip)]
-    pub raw_json: Option<Box<str>>,
+    pub raw_json: Option<Arc<str>>,
 }
 
 impl Serialize for JetstreamMessage {
@@ -108,28 +108,53 @@ impl Serialize for JetstreamMessage {
 /// The raw wire JSON is kept verbatim (cheap to store and scan); the
 /// `OwnedValue` tree is parsed on first actual read. Records without
 /// reply/embed/facets never pay the tree-build cost.
+///
+/// For parsed messages the raw bytes are shared with the message's `raw_json`
+/// (one backing allocation, no duplicate copy of the record sub-range);
+/// `Clone` is then a refcount bump instead of a deep copy.
 #[derive(Debug)]
 pub struct RecordValue {
-    raw: Box<str>,
+    backing: Arc<str>,
+    /// Byte span of this record within `backing`.
+    start: usize,
+    end: usize,
     value: OnceLock<OwnedValue>,
 }
 
 impl RecordValue {
     /// Build from a raw JSON string captured from the wire (no tree build).
     pub fn from_raw(raw: Box<str>) -> Self {
+        let backing: Arc<str> = Arc::from(raw);
+        let end = backing.len();
         Self {
-            raw,
+            backing,
+            start: 0,
+            end,
+            value: OnceLock::new(),
+        }
+    }
+
+    /// Build from a byte span into a shared backing buffer (the message's wire
+    /// JSON), avoiding a duplicate copy of the record's bytes.
+    #[inline(always)]
+    pub fn from_span(backing: Arc<str>, start: usize, end: usize) -> Self {
+        Self {
+            backing,
+            start,
+            end,
             value: OnceLock::new(),
         }
     }
 
     /// Build from an already-materialized value (fixtures/tests).
     pub fn from_value(value: OwnedValue) -> Self {
-        let raw = simd_json::to_string(&value)
-            .map(String::into_boxed_str)
-            .unwrap_or_default();
+        let raw = simd_json::to_string(&value).unwrap_or_default();
+        let backing: Arc<str> = Arc::from(raw);
+        let end = backing.len();
         Self {
-            raw,
+            backing,
+            start: 0,
+            end,
             value: OnceLock::from(value),
         }
     }
@@ -137,14 +162,14 @@ impl RecordValue {
     /// The raw JSON bytes of this record.
     #[inline(always)]
     pub fn raw(&self) -> &str {
-        &self.raw
+        &self.backing[self.start..self.end]
     }
 
     /// The materialized JSON tree, parsed on first access.
     pub fn value(&self) -> &OwnedValue {
         self.value.get_or_init(|| {
             // The raw came from a parsed message or a fixture, so it is valid JSON.
-            let mut owned = self.raw.to_string();
+            let mut owned = self.raw().to_string();
             // SAFETY: the raw came from a parsed message or a fixture, so it is
             // valid JSON; the parse rewrites it in place and we own the buffer.
             unsafe { simd_json::from_str(&mut owned).expect("record raw must be valid JSON") }
@@ -155,7 +180,9 @@ impl RecordValue {
 impl Clone for RecordValue {
     fn clone(&self) -> Self {
         Self {
-            raw: self.raw.clone(),
+            backing: Arc::clone(&self.backing),
+            start: self.start,
+            end: self.end,
             value: OnceLock::new(),
         }
     }
@@ -321,7 +348,7 @@ mod tests {
 
         // With raw_json present, the exact wire bytes are emitted verbatim.
         let mut with_raw = message.clone();
-        with_raw.raw_json = Some(Box::from(raw));
+        with_raw.raw_json = Some(Arc::from(raw));
         let out2 = simd_json::to_string(&with_raw).unwrap();
         assert_eq!(out2, raw);
         // Re-parsing the spliced output yields the same message.
