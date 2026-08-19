@@ -658,7 +658,7 @@ impl SQLiteStore {
             0.0
         };
 
-        let should_vacuum = bytes_freed as i64 >= vacuum_min_bytes_freed as i64
+        let should_vacuum = bytes_freed >= vacuum_min_bytes_freed as i64
             || percent_freed >= vacuum_min_percent_freed;
 
         let mut vacuum_pending = false;
