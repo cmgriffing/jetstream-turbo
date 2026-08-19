@@ -314,6 +314,166 @@ pub fn parse_envelope_fast(wire: &str) -> Option<(JetstreamMessage, Option<(usiz
     Some((message, record_span))
 }
 
+/// Fast path for the standard Jetstream wire shape (fixed field order:
+/// did, time_us, seq, kind, commit{rev, operation, collection, rkey, record, cid},
+/// no whitespace). Keys are verified with fixed compares instead of generic
+/// string reads + matching. Returns `None` for any deviation (missing optional
+/// fields, reordered keys, whitespace, escapes, unknown keys) — the caller then
+/// falls back to the generic parser, so correctness is bounded.
+pub fn parse_envelope_shape(wire: &str) -> Option<(JetstreamMessage, Option<(usize, usize)>)> {
+    let b = wire.as_bytes();
+    let mut i = 0usize;
+
+    #[inline(always)]
+    fn peek(b: &[u8], i: usize, pat: &[u8]) -> Option<usize> {
+        if b.len() >= i + pat.len() && &b[i..i + pat.len()] == pat {
+            Some(i + pat.len())
+        } else {
+            None
+        }
+    }
+
+    // Read an unescaped string starting at b[i] == '"'; returns (content, next).
+    #[inline(always)]
+    fn read_unescaped(b: &[u8], i: usize) -> Option<(&str, usize)> {
+        if b.get(i)? != &b'"' {
+            return None;
+        }
+        let start = i + 1;
+        let mut j = i + 1;
+        while j < b.len() && b[j] != b'"' {
+            if b[j] == b'\\' {
+                return None;
+            }
+            j += 1;
+        }
+        if j >= b.len() {
+            return None;
+        }
+        Some((std::str::from_utf8(&b[start..j]).ok()?, j + 1))
+    }
+
+    // Read a u64 (digits only) starting at `i`; returns (value, next).
+    #[inline(always)]
+    fn read_u64(b: &[u8], i: usize) -> Option<(u64, usize)> {
+        let start = i;
+        let mut j = i;
+        while j < b.len() && b[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j == start {
+            return None;
+        }
+        Some((std::str::from_utf8(&b[start..j]).ok()?.parse().ok()?, j))
+    }
+
+    // Skip a JSON object starting at `i` (points at '{'); returns (start, end).
+    #[inline(always)]
+    fn skip_object(b: &[u8], i0: usize) -> Option<(usize, usize)> {
+        let mut i = i0;
+        if b.get(i)? != &b'{' {
+            return None;
+        }
+        let mut depth = 1usize;
+        i += 1;
+        while i < b.len() && depth > 0 {
+            match b[i] {
+                b'"' => {
+                    i += 1;
+                    while i < b.len() && b[i] != b'"' {
+                        if b[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                b'{' => {
+                    depth += 1;
+                    i += 1;
+                }
+                b'}' => {
+                    depth -= 1;
+                    i += 1;
+                }
+                _ => i += 1,
+            }
+        }
+        if depth != 0 {
+            return None;
+        }
+        Some((i0, i))
+    }
+
+    // { "did" : value
+    i = peek(b, i, b"{\"did\":")?;
+    let (did, ni) = read_unescaped(b, i)?;
+    i = ni;
+    // , "time_us" : number
+    i = peek(b, i, b",\"time_us\":")?;
+    let (time_us, ni) = read_u64(b, i)?;
+    i = ni;
+    // , "seq" : number
+    i = peek(b, i, b",\"seq\":")?;
+    let (seq, ni) = read_u64(b, i)?;
+    i = ni;
+    // , "kind" : "commit"
+    i = peek(b, i, b",\"kind\":\"commit\"")?;
+    // , "commit" : {
+    i = peek(b, i, b",\"commit\":{")?;
+    // "rev" : value
+    i = peek(b, i, b"\"rev\":")?;
+    let (rev, ni) = read_unescaped(b, i)?;
+    i = ni;
+    // , "operation" : value
+    i = peek(b, i, b",\"operation\":")?;
+    let (op, ni) = read_unescaped(b, i)?;
+    i = ni;
+    let operation_type = match op {
+        "create" => OperationType::Create,
+        "update" => OperationType::Update,
+        "delete" => OperationType::Delete,
+        _ => OperationType::Unknown,
+    };
+    // , "collection" : value
+    i = peek(b, i, b",\"collection\":")?;
+    let (collection, ni) = read_unescaped(b, i)?;
+    i = ni;
+    // , "rkey" : value
+    i = peek(b, i, b",\"rkey\":")?;
+    let (rkey, ni) = read_unescaped(b, i)?;
+    i = ni;
+    // , "record" : { ... }
+    i = peek(b, i, b",\"record\":")?;
+    let (start, end) = skip_object(b, i)?;
+    let record_span = Some((start, end));
+    i = end;
+    // , "cid" : value
+    i = peek(b, i, b",\"cid\":")?;
+    let (cid, ni) = read_unescaped(b, i)?;
+    i = ni;
+    // }}  (commit close, message close)
+    peek(b, i, b"}}")?;
+
+    let commit = Box::new(CommitData {
+        rev: Some(rev.to_string()),
+        operation_type,
+        collection: Some(collection.to_string()),
+        rkey: Some(rkey.to_string()),
+        record: None,
+        cid: Some(cid.to_string()),
+    });
+    let message = JetstreamMessage {
+        did: did.to_string(),
+        time_us: Some(time_us),
+        seq: Some(seq),
+        kind: MessageKind::Commit,
+        commit: Some(commit),
+        raw_json: None,
+    };
+    Some((message, record_span))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,6 +558,47 @@ mod tests {
             &wire[s..e],
             r#"{"text":"hello","deep":{"a":["x",{"b":2}]}}"#
         );
+    }
+
+    #[test]
+    fn shape_matches_generic_on_standard_wire() {
+        // The benchmark fixture shape must parse identically via both paths.
+        let batch = crate::testing::create_message_batch(50);
+        for m in &batch {
+            let wire = serde_json::to_string(m).unwrap();
+            let (shape, shape_span) =
+                parse_envelope_shape(&wire).unwrap_or_else(|| panic!("shape path failed"));
+            let (generic, generic_span) =
+                parse_envelope_fast(&wire).unwrap_or_else(|| panic!("generic path failed"));
+            assert_eq!(shape.did, generic.did);
+            assert_eq!(shape.time_us, generic.time_us);
+            assert_eq!(shape.seq, generic.seq);
+            assert_eq!(shape.kind, generic.kind);
+            let sc = shape.commit.unwrap();
+            let gc = generic.commit.unwrap();
+            assert_eq!(sc.rev, gc.rev);
+            assert_eq!(sc.operation_type, gc.operation_type);
+            assert_eq!(sc.collection, gc.collection);
+            assert_eq!(sc.rkey, gc.rkey);
+            assert_eq!(sc.cid, gc.cid);
+            assert_eq!(shape_span, generic_span);
+        }
+    }
+
+    #[test]
+    fn shape_falls_back_on_reordered_fields() {
+        let wires = [
+            r#"{"seq":5,"did":"d","kind":"commit","commit":{"operation":"create"}}"#,
+            r#"{"did":"d","kind":"identity"}"#,
+            r#"{"did":"d","time_us":1,"seq":2,"kind":"commit","commit":{"operation":"create","record":{},"rev":"r"}}"#,
+            r#"{"did":"d","time_us":1,"seq":2,"kind":"commit","commit":{"operation":"create","record":{},"cid":"c"} , "extra":1}"#,
+        ];
+        for wire in wires {
+            assert!(
+                parse_envelope_shape(wire).is_none(),
+                "shape should fall back: {wire}"
+            );
+        }
     }
 
     #[test]

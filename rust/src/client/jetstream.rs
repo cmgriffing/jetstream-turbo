@@ -544,10 +544,13 @@ fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
     // it verbatim instead of re-walking the struct through serde.
     let raw_json: Box<str> = Box::from(text);
 
-    // Fast path: strict envelope parser (validated subset, no tape). Anything it
-    // does not fully handle falls back to the tape below, so correctness is
-    // bounded by the tape.
-    if let Some((mut message, record_span)) = crate::models::fast_parse::parse_envelope_fast(text) {
+    // Fast paths: the fixed-shape parser (standard wire order, fixed key
+    // compares) and the generic strict parser (any order) avoid the tape.
+    // Anything they do not fully handle falls back to the tape below, so
+    // correctness is bounded by the tape.
+    let fast = crate::models::fast_parse::parse_envelope_shape(text)
+        .or_else(|| crate::models::fast_parse::parse_envelope_fast(text));
+    if let Some((mut message, record_span)) = fast {
         let record_raw: Option<Box<str>> =
             record_span.map(|(start, end)| raw_json[start..end].into());
         message.raw_json = Some(raw_json);

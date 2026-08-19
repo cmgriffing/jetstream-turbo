@@ -257,8 +257,9 @@ pub struct CommitData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rkey: Option<String>,
     /// Populated post-parse from the wire (see `parse_message`); the value tree
-    /// is built lazily on first read.
-    #[serde(skip)]
+    /// is built lazily on first read.  keeps the field out
+    /// of the wire parse (no tree build) while still serializing it.
+    #[serde(skip_deserializing)]
     pub record: Option<RecordValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
