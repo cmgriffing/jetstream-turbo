@@ -63,6 +63,7 @@ fn realistic_message() -> JetstreamMessage {
             record: Some(realistic_record()),
             cid: Some("bafyreiassbuahzdwy64xwlefqcwh6zk4stb4lhht24oozhxn3fhzomrxg4".to_string()),
         }),
+        raw_json: None,
     }
 }
 

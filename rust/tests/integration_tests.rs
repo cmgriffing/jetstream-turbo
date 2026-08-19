@@ -225,6 +225,7 @@ mod tests {
                 record: Some(simd_json::json!({"text": "Hello world"})),
                 cid: Some("cid1".to_string()),
             }),
+            raw_json: None,
         }];
 
         // 3. Process messages and simulate hydration

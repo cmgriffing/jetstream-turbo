@@ -1139,6 +1139,7 @@ mod tests {
                 record: Some(simd_json::json!({ "text": "hello" })),
                 cid: Some("bafyrei".to_string()),
             }),
+            raw_json: None,
         })
     }
 

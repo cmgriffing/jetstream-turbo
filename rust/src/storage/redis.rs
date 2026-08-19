@@ -184,6 +184,7 @@ mod tests {
                     record: Some(simd_json::json!({"text": "Hello world"})),
                     cid: Some("bafyrei".to_string()),
                 }),
+                raw_json: None,
             },
             hydrated_metadata: crate::models::enriched::HydratedMetadata::default(),
             processed_at: chrono::Utc::now(),

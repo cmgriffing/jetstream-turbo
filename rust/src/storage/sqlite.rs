@@ -851,6 +851,7 @@ mod tests {
                     record: None,
                     cid: Some(format!("cid-{seq}")),
                 }),
+                raw_json: None,
             },
             Utc::now(),
         )

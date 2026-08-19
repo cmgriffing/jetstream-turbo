@@ -539,13 +539,17 @@ fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
     // Use simd-json for faster parsing (2-4x faster than serde_json).
     // simd-json requires mutable input and uses unsafe SIMD operations internally;
     // the library handles safety internally through careful validation.
-    let message: JetstreamMessage = PARSE_SCRATCH.with(|scratch| {
+    // Keep a pristine copy of the wire JSON so serializing the message can splice
+    // it verbatim instead of re-walking the struct through serde.
+    let raw_json: Box<str> = Box::from(text);
+    let mut message: JetstreamMessage = PARSE_SCRATCH.with(|scratch| {
         let mut scratch = scratch.borrow_mut();
         scratch.input.clear();
         scratch.input.extend_from_slice(text.as_bytes());
         let ParseScratch { buffers, input } = &mut *scratch;
         simd_json::serde::from_slice_with_buffers(input, buffers).map_err(TurboError::from)
     })?;
+    message.raw_json = Some(raw_json);
 
     // Validate required fields
     if message.did.is_empty() {
@@ -587,6 +591,7 @@ mod tests {
             seq: source_seq,
             kind: crate::models::jetstream::MessageKind::Account,
             commit: None,
+            raw_json: None,
         };
         IngestionCheckpoint {
             ingress_ordinal: 42,
