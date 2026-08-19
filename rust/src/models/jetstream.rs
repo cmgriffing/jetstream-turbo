@@ -1,6 +1,7 @@
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 use simd_json::OwnedValue;
+use std::sync::OnceLock;
 
 /// Sentinel used by the vendored simd-json serializer to splice pre-serialized
 /// JSON verbatim (see vendor/simd-json RAW_VALUE_TOKEN).
@@ -102,6 +103,149 @@ impl Serialize for JetstreamMessage {
     }
 }
 
+/// A post record whose JSON tree is built lazily.
+///
+/// The raw wire JSON is kept verbatim (cheap to store and scan); the
+/// `OwnedValue` tree is parsed on first actual read. Records without
+/// reply/embed/facets never pay the tree-build cost.
+#[derive(Debug)]
+pub struct RecordValue {
+    raw: Box<str>,
+    value: OnceLock<OwnedValue>,
+}
+
+impl RecordValue {
+    /// Build from a raw JSON string captured from the wire (no tree build).
+    pub fn from_raw(raw: Box<str>) -> Self {
+        Self {
+            raw,
+            value: OnceLock::new(),
+        }
+    }
+
+    /// Build from an already-materialized value (fixtures/tests).
+    pub fn from_value(value: OwnedValue) -> Self {
+        let raw = simd_json::to_string(&value)
+            .map(String::into_boxed_str)
+            .unwrap_or_default();
+        Self {
+            raw,
+            value: OnceLock::from(value),
+        }
+    }
+
+    /// The raw JSON bytes of this record.
+    #[inline(always)]
+    pub fn raw(&self) -> &str {
+        &self.raw
+    }
+
+    /// The materialized JSON tree, parsed on first access.
+    pub fn value(&self) -> &OwnedValue {
+        self.value.get_or_init(|| {
+            // The raw came from a parsed message or a fixture, so it is valid JSON.
+            let mut owned = self.raw.to_string();
+            // SAFETY: the raw came from a parsed message or a fixture, so it is
+            // valid JSON; the parse rewrites it in place and we own the buffer.
+            unsafe { simd_json::from_str(&mut owned).expect("record raw must be valid JSON") }
+        })
+    }
+}
+
+impl Clone for RecordValue {
+    fn clone(&self) -> Self {
+        Self {
+            raw: self.raw.clone(),
+            value: OnceLock::new(),
+        }
+    }
+}
+
+impl Serialize for RecordValue {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.value().serialize(serializer)
+    }
+}
+
+/// Find the byte span of the first object-valued `"record"` key in a Jetstream
+/// wire message (the commit's record). String-aware: keys inside string values
+/// (including escaped quotes) do not match.
+pub(crate) fn find_record_span(wire: &str) -> Option<(usize, usize)> {
+    let bytes = wire.as_bytes();
+    let n = bytes.len();
+    let mut i = 0;
+    while i < n {
+        if bytes[i] == b'"' {
+            let start = i;
+            i += 1;
+            while i < n && bytes[i] != b'"' {
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            if i >= n {
+                return None;
+            }
+            i += 1; // closing quote
+            if &wire[start + 1..i - 1] == "record" {
+                // skip whitespace then expect ':'
+                while i < n && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                if i < n && bytes[i] == b':' {
+                    i += 1;
+                    while i < n && bytes[i].is_ascii_whitespace() {
+                        i += 1;
+                    }
+                    if i < n && bytes[i] == b'{' {
+                        let val_start = i;
+                        let end = scan_container_end(bytes, i, b'{', b'}');
+                        return Some((val_start, end));
+                    }
+                    // record was null/scalar: treat as absent
+                    return None;
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Scan a JSON container starting at `start` (the opening bracket) and return
+/// the index just past its matching close, skipping string content and escapes.
+fn scan_container_end(bytes: &[u8], start: usize, open: u8, close: u8) -> usize {
+    let n = bytes.len();
+    let mut depth = 1usize;
+    let mut i = start + 1;
+    while i < n && depth > 0 {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < n && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            c if c == open => {
+                depth += 1;
+                i += 1;
+            }
+            c if c == close => {
+                depth -= 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    i.min(n)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CommitData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,13 +256,26 @@ pub struct CommitData {
     pub collection: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rkey: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub record: Option<OwnedValue>,
+    /// Populated post-parse from the wire (see `parse_message`); the value tree
+    /// is built lazily on first read.
+    #[serde(skip)]
+    pub record: Option<RecordValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
 }
 
 impl JetstreamMessage {
+    /// Populate the lazily-stored record from a wire-form JSON string. Used by
+    /// deserialization paths that bypass `parse_message` (storage reads, tests).
+    pub fn populate_record_from_wire(&mut self, wire: &str) {
+        if self.commit.is_some() {
+            if let Some((start, end)) = find_record_span(wire) {
+                self.commit.as_mut().unwrap().record =
+                    Some(RecordValue::from_raw(wire[start..end].into()));
+            }
+        }
+    }
+
     #[inline(always)]
     pub fn extract_at_uri(&self) -> Option<String> {
         let commit = self.commit.as_ref()?;

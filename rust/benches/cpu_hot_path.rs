@@ -60,7 +60,9 @@ fn realistic_message() -> JetstreamMessage {
             operation_type: OperationType::Create,
             collection: Some("app.bsky.feed.post".to_string()),
             rkey: Some("3mepgzgiatv23".to_string()),
-            record: Some(realistic_record()),
+            record: Some(
+                jetstream_turbo_rs::models::jetstream::RecordValue::from_value(realistic_record()),
+            ),
             cid: Some("bafyreiassbuahzdwy64xwlefqcwh6zk4stb4lhht24oozhxn3fhzomrxg4".to_string()),
         }),
         raw_json: None,

@@ -346,7 +346,9 @@ impl SQLiteStore {
         let message: serde_json::Value = serde_json::from_str(&message_str)?;
         let hydrated_metadata: serde_json::Value = serde_json::from_str(&metadata_str)?;
 
-        let message = serde_json::from_value(message)?;
+        let mut message: crate::models::jetstream::JetstreamMessage =
+            serde_json::from_value(message)?;
+        message.populate_record_from_wire(&message_str);
         let mut hydrated_metadata: crate::models::enriched::HydratedMetadata =
             serde_json::from_value(hydrated_metadata)?;
         if let Ok(quality) = row.try_get::<String, _>("hydration_quality") {

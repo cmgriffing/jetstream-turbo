@@ -878,7 +878,9 @@ mod tests {
         prometheus_metrics_from_diagnostics, readiness_http_status,
     };
     use crate::models::enriched::EnrichedRecord;
-    use crate::models::jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType};
+    use crate::models::jetstream::{
+        CommitData, JetstreamMessage, MessageKind, OperationType, RecordValue,
+    };
     use crate::turbocharger::{
         CacheStateDiagnostics, HealthDiagnostics, HealthStatus, MemoryPeakDiagnostics,
         NotRedisStateDiagnostics, PipelineProgress, PipelineReadinessState,
@@ -1136,7 +1138,9 @@ mod tests {
                 operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("rkey-1".to_string()),
-                record: Some(simd_json::json!({ "text": "hello" })),
+                record: Some(RecordValue::from_value(
+                    simd_json::json!({ "text": "hello" }),
+                )),
                 cid: Some("bafyrei".to_string()),
             }),
             raw_json: None,

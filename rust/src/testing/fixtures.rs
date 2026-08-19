@@ -1,3 +1,4 @@
+use crate::models::jetstream::RecordValue;
 use crate::models::{
     bluesky::BlueskyProfile,
     jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType},
@@ -20,12 +21,12 @@ pub fn create_post_message(index: usize) -> JetstreamMessage {
             operation_type: OperationType::Create,
             collection: Some("app.bsky.feed.post".to_string()),
             rkey: Some(rkey),
-            record: Some(simd_json::json!({
+            record: Some(RecordValue::from_value(simd_json::json!({
                 "$type": "app.bsky.feed.post",
                 "createdAt": format!("2026-02-13T02:20:{:02}.895Z", index % 60),
                 "text": text,
                 "langs": ["en"]
-            })),
+            }))),
             cid: Some(format!("bafyreia{}", &format!("{index:032x}")[..32])),
         }),
         raw_json: None,
@@ -48,7 +49,7 @@ pub fn create_reply_message(index: usize, parent_did: &str, parent_rkey: &str) -
             operation_type: OperationType::Create,
             collection: Some("app.bsky.feed.post".to_string()),
             rkey: Some(rkey),
-            record: Some(simd_json::json!({
+            record: Some(RecordValue::from_value(simd_json::json!({
                 "$type": "app.bsky.feed.post",
                 "createdAt": format!("2026-02-13T02:21:{:02}.000Z", index % 60),
                 "text": format!("Replying to the post #{}", index),
@@ -62,7 +63,7 @@ pub fn create_reply_message(index: usize, parent_did: &str, parent_rkey: &str) -
                         "uri": parent_uri
                     }
                 }
-            })),
+            }))),
             cid: Some(format!("bafyreireply{index:06}")),
         }),
         raw_json: None,

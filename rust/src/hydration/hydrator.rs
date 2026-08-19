@@ -228,12 +228,20 @@ where
                 .and_then(|c| c.collection.as_ref())
                 .is_some();
 
-            let (mentioned_dids, post_uris) = message
-                .commit
-                .as_ref()
-                .and_then(|c| c.record.as_ref())
-                .map(|r| extract_refs_from_view(&RecordView::new(r)))
-                .unwrap_or_default();
+            let (mentioned_dids, post_uris) =
+                match message.commit.as_ref().and_then(|c| c.record.as_ref()) {
+                    // Records without reply/embed/facets need no tree build: the
+                    // raw wire is scanned directly (fast substring checks).
+                    Some(r)
+                        if !r.raw().contains("\"reply\"")
+                            && !r.raw().contains("\"embed\"")
+                            && !r.raw().contains("\"facets\"") =>
+                    {
+                        (Vec::new(), Vec::new())
+                    }
+                    Some(r) => extract_refs_from_view(&RecordView::new(r.value())),
+                    None => (Vec::new(), Vec::new()),
+                };
 
             let author_index = match did_index.get(message.extract_did()) {
                 Some(&index) => index,

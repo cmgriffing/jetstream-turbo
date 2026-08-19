@@ -180,7 +180,7 @@ impl EnrichedRecord {
             .commit
             .as_ref()
             .and_then(|c| c.record.as_ref())
-            .and_then(|r| r.get("text").and_then(|v| v.as_str()))
+            .and_then(|r| r.value().get("text").and_then(|v| v.as_str()))
     }
 
     #[inline(always)]
@@ -233,7 +233,7 @@ impl HydratedMetadata {
 mod tests {
     use super::*;
     use crate::client::{BlueskyOperation, UpstreamFailureCategory};
-    use crate::models::jetstream::{CommitData, MessageKind, OperationType};
+    use crate::models::jetstream::{CommitData, MessageKind, OperationType, RecordValue};
     use serde_json::json;
 
     #[test]
@@ -248,7 +248,9 @@ mod tests {
                 operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("test123".to_string()),
-                record: Some(simd_json::json!({"text": "Hello world"})),
+                record: Some(RecordValue::from_value(
+                    simd_json::json!({"text": "Hello world"}),
+                )),
                 cid: Some("bafyrei".to_string()),
             }),
             raw_json: None,
@@ -271,7 +273,7 @@ mod tests {
                 operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("test123".to_string()),
-                record: Some(simd_json::json!({"text": "Hello"})),
+                record: Some(RecordValue::from_value(simd_json::json!({"text": "Hello"}))),
                 cid: Some("bafyrei".to_string()),
             }),
             raw_json: None,
@@ -296,7 +298,9 @@ mod tests {
                 operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("test123".to_string()),
-                record: Some(simd_json::json!({"text": "Hello world"})),
+                record: Some(RecordValue::from_value(
+                    simd_json::json!({"text": "Hello world"}),
+                )),
                 cid: Some("bafyrei".to_string()),
             }),
             raw_json: None,

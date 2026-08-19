@@ -549,7 +549,8 @@ fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
         let ParseScratch { buffers, input } = &mut *scratch;
         simd_json::serde::from_slice_with_buffers(input, buffers).map_err(TurboError::from)
     })?;
-    message.raw_json = Some(raw_json);
+    message.raw_json = Some(raw_json.clone());
+    message.populate_record_from_wire(&raw_json);
 
     // Validate required fields
     if message.did.is_empty() {

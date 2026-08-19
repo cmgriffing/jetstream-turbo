@@ -5,6 +5,7 @@ mod tests {
     use jetstream_turbo_rs::hydration::TurboCache;
     use jetstream_turbo_rs::models::{
         bluesky::BlueskyProfile,
+        jetstream::RecordValue,
         jetstream::{JetstreamMessage, MessageKind, OperationType},
     };
     use wiremock::matchers::{method, path};
@@ -170,7 +171,8 @@ mod tests {
         }
         "#;
 
-        let message: JetstreamMessage = serde_json::from_str(message_json).unwrap();
+        let mut message: JetstreamMessage = serde_json::from_str(message_json).unwrap();
+        message.populate_record_from_wire(message_json);
 
         // Test message extraction
         assert_eq!(message.extract_did(), "did:plc:alice");
@@ -186,7 +188,8 @@ mod tests {
                 .commit
                 .as_ref()
                 .and_then(|c| c.record.as_ref())
-                .unwrap(),
+                .unwrap()
+                .value(),
         );
         let mut mentioned_dids: Vec<String> = Vec::new();
         for facet in rv.facets() {
@@ -222,7 +225,9 @@ mod tests {
                 operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("1".to_string()),
-                record: Some(simd_json::json!({"text": "Hello world"})),
+                record: Some(RecordValue::from_value(
+                    simd_json::json!({"text": "Hello world"}),
+                )),
                 cid: Some("cid1".to_string()),
             }),
             raw_json: None,

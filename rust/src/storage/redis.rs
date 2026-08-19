@@ -181,7 +181,9 @@ mod tests {
                     operation_type: crate::models::jetstream::OperationType::Create,
                     collection: Some("app.bsky.feed.post".to_string()),
                     rkey: Some("test".to_string()),
-                    record: Some(simd_json::json!({"text": "Hello world"})),
+                    record: Some(crate::models::jetstream::RecordValue::from_value(
+                        simd_json::json!({"text": "Hello world"}),
+                    )),
                     cid: Some("bafyrei".to_string()),
                 }),
                 raw_json: None,
