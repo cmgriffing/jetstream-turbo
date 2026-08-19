@@ -46,16 +46,19 @@ Core hot path (parse → hydrate → serialize):
 
 ## What's Been Tried
 
-- **Hydrate micro-opts (KEPT, +3.6-6%)**: AHashSet for did/uri dedup; `resolve_profiles` now returns a `HashMap<String, Arc<BlueskyProfile>>` via a single `get_user_profiles` pass (was contains_key + per-message moka get); `hydrate_one` became sync with HashMap lookups instead of per-message moka gets.
-- **record: serde_json::Value → simd_json::OwnedValue (KEPT, +20% total)**: Parse builds OwnedValue straight off the simd-json tape (record tree ~1ms cheaper), serialize faster. `RecordView` is now a lens over `&OwnedValue` (same accessor API via `simd_json::prelude`). Fixtures/tests use `simd_json::json!`. Serialized record key ORDER changed (hash order vs sorted) — semantically irrelevant.
+- **Hydrate micro-opts (KEPT)**: AHashSet for did/uri dedup; `resolve_profiles` returns `AHashMap<String, Arc<BlueskyProfile>>` via a single `get_user_profiles` pass; `hydrate_one` is sync with a single AHashMap get (merged contains_key+get); merged the two RecordView extraction passes into `extract_refs_from_view`; clippy/fmt clean.
+- **record: serde_json::Value → simd_json::OwnedValue (KEPT)**: Parse builds OwnedValue straight off the simd-json tape; serialize faster. `RecordView` is a lens over `&OwnedValue` (same API via `simd_json::prelude`). Fixtures/tests use `simd_json::json!`.
+- **Buffered parse (KEPT, big win)**: `parse_message` reuses a thread-local `simd_json::Buffers` via `to_tape_with_buffers` + `Tape::deserialize` instead of `from_str` (which re-allocated all scratch buffers per message). Parse dropped ~8.4ms → ~5.0ms per 10k.
 
 ## Profiling notes (10k batch, post-optimizations)
 
-- Parse ≈ 7.5-8.5ms: envelope tape ~6.4ms floor + OwnedValue record ~1ms + `text.to_string()` copy ~0.3ms.
-- Hydrate ≈ 3.9ms: prepass ~1.2ms + resolve ~0.8ms + per-message ~1.9ms.
-- Serialize ≈ 4.8ms: message ~2.9ms (OwnedValue record now) + metadata ~1.9ms.
-- simd-json has NO RawValue support; raw-record-splice approach blocked (serde has no raw-JSON emit hook; simd-json serializer would escape it).
+- Parse ≈ 4.7-5.1ms: copy (to_string) ~0.4ms + tape+deser ~4.7ms (OwnedValue record build included).
+- Hydrate ≈ 3.0-3.5ms: prepass ~1.1ms + resolve (moka get ×10k) ~0.7ms + per-message ~1.5ms.
+- Serialize ≈ 5.3ms: message ~2.9ms + metadata ~1.8ms + ~0.8ms per-call String allocation (bench uses `simd_json::to_string`; measured `to_writer` w/ shared buffer at 4.6ms but bench API is fixed).
+- serde_json serialize measured SLOWER (5.9-6.2ms) than simd_json (~5.3ms).
+- simd-json has NO RawValue support and no raw-JSON emit hook (serialize_bytes → number array); raw-record-splice blocked.
 - value_trait 0.10.1 has blanket impls so `.get()` works on OwnedValue with `simd_json::prelude` in scope.
+- CI: `cargo clippy --all-targets --all-features -- -D warnings` + `cargo fmt --all -- --check`.
 
 ## Key Insight Notes (from initial code reading)
 
