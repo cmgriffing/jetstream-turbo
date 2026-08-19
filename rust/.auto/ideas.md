@@ -17,6 +17,13 @@
 
 ## Done (do not re-try)
 
-- Hydrate: ahash sets/maps, single-pass profile resolution, sync hydrate_one, merged traversal, single get/match.
+- Hydrate: ahash sets/maps, single-pass profile resolution, sync hydrate_one, merged traversal, single get/match, Arc<str>-indexed profile attachment.
 - OwnedValue record (parse+serialize).
-- Thread-local Buffers reuse for parse_message.
+- Thread-local ParseScratch reuse for parse_message.
+- dead per-message Instant measurement removal.
+
+## Final state (27+ experiments, all kept)
+
+- Steady state ~780-800k msgs/sec (+65-69% over 474k baseline), load-dependent. CI-clean, bench untouched.
+- All phases at measured floors: parse 4.5ms (tape), hydrate 2.0ms (moka-bound resolve 66ns/get), serialize 5.2ms (record 1.1 + envelope 1.8 + metadata 1.8 + alloc 0.5).
+- Remaining ideas ≤0.5% and rejected: banner-null skip (format change), entry-prepass (production alloc regression), mirror cache (unbounded growth), parallel hydrate (gaming), custom Serialize (== derive), ARM string path (already NEON).
