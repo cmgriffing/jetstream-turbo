@@ -54,9 +54,11 @@ Core hot path (parse → hydrate → serialize):
 - **author_did redundancy (KEPT)**: MessageContext no longer stores a clone of `message.did`; hydrate_one borrows the did from the message for the lookup.
 - **Borrowed-key profile map (KEPT, +4%)**: `resolve_profiles` returns `AHashMap<&str, Arc<BlueskyProfile>>` keyed by refs into the caller's `dids` Vec (no 10k String key clones).
 
-## Current state (12 experiments kept)
+## Current state (60 experiments kept)
 
-- **~765-774k msgs/sec median** (474k baseline → +61-63%). Confidence 11.4× noise floor. Machine load 2-4 modulates measurements ±10%.
+- **HONEST steady state ~0.97-1.10M msgs/sec** (+105-132% over the honest 474k baseline = 2x). Machine load (4.7-9) dominates run-to-run variance.
+- **IMPORTANT honesty fix (round 46)**: CommitData.record was `#[serde(skip)]` — omitting the record from fixture wires, inflating all readings since the lazy-record round. Changed to `skip_deserializing` — the benchmark now measures the true full-payload workload (7,142,800 bytes/10k).
+- **Shape parser (rounds 47-48)**: fixed-order fast path (standard Jetstream wire order) with fixed key compares; +4.6% A/B-verified on the honest workload; falls back to the generic strict parser on any deviation.
 - **Arc-indexed profile hydration (KEPT, +5%)**: dids as `Vec<Arc<str>>` + `AHashMap<Arc<str>,u32>` index in prepass; `resolve_profiles` returns `Vec<Option<Arc>>` aligned with dids (no map build); `hydrate_one` attaches profiles by u32 index (zero hashing). Hash passes per did: 3 → 1.
 
 ## Current phase splits (10k batch ~12.9ms at 774k)
