@@ -1,3 +1,6 @@
+use crate::stats::comparison::{
+    ComparisonEngine, ComparisonStreamState, ObservationConfig, PairwiseComparisons,
+};
 use crate::stream::{ConnectionStatus, ReconnectReason, StreamId, StreamMessage};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -29,6 +32,12 @@ pub enum ComparisonIneligibilityReason {
     UnknownMode,
     MissingEventTimeCoverage,
     WatermarkSkew,
+    Disconnected,
+    IdleDelivery,
+    MissingSharedCoverage,
+    IncompleteIdentityCoverage,
+    SettlementPending,
+    LegacyUnknown,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -140,6 +149,7 @@ pub struct StreamStats {
     pub event_time_baseline_1: StreamEventTimeSnapshot,
     pub event_time_baseline_2: StreamEventTimeSnapshot,
     pub comparison: ComparisonEligibility,
+    pub comparisons: PairwiseComparisons,
     pub watermark_skew_threshold_us: u64,
 }
 
@@ -236,6 +246,7 @@ impl StatsAggregator {
                     event_time_baseline_1,
                     event_time_baseline_2,
                     comparison,
+                    comparisons,
                 ) = {
                     let up = uptime.read().unwrap();
                     let event_time_a = up.event_time_snapshot(StreamId::A);
@@ -250,6 +261,7 @@ impl StatsAggregator {
                             &event_time_b,
                             up.watermark_skew_threshold,
                         ),
+                        up.pairwise_comparisons(),
                     )
                 };
 
@@ -391,6 +403,7 @@ impl StatsAggregator {
                     event_time_baseline_1,
                     event_time_baseline_2,
                     comparison,
+                    comparisons,
                     watermark_skew_threshold_us: duration_us(
                         uptime.read().unwrap().watermark_skew_threshold,
                     ),
@@ -696,6 +709,7 @@ pub struct UptimeTracker {
     live_lag_threshold: Duration,
     watermark_skew_threshold: Duration,
     event_idle_threshold: Duration,
+    comparison_engine: ComparisonEngine,
 }
 
 #[derive(Debug, Default)]
@@ -781,6 +795,7 @@ impl Default for UptimeTracker {
             live_lag_threshold: Duration::from_secs(30),
             watermark_skew_threshold: Duration::from_secs(30),
             event_idle_threshold: Duration::from_secs(30),
+            comparison_engine: ComparisonEngine::new(ObservationConfig::default()),
         }
     }
 }
@@ -803,6 +818,11 @@ impl UptimeTracker {
             event_idle_threshold,
             ..Self::default()
         }
+    }
+
+    pub fn with_comparison_config(mut self, config: ObservationConfig) -> Self {
+        self.comparison_engine = ComparisonEngine::new(config);
+        self
     }
 
     pub fn handle_connection_status(&mut self, status: ConnectionStatus) {
@@ -887,6 +907,7 @@ impl UptimeTracker {
             StreamId::Baseline1 => Self::apply_baseline_status(&mut self.baseline_1, status, now),
             StreamId::Baseline2 => Self::apply_baseline_status(&mut self.baseline_2, status, now),
         }
+        self.refresh_comparison_epochs();
     }
 
     fn apply_baseline_status(
@@ -972,7 +993,7 @@ impl UptimeTracker {
         {
             state.coverage_samples.pop_front();
         }
-        if let Some(observation) = message.source_event {
+        if let Some(observation) = &message.source_event {
             state.source_watermark_us = Some(
                 state
                     .source_watermark_us
@@ -982,7 +1003,40 @@ impl UptimeTracker {
             );
             state.last_timestamped_at = Some(now);
             state.clock_skew_us = observation.clock_skew_us;
+            self.comparison_engine
+                .record(message.stream_id, observation);
         }
+        self.refresh_comparison_epochs();
+    }
+
+    pub fn pairwise_comparisons(&self) -> PairwiseComparisons {
+        self.comparison_engine.snapshots()
+    }
+
+    fn refresh_comparison_epochs(&mut self) {
+        let states = [
+            StreamId::A,
+            StreamId::B,
+            StreamId::Baseline1,
+            StreamId::Baseline2,
+        ]
+        .into_iter()
+        .map(|stream_id| {
+            let event_time = self.event_time_snapshot(stream_id);
+            let availability = self.availability_snapshot(stream_id);
+            (
+                stream_id,
+                ComparisonStreamState {
+                    connected: availability.transport_connected,
+                    delivery_available: availability.delivery_available,
+                    mode: event_time.delivery_mode,
+                    source_watermark_us: event_time.source_watermark_us,
+                },
+            )
+        })
+        .collect();
+        self.comparison_engine
+            .refresh(&states, self.watermark_skew_threshold);
     }
 
     pub fn event_time_snapshot(&self, stream_id: StreamId) -> StreamEventTimeSnapshot {
@@ -1636,6 +1690,7 @@ mod tests {
                 observed_at_us: now_us,
                 lag_us: now_us.saturating_sub(source_time_us),
                 clock_skew_us: source_time_us.saturating_sub(now_us),
+                source_event_id: Some(format!("event-{source_time_us}")),
             }),
         }
     }

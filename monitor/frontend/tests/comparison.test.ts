@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { compareCounts, getLiveComparisonEligibility } from "../src/lib/comparison";
+import {
+  compareCounts,
+  comparisonFromBackend,
+  eligibilityFromBackend,
+  getLiveComparisonEligibility,
+} from "../src/lib/comparison";
 
 describe("compareCounts", () => {
   it("reports a positive difference as ahead", () => {
@@ -48,6 +53,37 @@ describe("compareCounts", () => {
       magnitude: 7,
     });
     expect(compareCounts(0, 0).position).toBe("even");
+  });
+});
+
+describe("backend-authored source-window comparisons", () => {
+  it("renders the backend delta without subtracting raw arrival totals", () => {
+    const backend = { eligible: true, reason: null, count_delta: -3 } as const;
+    expect(comparisonFromBackend(backend)).toEqual({
+      position: "behind",
+      difference: -3,
+      magnitude: 3,
+    });
+    expect(eligibilityFromBackend(backend)).toEqual({ eligible: true, reason: null });
+  });
+
+  it.each([
+    "catching_up",
+    "settlement_pending",
+    "disconnected",
+    "incomplete_identity_coverage",
+    "missing_shared_coverage",
+  ] as const)("preserves the backend ineligibility reason %s", (reason) => {
+    const backend = { eligible: false, reason, count_delta: null };
+    expect(comparisonFromBackend(backend).position).toBe("unavailable");
+    expect(eligibilityFromBackend(backend).reason).toBe(reason);
+  });
+
+  it("marks missing legacy backend objects unknown", () => {
+    expect(eligibilityFromBackend(undefined)).toEqual({
+      eligible: false,
+      reason: "legacy_unknown",
+    });
   });
 });
 

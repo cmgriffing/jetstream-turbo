@@ -6,7 +6,7 @@ import { StatusIndicator } from "@/components/StatusIndicator";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
 import { UptimeChart24h, RateChart } from "@/components/Charts";
 import { DeltaCard } from "@/components/DeltaCard";
-import { compareCounts, getLiveComparisonEligibility } from "@/lib/comparison";
+import { comparisonFromBackend, eligibilityFromBackend } from "@/lib/comparison";
 import { decodeWindowParam, encodeWindowParam, WINDOW_PARAM_OPTIONS } from "@/lib/windowParam";
 import { useUrlParam } from "@/hooks/useUrlParam";
 import {
@@ -115,41 +115,37 @@ function App() {
     lastUpdatedAt,
   } = useUptimeHistory(historyHours);
 
-  const primaryComparison = compareCounts(stats.stream_a, stats.stream_b);
-  const watermarkSkewThresholdUs = stats.watermark_skew_threshold_us ?? 30_000_000;
-  const primaryEligibility = stats.comparison ?? getLiveComparisonEligibility(
-    stats.event_time_a,
-    stats.event_time_b,
-    watermarkSkewThresholdUs,
-  );
+  const primaryWindow = stats.comparisons?.primary;
+  const primaryComparison = comparisonFromBackend(primaryWindow);
+  const primaryEligibility = eligibilityFromBackend(primaryWindow);
   const baselineComparisons = [
     {
       subjectLabel: "Messijo",
       baselineLabel: "Baseline 1",
       baselineIdentity: stats.baseline_1_name || "Baseline 1",
-      comparison: compareCounts(stats.stream_a, stats.baseline_1),
-      eligibility: getLiveComparisonEligibility(stats.event_time_a, stats.event_time_baseline_1, watermarkSkewThresholdUs),
+      comparison: comparisonFromBackend(stats.comparisons?.stream_a_baseline_1),
+      eligibility: eligibilityFromBackend(stats.comparisons?.stream_a_baseline_1),
     },
     {
       subjectLabel: "Messijo",
       baselineLabel: "Baseline 2",
       baselineIdentity: stats.baseline_2_name || "Baseline 2",
-      comparison: compareCounts(stats.stream_a, stats.baseline_2),
-      eligibility: getLiveComparisonEligibility(stats.event_time_a, stats.event_time_baseline_2, watermarkSkewThresholdUs),
+      comparison: comparisonFromBackend(stats.comparisons?.stream_a_baseline_2),
+      eligibility: eligibilityFromBackend(stats.comparisons?.stream_a_baseline_2),
     },
     {
       subjectLabel: "Graze",
       baselineLabel: "Baseline 1",
       baselineIdentity: stats.baseline_1_name || "Baseline 1",
-      comparison: compareCounts(stats.stream_b, stats.baseline_1),
-      eligibility: getLiveComparisonEligibility(stats.event_time_b, stats.event_time_baseline_1, watermarkSkewThresholdUs),
+      comparison: comparisonFromBackend(stats.comparisons?.stream_b_baseline_1),
+      eligibility: eligibilityFromBackend(stats.comparisons?.stream_b_baseline_1),
     },
     {
       subjectLabel: "Graze",
       baselineLabel: "Baseline 2",
       baselineIdentity: stats.baseline_2_name || "Baseline 2",
-      comparison: compareCounts(stats.stream_b, stats.baseline_2),
-      eligibility: getLiveComparisonEligibility(stats.event_time_b, stats.event_time_baseline_2, watermarkSkewThresholdUs),
+      comparison: comparisonFromBackend(stats.comparisons?.stream_b_baseline_2),
+      eligibility: eligibilityFromBackend(stats.comparisons?.stream_b_baseline_2),
     },
   ];
   const transportConnected = connectionStatus === "connected";

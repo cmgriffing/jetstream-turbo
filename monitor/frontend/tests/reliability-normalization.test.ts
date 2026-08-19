@@ -13,6 +13,9 @@ describe('reliability history normalization', () => {
           baseline_1: { delivery_mode: 'unknown', source_watermark_us: null, source_lag_us: null, event_time_coverage: false, clock_skew_us: 0 },
           baseline_2: { delivery_mode: 'unknown', source_watermark_us: null, source_lag_us: null, event_time_coverage: false, clock_skew_us: 0 },
           comparison: { eligible: false, reason: 'catching_up', watermark_skew_us: null },
+          comparisons: {
+            primary: { epoch_id: 4, window_start_us: 1, window_end_us: 11, covered_seconds: 10, left_unique_count: 8, right_unique_count: 7, left_rate: 0.8, right_rate: 0.7, count_delta: 1, rate_delta: 0.1, eligible: true, reason: null },
+          },
         },
       }),
       reliability_classification: 'observed',
@@ -20,6 +23,7 @@ describe('reliability history normalization', () => {
 
     expect(row?.reliability?.event_time?.stream_b.delivery_mode).toBe('catching_up')
     expect(row?.reliability?.event_time?.comparison.reason).toBe('catching_up')
+    expect(row?.reliability?.event_time?.comparisons?.primary.count_delta).toBe(1)
   })
   it('preserves prolonged delivery silence separately from transport availability', () => {
     const row = normalizeUptimeRow({
@@ -68,6 +72,7 @@ describe('reliability history normalization', () => {
           baseline_1: { transport_up_seconds: 3600, transport_down_seconds: 0, delivery_up_seconds: 3600, delivery_down_seconds: 0, reconnect_reasons: {}, client_recovery_ms: 0, coverage: 'observed' },
           baseline_2: { transport_up_seconds: 3600, transport_down_seconds: 0, delivery_up_seconds: 3600, delivery_down_seconds: 0, reconnect_reasons: {}, client_recovery_ms: 0, coverage: 'observed' },
         },
+        reliability_classification: 'observed',
       },
       { hour: '2026-07-17 12:00:00', stream_a_seconds: 3590 },
     ] })

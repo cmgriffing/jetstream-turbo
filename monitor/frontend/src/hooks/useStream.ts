@@ -2,7 +2,17 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected'
 export type DeliveryMode = 'live' | 'catching_up' | 'unknown'
-export type ComparisonReason = 'catching_up' | 'unknown_mode' | 'missing_event_time_coverage' | 'watermark_skew'
+export type ComparisonReason =
+  | 'catching_up'
+  | 'unknown_mode'
+  | 'missing_event_time_coverage'
+  | 'watermark_skew'
+  | 'disconnected'
+  | 'idle_delivery'
+  | 'missing_shared_coverage'
+  | 'incomplete_identity_coverage'
+  | 'settlement_pending'
+  | 'legacy_unknown'
 
 export interface StreamEventTime {
   source_watermark_us: number | null
@@ -16,6 +26,29 @@ export interface ComparisonEligibility {
   eligible: boolean
   reason: ComparisonReason | null
   watermark_skew_us: number | null
+}
+
+export interface PairwiseComparison {
+  epoch_id: number | null
+  window_start_us: number | null
+  window_end_us: number | null
+  covered_seconds: number
+  left_unique_count: number
+  right_unique_count: number
+  left_rate: number | null
+  right_rate: number | null
+  count_delta: number | null
+  rate_delta: number | null
+  eligible: boolean
+  reason: ComparisonReason | null
+}
+
+export interface PairwiseComparisons {
+  primary: PairwiseComparison
+  stream_a_baseline_1: PairwiseComparison
+  stream_a_baseline_2: PairwiseComparison
+  stream_b_baseline_1: PairwiseComparison
+  stream_b_baseline_2: PairwiseComparison
 }
 
 export interface StreamStats {
@@ -78,6 +111,7 @@ export interface StreamStats {
   event_time_baseline_1?: StreamEventTime
   event_time_baseline_2?: StreamEventTime
   comparison?: ComparisonEligibility
+  comparisons?: PairwiseComparisons
   watermark_skew_threshold_us?: number
 }
 
@@ -102,6 +136,7 @@ export interface ReliabilityHistory {
     baseline_1: StreamEventTime
     baseline_2: StreamEventTime
     comparison: ComparisonEligibility
+    comparisons?: PairwiseComparisons
   }
 }
 
@@ -190,7 +225,8 @@ export function normalizeUptimeRow(value: unknown): HourlyUptime | null {
     baseline_1_messages: pickNumber(row, ['baseline_1_messages']),
     baseline_2_messages: pickNumber(row, ['baseline_2_messages']),
     reliability,
-    reliability_classification: readString(row.reliability_classification) ?? (reliability ? 'observed' : 'legacy_unknown'),
+    reliability_classification: readString(row.reliability_classification)
+      ?? (reliability?.event_time?.comparisons ? 'observed' : 'legacy_unknown'),
   }
 }
 

@@ -720,6 +720,65 @@ fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> Strin
         "Current bounded run-loop recovery delay in milliseconds.",
         optional_u64_metric_value(diagnostics.failure_containment.current_delay_ms),
     );
+    if let (Some(subtype), Some(stage)) = (
+        diagnostics.failure_containment.subtype,
+        diagnostics.failure_containment.stage,
+    ) {
+        output.push_str("# HELP jetstream_turbo_failure_containment_info Bounded identity of the active failure incident.\n");
+        output.push_str("# TYPE jetstream_turbo_failure_containment_info gauge\n");
+        output.push_str(&format!(
+            "jetstream_turbo_failure_containment_info{{subtype=\"{}\",stage=\"{}\",boundary=\"{}\"}} 1\n",
+            subtype.as_str(),
+            stage.as_str(),
+            if diagnostics.failure_containment.boundary_present {
+                "present"
+            } else {
+                "absent"
+            }
+        ));
+    }
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_committed_source_velocity",
+        "Smoothed committed source seconds advanced per wall second.",
+        optional_f64_metric_value(diagnostics.pipeline_progress.committed_source_velocity),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_net_convergence_rate",
+        "Committed source velocity above real time (positive means converging).",
+        optional_f64_metric_value(diagnostics.pipeline_progress.net_convergence_rate),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_catch_up_eta_seconds",
+        "Estimated seconds to converge, available only for stable positive convergence.",
+        optional_u64_metric_value(diagnostics.pipeline_progress.catch_up_eta_seconds),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_running_permit_holders",
+        "Batches currently holding a concurrency permit.",
+        diagnostics
+            .pipeline_progress
+            .running_permit_holders
+            .to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_queued_batches",
+        "Batches waiting to acquire a concurrency permit.",
+        diagnostics.pipeline_progress.queued_batches.to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_batch_completion_throughput_per_second",
+        "Batch completions per second over the bounded recent sample window.",
+        diagnostics
+            .pipeline_progress
+            .batch_completion_throughput_per_second
+            .to_string(),
+    );
     output.push_str("# HELP jetstream_turbo_reconnects_total Upstream reconnects grouped by initiating reason.\n");
     output.push_str("# TYPE jetstream_turbo_reconnects_total counter\n");
     let mut reconnect_reasons: Vec<_> = diagnostics
@@ -801,6 +860,12 @@ fn optional_i64_metric_value(value: Option<i64>) -> String {
 }
 
 fn optional_usize_metric_value(value: Option<usize>) -> String {
+    value
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "NaN".to_string())
+}
+
+fn optional_f64_metric_value(value: Option<f64>) -> String {
     value
         .map(|v| v.to_string())
         .unwrap_or_else(|| "NaN".to_string())
@@ -908,6 +973,10 @@ mod tests {
     fn sample_health(healthy: bool) -> HealthStatus {
         HealthStatus {
             healthy,
+            serving: healthy,
+            recovering: false,
+            live: healthy,
+            stale: !healthy,
             redis_connected: healthy,
             sqlite_available: healthy,
             session_count: if healthy { 1 } else { 0 },
@@ -985,7 +1054,13 @@ mod tests {
 
     #[test]
     fn metrics_response_includes_runtime_diagnostics_values() {
-        let output = prometheus_metrics_from_diagnostics(&sample_diagnostics());
+        let mut diagnostics = sample_diagnostics();
+        diagnostics.failure_containment.subtype =
+            Some(crate::turbocharger::PipelineFailureSubtype::BatchOrdering);
+        diagnostics.failure_containment.stage =
+            Some(crate::turbocharger::PipelineFailureStage::Ingress);
+        diagnostics.failure_containment.boundary_present = false;
+        let output = prometheus_metrics_from_diagnostics(&diagnostics);
 
         assert!(output.contains("jetstream_turbo_process_memory_rss_bytes 1024"));
         assert!(output.contains("jetstream_turbo_process_memory_virtual_bytes 4096"));
@@ -1001,6 +1076,12 @@ mod tests {
         assert!(output.contains("jetstream_turbo_not_redis_stream_length 7"));
         assert!(output.contains("jetstream_turbo_pipeline_ingress_messages_total 1"));
         assert!(output.contains("jetstream_turbo_pipeline_maximum_batches 6"));
+        assert!(output.contains("jetstream_turbo_running_permit_holders 0"));
+        assert!(output.contains("jetstream_turbo_queued_batches 0"));
+        assert!(output.contains("jetstream_turbo_committed_source_velocity NaN"));
+        assert!(output.contains(
+            "jetstream_turbo_failure_containment_info{subtype=\"batch_ordering\",stage=\"ingress\",boundary=\"absent\"} 1"
+        ));
         assert!(output.contains(
             "jetstream_turbo_optional_hydration_post_outcomes_total{outcome=\"temporarily_unavailable\"} 3"
         ));

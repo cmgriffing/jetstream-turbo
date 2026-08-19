@@ -102,9 +102,6 @@ export function DeltaCard({
                     ? comparison.position === "unavailable" ? "unavailable" : comparison.position
                     : formatComparisonReason(eligibility.reason)}
                 </p>
-                {!eligibility.eligible && comparison.difference !== null ? (
-                  <p className="monitor-stream-metric-unit">Raw observed count difference {signedDifference}</p>
-                ) : null}
                 <span className="sr-only">{baselineLabel} is {baselineIdentity}.</span>
               </div>
             );

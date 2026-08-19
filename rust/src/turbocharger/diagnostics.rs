@@ -18,6 +18,10 @@ const MEMORY_PEAK_WINDOW_SECS: u64 = 24 * 60 * 60;
 #[serde(rename_all = "snake_case")]
 pub struct HealthStatus {
     pub healthy: bool,
+    pub serving: bool,
+    pub recovering: bool,
+    pub live: bool,
+    pub stale: bool,
     pub redis_connected: bool,
     pub sqlite_available: bool,
     pub session_count: usize,

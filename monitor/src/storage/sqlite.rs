@@ -4,10 +4,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 use std::collections::HashMap;
 
-use crate::stats::{ComparisonEligibility, StreamEventTimeSnapshot};
+use crate::stats::{ComparisonEligibility, PairwiseComparisons, StreamEventTimeSnapshot};
 
 const LEGACY_UPTIME_CONTRACT_VERSION: i64 = 1;
-const INTERVAL_UPTIME_CONTRACT_VERSION: i64 = 2;
+const INTERVAL_UPTIME_CONTRACT_VERSION: i64 = 3;
+const SOURCE_WINDOW_RELIABILITY_CONTRACT_VERSION: i64 = 3;
 const HOURLY_WINDOW_SECONDS: i64 = 3600;
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -89,6 +90,8 @@ pub struct EventTimeHistory {
     pub baseline_1: StreamEventTimeSnapshot,
     pub baseline_2: StreamEventTimeSnapshot,
     pub comparison: ComparisonEligibility,
+    #[serde(default)]
+    pub comparisons: PairwiseComparisons,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -511,7 +514,7 @@ impl Storage {
         let hour_str = hour.format("%Y-%m-%d %H:00:00").to_string();
         let reliability_json = serde_json::to_string(reliability)?;
         sqlx::query(
-            "UPDATE hourly_uptime SET reliability_json = ?, reliability_contract_version = 2, updated_at = CURRENT_TIMESTAMP WHERE hour = ?",
+            "UPDATE hourly_uptime SET reliability_json = ?, reliability_contract_version = 3, updated_at = CURRENT_TIMESTAMP WHERE hour = ?",
         )
         .bind(reliability_json)
         .bind(hour_str)
@@ -624,12 +627,14 @@ impl Storage {
 
         for mut row in rows {
             let original = row.clone();
-            row.reliability_classification =
-                if row.reliability_contract_version > 0 && !row.reliability_json.is_empty() {
-                    "observed".to_string()
-                } else {
-                    "legacy_unknown".to_string()
-                };
+            row.reliability_classification = if row.reliability_contract_version
+                >= SOURCE_WINDOW_RELIABILITY_CONTRACT_VERSION
+                && !row.reliability_json.is_empty()
+            {
+                "observed".to_string()
+            } else {
+                "legacy_unknown".to_string()
+            };
 
             if row.metrics_contract_version == LEGACY_UPTIME_CONTRACT_VERSION {
                 let (downtime_a, downtime_b, disconnects_a, disconnects_b, messages_a, messages_b) =
@@ -860,7 +865,7 @@ mod tests {
             INTERVAL_UPTIME_CONTRACT_VERSION
         );
         assert_eq!(row.reliability_classification, "observed");
-        assert_eq!(row.reliability_contract_version, 2);
+        assert_eq!(row.reliability_contract_version, 3);
         let reliability: ReliabilityHistory = serde_json::from_str(&row.reliability_json)?;
         assert_eq!(reliability.stream_a.transport_up_seconds, 3200);
         assert_eq!(reliability.stream_a.delivery_down_seconds, 400);

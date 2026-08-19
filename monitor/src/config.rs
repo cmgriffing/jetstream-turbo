@@ -22,6 +22,12 @@ pub struct Settings {
     pub live_lag_threshold_seconds: u64,
     #[serde(default = "default_watermark_skew_threshold_seconds")]
     pub watermark_skew_threshold_seconds: u64,
+    #[serde(default = "default_comparison_horizon_seconds")]
+    pub comparison_horizon_seconds: u64,
+    #[serde(default = "default_comparison_bucket_width_seconds")]
+    pub comparison_bucket_width_seconds: u64,
+    #[serde(default = "default_comparison_settlement_allowance_seconds")]
+    pub comparison_settlement_allowance_seconds: u64,
     #[serde(default = "default_diagnostics_log_path")]
     pub diagnostics_log_path: String,
     #[serde(default = "default_diagnostics_log_max_bytes")]
@@ -60,6 +66,18 @@ fn default_watermark_skew_threshold_seconds() -> u64 {
     30
 }
 
+fn default_comparison_horizon_seconds() -> u64 {
+    300
+}
+
+fn default_comparison_bucket_width_seconds() -> u64 {
+    5
+}
+
+fn default_comparison_settlement_allowance_seconds() -> u64 {
+    10
+}
+
 fn default_diagnostics_log_path() -> String {
     "./monitor-diagnostics.log".to_string()
 }
@@ -93,6 +111,18 @@ impl Settings {
                 "watermark_skew_threshold_seconds",
                 default_watermark_skew_threshold_seconds(),
             )?
+            .set_default(
+                "comparison_horizon_seconds",
+                default_comparison_horizon_seconds(),
+            )?
+            .set_default(
+                "comparison_bucket_width_seconds",
+                default_comparison_bucket_width_seconds(),
+            )?
+            .set_default(
+                "comparison_settlement_allowance_seconds",
+                default_comparison_settlement_allowance_seconds(),
+            )?
             .set_default("diagnostics_log_path", default_diagnostics_log_path())?
             .set_default(
                 "diagnostics_log_max_bytes",
@@ -106,8 +136,26 @@ impl Settings {
             settings.live_lag_threshold_seconds,
             settings.watermark_skew_threshold_seconds,
         )?;
+        validate_comparison_settings(
+            settings.comparison_horizon_seconds,
+            settings.comparison_bucket_width_seconds,
+            settings.comparison_settlement_allowance_seconds,
+        )?;
         Ok(settings)
     }
+}
+
+fn validate_comparison_settings(horizon: u64, width: u64, settlement: u64) -> Result<()> {
+    if horizon == 0 || width == 0 {
+        anyhow::bail!("comparison horizon and bucket width must be greater than zero");
+    }
+    if width > horizon {
+        anyhow::bail!("comparison bucket width must not exceed comparison horizon");
+    }
+    if settlement >= horizon {
+        anyhow::bail!("comparison settlement allowance must be less than comparison horizon");
+    }
+    Ok(())
 }
 
 fn validate_event_time_thresholds(
@@ -132,6 +180,9 @@ mod tests {
         assert_eq!(default_live_lag_threshold_seconds(), 30);
         assert_eq!(default_watermark_skew_threshold_seconds(), 30);
         assert_eq!(default_stream_idle_timeout_seconds(), 30);
+        assert_eq!(default_comparison_horizon_seconds(), 300);
+        assert_eq!(default_comparison_bucket_width_seconds(), 5);
+        assert_eq!(default_comparison_settlement_allowance_seconds(), 10);
     }
 
     #[test]
@@ -139,5 +190,14 @@ mod tests {
         assert!(validate_event_time_thresholds(0, 30).is_err());
         assert!(validate_event_time_thresholds(30, 0).is_err());
         assert!(validate_event_time_thresholds(30, 30).is_ok());
+    }
+
+    #[test]
+    fn comparison_settings_are_bounded_and_coherent() {
+        assert!(validate_comparison_settings(300, 5, 10).is_ok());
+        assert!(validate_comparison_settings(0, 5, 10).is_err());
+        assert!(validate_comparison_settings(300, 0, 10).is_err());
+        assert!(validate_comparison_settings(10, 20, 1).is_err());
+        assert!(validate_comparison_settings(10, 5, 10).is_err());
     }
 }

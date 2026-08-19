@@ -396,9 +396,16 @@ where
     }
 
     pub async fn record_run_failure(&self, failure: &RunFailure) -> RecoveryDecision {
-        let decision = self
-            .failure_supervisor
-            .record_failure(failure.error(), failure.failed_range());
+        let durable_checkpoint_ordinal = self
+            .completion_frontier
+            .lock()
+            .await
+            .durable_checkpoint_ordinal();
+        let decision = self.failure_supervisor.record_failure(
+            failure.error(),
+            failure.failed_range(),
+            durable_checkpoint_ordinal,
+        );
         self.bluesky_client
             .set_failure_recurrence(decision.recurrence);
         let snapshot = self.failure_supervisor.snapshot();
@@ -409,6 +416,15 @@ where
         } else {
             0.0
         });
+        if let (Some(subtype), Some(stage)) = (snapshot.subtype, snapshot.stage) {
+            metrics::counter!(
+                "pipeline_failures_total",
+                "subtype" => subtype.as_str(),
+                "stage" => stage.as_str(),
+                "boundary" => if snapshot.boundary_present { "present" } else { "absent" }
+            )
+            .increment(1);
+        }
         if decision.log_terminal {
             error!(
                 fingerprint = snapshot.fingerprint.as_deref(),
@@ -419,6 +435,10 @@ where
                 retryable = decision.retryable,
                 recovery_delay_ms = decision.delay.as_millis(),
                 isolation = ?snapshot.isolation,
+                failure_subtype = snapshot.subtype.map(|value| value.as_str()),
+                failure_stage = snapshot.stage.map(|value| value.as_str()),
+                boundary_present = snapshot.boundary_present,
+                incident_start_checkpoint_ordinal = snapshot.incident_start_checkpoint_ordinal,
                 "TurboCharger run failure entered containment"
             );
         } else {
@@ -454,6 +474,7 @@ where
         let permit = self.semaphore.clone().acquire_owned().await.map_err(|e| {
             TurboError::Internal(format!("Batch semaphore closed unexpectedly: {e}"))
         })?;
+        progress.batch_running(batch_id);
 
         let failed_range = batch.range().clone();
         batch_tasks.spawn(async move {
@@ -532,6 +553,8 @@ where
         let permit = self.semaphore.acquire().await.map_err(|e| {
             TurboError::Internal(format!("Batch semaphore closed unexpectedly: {e}"))
         })?;
+        let batch_id = self.progress.batch_started();
+        self.progress.batch_running(batch_id);
         let failed_range = batch.range().clone();
         let count = Self::process_batch_internal(
             self.hydrator.clone(),
@@ -540,7 +563,7 @@ where
             self.broadcast_sender.clone(),
             batch,
             Arc::clone(&self.progress),
-            self.progress.batch_started(),
+            batch_id,
             self.settings
                 .pipeline_deadlines_enabled
                 .then(|| Duration::from_secs(self.settings.batch_execution_timeout_secs)),
@@ -964,6 +987,11 @@ where
                 &pipeline_progress,
                 self.settings.pipeline_progress_readiness_enabled,
             ) && !containment.persistent,
+            serving: dependency_healthy,
+            recovering: readiness.state == PipelineReadinessState::Recovering,
+            live: readiness.state == PipelineReadinessState::Healthy
+                && recovery_phase == crate::models::recovery::RecoveryPhase::Live,
+            stale: readiness.state == PipelineReadinessState::Stale,
             redis_connected: redis_healthy,
             sqlite_available,
             session_count,
@@ -1778,8 +1806,8 @@ mod tests {
         let supervisor = FailureSupervisor::new(containment_policy());
 
         let failed_range = test_ingress_range(9, 10);
-        let first = supervisor.record_failure(&replay_failure(), Some(&failed_range));
-        let replay = supervisor.record_failure(&replay_failure(), Some(&failed_range));
+        let first = supervisor.record_failure(&replay_failure(), Some(&failed_range), None);
+        let replay = supervisor.record_failure(&replay_failure(), Some(&failed_range), None);
         persist_batch_completion(
             &frontier,
             &store,
@@ -1816,8 +1844,8 @@ mod tests {
         let frontier = Mutex::new(CompletionFrontier::new(None));
         let supervisor = FailureSupervisor::new(containment_policy());
         let failed_range = test_ingress_range(1, 2);
-        supervisor.record_failure(&replay_failure(), Some(&failed_range));
-        supervisor.record_failure(&replay_failure(), Some(&failed_range));
+        supervisor.record_failure(&replay_failure(), Some(&failed_range), None);
+        supervisor.record_failure(&replay_failure(), Some(&failed_range), None);
 
         let checkpoint = persist_batch_completion(
             &frontier,
@@ -1833,7 +1861,7 @@ mod tests {
         assert!(supervisor.observe_checkpoint(&checkpoint).is_some());
         assert!(!supervisor.snapshot().active);
 
-        let next = supervisor.record_failure(&replay_failure(), Some(&failed_range));
+        let next = supervisor.record_failure(&replay_failure(), Some(&failed_range), None);
         assert_eq!(next.recurrence, 1);
         assert_eq!(next.delay, containment_policy().min_delay);
     }
@@ -2200,9 +2228,12 @@ mod tests {
 
     #[tokio::test]
     async fn completed_replay_duplicate_skips_hydration_and_storage() {
-        let message = create_post_message(5);
+        let mut message = create_post_message(5);
+        message.time_us = Some(1);
         let source_event_id = SourceEventId::from_message(&message);
         let store_called = Arc::new(AtomicBool::new(false));
+        let publisher = Arc::new(MockEventPublisher::new());
+        let (broadcast_sender, mut broadcast_receiver) = broadcast::channel(1);
         let progress = progress();
         let batch_id = progress.batch_started();
         let result = TurboCharger::<
@@ -2224,8 +2255,8 @@ mod tests {
                 completed: source_event_id,
                 store_called: Arc::clone(&store_called),
             }),
-            Arc::new(MockEventPublisher::new()),
-            broadcast::channel(1).0,
+            Arc::clone(&publisher),
+            broadcast_sender,
             test_ingress_batch(vec![message]),
             progress,
             batch_id,
@@ -2236,6 +2267,8 @@ mod tests {
 
         assert_eq!(result.processed_count, 0);
         assert!(!store_called.load(Ordering::SeqCst));
+        assert_eq!(publisher.call_count.load(Ordering::SeqCst), 0);
+        assert!(broadcast_receiver.try_recv().is_err());
         assert_eq!(result.range.end_ordinal, 1);
     }
 }

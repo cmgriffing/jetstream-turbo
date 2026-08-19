@@ -104,7 +104,7 @@ export const StreamCard = memo(function StreamCard({
         <p className="monitor-stream-count">{count?.toLocaleString() ?? "—"}</p>
         <p className="monitor-stream-subtext">
           <Zap className="mr-1 inline h-3 w-3" aria-hidden="true" />
-          Total messages
+          Raw arrivals
         </p>
         <p className="monitor-stream-started">
           Since {formatCountingStartedAt(countingStartedAt)}

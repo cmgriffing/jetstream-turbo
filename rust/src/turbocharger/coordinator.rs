@@ -53,6 +53,7 @@ pub struct TaskPermit {
 #[derive(Debug, Clone)]
 pub struct CompletionFrontier {
     next_ordinal: u64,
+    durable_checkpoint_ordinal: Option<u64>,
     pending: BTreeMap<u64, IngressRange>,
 }
 
@@ -62,6 +63,7 @@ impl CompletionFrontier {
             next_ordinal: checkpoint
                 .map(|checkpoint| checkpoint.ingress_ordinal.saturating_add(1))
                 .unwrap_or(1),
+            durable_checkpoint_ordinal: checkpoint.map(|checkpoint| checkpoint.ingress_ordinal),
             pending: BTreeMap::new(),
         }
     }
@@ -107,6 +109,7 @@ impl CompletionFrontier {
             })?;
 
             self.next_ordinal = range.end_ordinal.saturating_add(1);
+            self.durable_checkpoint_ordinal = Some(range.end_ordinal);
             advanced = Some(IngestionCheckpoint {
                 ingress_ordinal: range.end_ordinal,
                 cursor: range.end_cursor,
@@ -140,6 +143,10 @@ impl CompletionFrontier {
 
     pub fn pending_range_count(&self) -> usize {
         self.pending.len()
+    }
+
+    pub fn durable_checkpoint_ordinal(&self) -> Option<u64> {
+        self.durable_checkpoint_ordinal
     }
 }
 
@@ -206,6 +213,24 @@ mod tests {
         assert_eq!(checkpoint.ingress_ordinal, 4);
         assert_eq!(checkpoint.cursor.time_us, 4_000);
         assert_eq!(frontier.pending_range_count(), 0);
+    }
+
+    #[test]
+    fn completion_frontier_uses_last_cursor_by_ordinal_when_time_regresses() {
+        let mut frontier = CompletionFrontier::new(None);
+        let mut first = range(1, 2);
+        first.start_cursor.time_us = 10_000;
+        first.end_cursor.time_us = 9_000;
+        let mut second = range(3, 4);
+        second.start_cursor.time_us = 8_000;
+        second.end_cursor.time_us = 7_000;
+
+        frontier.record_completed(second).unwrap();
+        let checkpoint = frontier.record_completed(first).unwrap().unwrap();
+
+        assert_eq!(checkpoint.ingress_ordinal, 4);
+        assert_eq!(checkpoint.cursor.time_us, 7_000);
+        assert_eq!(checkpoint.cursor.source_event_id.as_str(), "event-4");
     }
 
     #[test]

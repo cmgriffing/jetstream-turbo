@@ -11,7 +11,13 @@ export type ComparisonReason =
   | "catching_up"
   | "unknown_mode"
   | "missing_event_time_coverage"
-  | "watermark_skew";
+  | "watermark_skew"
+  | "disconnected"
+  | "idle_delivery"
+  | "missing_shared_coverage"
+  | "incomplete_identity_coverage"
+  | "settlement_pending"
+  | "legacy_unknown";
 
 export interface EventTimeContext {
   source_watermark_us: number | null;
@@ -22,6 +28,34 @@ export interface EventTimeContext {
 export interface LiveComparisonEligibility {
   eligible: boolean;
   reason: ComparisonReason | null;
+}
+
+export interface BackendPairwiseComparison {
+  count_delta: number | null;
+  eligible: boolean;
+  reason: ComparisonReason | null;
+}
+
+export function comparisonFromBackend(
+  comparison: BackendPairwiseComparison | null | undefined,
+): CountComparison {
+  const difference = comparison?.count_delta;
+  if (typeof difference !== "number" || !Number.isFinite(difference)) {
+    return { position: "unavailable", difference: null, magnitude: null };
+  }
+  return {
+    position: difference > 0 ? "ahead" : difference < 0 ? "behind" : "even",
+    difference,
+    magnitude: Math.abs(difference),
+  };
+}
+
+export function eligibilityFromBackend(
+  comparison: BackendPairwiseComparison | null | undefined,
+): LiveComparisonEligibility {
+  return comparison
+    ? { eligible: comparison.eligible, reason: comparison.reason }
+    : { eligible: false, reason: "legacy_unknown" };
 }
 
 export function getLiveComparisonEligibility(
@@ -54,6 +88,12 @@ export function formatComparisonReason(reason: ComparisonReason | null): string 
     case "unknown_mode": return "delivery mode unknown";
     case "missing_event_time_coverage": return "event-time coverage missing";
     case "watermark_skew": return "source watermarks too far apart";
+    case "disconnected": return "stream disconnected";
+    case "idle_delivery": return "delivery idle";
+    case "missing_shared_coverage": return "shared source window unavailable";
+    case "incomplete_identity_coverage": return "portable identity coverage incomplete";
+    case "settlement_pending": return "source window settling";
+    case "legacy_unknown": return "legacy comparison unavailable";
     default: return "comparable live window";
   }
 }

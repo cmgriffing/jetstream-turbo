@@ -6,6 +6,10 @@ It is vibe coded from the original source code. The LICENSE for the python code 
 
 The original source code is available at https://github.com/graze-social/jetstream-turbo
 
+## Engineering notes
+
+- [Stream comparison and recovery exploration](docs/stream-comparison-recovery-exploration.md) — production evidence and rationale for source-window comparison and convergent Rust recovery.
+
 ## Benchmarks
 
 The Rust benchmark suite is organized into three tiers, one file per tier, under `rust/benches/`:

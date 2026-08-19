@@ -7,6 +7,54 @@ use serde::Serialize;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineFailureSubtype {
+    BatchOrdering,
+    CheckpointDecoding,
+    RangeCoordination,
+    Storage,
+    Publication,
+    UnknownInvariant,
+}
+
+impl PipelineFailureSubtype {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BatchOrdering => "batch_ordering",
+            Self::CheckpointDecoding => "checkpoint_decoding",
+            Self::RangeCoordination => "range_coordination",
+            Self::Storage => "storage",
+            Self::Publication => "publication",
+            Self::UnknownInvariant => "unknown_invariant",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineFailureStage {
+    Ingress,
+    Checkpoint,
+    Coordination,
+    Storage,
+    Publication,
+    Unknown,
+}
+
+impl PipelineFailureStage {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ingress => "ingress",
+            Self::Checkpoint => "checkpoint",
+            Self::Coordination => "coordination",
+            Self::Storage => "storage",
+            Self::Publication => "publication",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct FailureContainmentSnapshot {
@@ -21,6 +69,12 @@ pub struct FailureContainmentSnapshot {
     pub last_occurrence_unix_ms: Option<u64>,
     pub current_delay_ms: Option<u64>,
     pub blocked_checkpoint_ordinal: Option<u64>,
+    pub subtype: Option<PipelineFailureSubtype>,
+    pub stage: Option<PipelineFailureStage>,
+    pub boundary_present: bool,
+    pub incident_start_checkpoint_ordinal: Option<u64>,
+    pub total_occurrences: u64,
+    pub recovered_incidents: u64,
     pub isolation: Option<IsolationOutcome>,
 }
 
@@ -60,6 +114,7 @@ impl FailureSupervisor {
         &self,
         error: &TurboError,
         failed_range: Option<&IngressRange>,
+        durable_checkpoint_ordinal: Option<u64>,
     ) -> RecoveryDecision {
         let descriptor = FailureDescriptor::from_error(error);
         let now = unix_ms();
@@ -75,11 +130,7 @@ impl FailureSupervisor {
         } else {
             1
         };
-        let delay = if descriptor.retryable {
-            recovery_delay(self.policy, recurrence, &descriptor.fingerprint)
-        } else {
-            self.policy.max_delay
-        };
+        let delay = recovery_delay(self.policy, recurrence, &descriptor.fingerprint);
         let persistent = recurrence >= self.policy.persistence_threshold;
         let reached_cap = delay >= self.policy.max_delay;
         let log_terminal = recurrence == 1
@@ -111,6 +162,16 @@ impl FailureSupervisor {
             last_occurrence_unix_ms: Some(now),
             current_delay_ms: Some(duration_ms(delay)),
             blocked_checkpoint_ordinal: failed_range.map(|range| range.end_ordinal),
+            subtype: Some(descriptor.subtype),
+            stage: Some(descriptor.stage),
+            boundary_present: failed_range.is_some(),
+            incident_start_checkpoint_ordinal: if same_incident {
+                previous.incident_start_checkpoint_ordinal
+            } else {
+                durable_checkpoint_ordinal
+            },
+            total_occurrences: previous.total_occurrences.saturating_add(1),
+            recovered_incidents: previous.recovered_incidents,
             isolation: descriptor.isolation,
         };
 
@@ -123,8 +184,8 @@ impl FailureSupervisor {
         }
     }
 
-    /// Clears containment only after durable source progress reaches or passes
-    /// the failed portable boundary. Process-local ordinals are not considered.
+    /// Clears range-bound containment at its portable source boundary and
+    /// boundaryless containment after new durable ordinal progress.
     pub fn observe_checkpoint(
         &self,
         checkpoint: &IngestionCheckpoint,
@@ -133,12 +194,25 @@ impl FailureSupervisor {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let boundary = state.failed_boundary.as_ref()?;
-        if !state.snapshot.active || !checkpoint_passes_boundary(&checkpoint.cursor, boundary) {
+        if !state.snapshot.active {
+            return None;
+        }
+        let recovered_by_progress = match state.failed_boundary.as_ref() {
+            Some(boundary) => checkpoint_passes_boundary(&checkpoint.cursor, boundary),
+            None => state
+                .snapshot
+                .incident_start_checkpoint_ordinal
+                .is_none_or(|start| checkpoint.ingress_ordinal > start),
+        };
+        if !recovered_by_progress {
             return None;
         }
         let recovered = state.snapshot.clone();
-        state.snapshot = FailureContainmentSnapshot::default();
+        state.snapshot = FailureContainmentSnapshot {
+            total_occurrences: recovered.total_occurrences,
+            recovered_incidents: recovered.recovered_incidents.saturating_add(1),
+            ..FailureContainmentSnapshot::default()
+        };
         state.failed_boundary = None;
         Some(recovered)
     }
@@ -163,6 +237,8 @@ struct FailureDescriptor {
     category: String,
     retryable: bool,
     isolation: Option<IsolationOutcome>,
+    subtype: PipelineFailureSubtype,
+    stage: PipelineFailureStage,
 }
 
 impl FailureDescriptor {
@@ -174,6 +250,8 @@ impl FailureDescriptor {
                 category: upstream.category.as_str().to_string(),
                 retryable: upstream.transient,
                 isolation: upstream.isolation.clone(),
+                subtype: PipelineFailureSubtype::UnknownInvariant,
+                stage: PipelineFailureStage::Unknown,
             },
             other => {
                 let category = error_category(other);
@@ -183,9 +261,37 @@ impl FailureDescriptor {
                     category: category.to_string(),
                     retryable: other.is_retryable(),
                     isolation: None,
+                    subtype: failure_subtype(other),
+                    stage: failure_stage(other),
                 }
             }
         }
+    }
+}
+
+fn failure_subtype(error: &TurboError) -> PipelineFailureSubtype {
+    match error {
+        TurboError::InvalidMessage(message) if message.contains("ingress batch") => {
+            PipelineFailureSubtype::BatchOrdering
+        }
+        TurboError::InvalidMessage(message) if message.contains("ingress range") => {
+            PipelineFailureSubtype::RangeCoordination
+        }
+        TurboError::JsonDeserialization(_) => PipelineFailureSubtype::CheckpointDecoding,
+        TurboError::Database(_) | TurboError::RotationFailed(_) => PipelineFailureSubtype::Storage,
+        TurboError::RedisOperation(_) => PipelineFailureSubtype::Publication,
+        _ => PipelineFailureSubtype::UnknownInvariant,
+    }
+}
+
+fn failure_stage(error: &TurboError) -> PipelineFailureStage {
+    match failure_subtype(error) {
+        PipelineFailureSubtype::BatchOrdering => PipelineFailureStage::Ingress,
+        PipelineFailureSubtype::CheckpointDecoding => PipelineFailureStage::Checkpoint,
+        PipelineFailureSubtype::RangeCoordination => PipelineFailureStage::Coordination,
+        PipelineFailureSubtype::Storage => PipelineFailureStage::Storage,
+        PipelineFailureSubtype::Publication => PipelineFailureStage::Publication,
+        PipelineFailureSubtype::UnknownInvariant => PipelineFailureStage::Unknown,
     }
 }
 
@@ -278,9 +384,9 @@ mod tests {
     fn identical_failures_grow_and_cap_without_connection_reset() {
         let supervisor = FailureSupervisor::new(policy());
         let failed_range = range(9, 10);
-        let first = supervisor.record_failure(&failure("same"), Some(&failed_range));
-        let second = supervisor.record_failure(&failure("same"), Some(&failed_range));
-        let third = supervisor.record_failure(&failure("same"), Some(&failed_range));
+        let first = supervisor.record_failure(&failure("same"), Some(&failed_range), None);
+        let second = supervisor.record_failure(&failure("same"), Some(&failed_range), None);
+        let third = supervisor.record_failure(&failure("same"), Some(&failed_range), None);
         assert_eq!(first.recurrence, 1);
         assert_eq!(second.recurrence, 2);
         assert!(second.delay > first.delay);
@@ -292,8 +398,8 @@ mod tests {
     fn distinct_fingerprint_starts_a_new_sequence() {
         let supervisor = FailureSupervisor::new(policy());
         let failed_range = range(9, 10);
-        supervisor.record_failure(&failure("one"), Some(&failed_range));
-        let decision = supervisor.record_failure(&failure("two"), Some(&failed_range));
+        supervisor.record_failure(&failure("one"), Some(&failed_range), None);
+        let decision = supervisor.record_failure(&failure("two"), Some(&failed_range), None);
         assert_eq!(decision.recurrence, 1);
     }
 
@@ -301,7 +407,7 @@ mod tests {
     fn portable_checkpoint_progress_clears_containment() {
         let supervisor = FailureSupervisor::new(policy());
         let failed_range = range(9, 10);
-        supervisor.record_failure(&failure("same"), Some(&failed_range));
+        supervisor.record_failure(&failure("same"), Some(&failed_range), None);
         assert!(supervisor
             .observe_checkpoint(&checkpoint(99, 9_999, "earlier"))
             .is_none());
@@ -310,7 +416,7 @@ mod tests {
             .observe_checkpoint(&checkpoint(100, 10_000, "event-10"))
             .is_some());
         assert!(!supervisor.snapshot().active);
-        let decision = supervisor.record_failure(&failure("same"), Some(&failed_range));
+        let decision = supervisor.record_failure(&failure("same"), Some(&failed_range), None);
         assert_eq!(decision.recurrence, 1);
     }
 
@@ -318,7 +424,7 @@ mod tests {
     fn higher_replay_ordinal_does_not_clear_before_failed_source_boundary() {
         let supervisor = FailureSupervisor::new(policy());
         let failed_range = range(9, 10);
-        supervisor.record_failure(&failure("same"), Some(&failed_range));
+        supervisor.record_failure(&failure("same"), Some(&failed_range), None);
         assert!(supervisor
             .observe_checkpoint(&checkpoint(1_000, 9_000, "replayed-earlier"))
             .is_none());
@@ -329,20 +435,63 @@ mod tests {
     fn strictly_later_source_time_clears_with_different_event_identity() {
         let supervisor = FailureSupervisor::new(policy());
         let failed_range = range(9, 10);
-        supervisor.record_failure(&failure("same"), Some(&failed_range));
+        supervisor.record_failure(&failure("same"), Some(&failed_range), None);
         assert!(supervisor
             .observe_checkpoint(&checkpoint(1, 10_001, "different-event"))
             .is_some());
     }
 
     #[test]
-    fn boundaryless_failure_is_not_cleared_by_checkpoint_movement() {
+    fn boundaryless_failure_survives_without_progress_and_resets_after_progress() {
         let supervisor = FailureSupervisor::new(policy());
-        supervisor.record_failure(&failure("same"), None);
+        let first = supervisor.record_failure(&failure("same"), None, Some(10));
         assert!(supervisor
-            .observe_checkpoint(&checkpoint(1_000, u64::MAX, "later"))
+            .observe_checkpoint(&checkpoint(10, u64::MAX, "same-ordinal"))
             .is_none());
         assert!(supervisor.snapshot().active);
+        let recurrence = supervisor.record_failure(&failure("same"), None, Some(10));
+        assert_eq!(recurrence.recurrence, 2);
+        assert!(recurrence.delay > first.delay);
+        let recovered = supervisor
+            .observe_checkpoint(&checkpoint(11, 1, "regressed-time"))
+            .expect("greater durable ordinal clears a boundaryless incident");
+        assert_eq!(recovered.recurrence, 2);
+        assert_eq!(supervisor.snapshot().recovered_incidents, 1);
+        let next = supervisor.record_failure(&failure("same"), None, Some(11));
+        assert_eq!(next.recurrence, 1);
+    }
+
+    #[test]
+    fn first_checkpoint_clears_startup_boundaryless_incident() {
+        let supervisor = FailureSupervisor::new(policy());
+        supervisor.record_failure(&failure("same"), None, None);
+
+        assert!(supervisor
+            .observe_checkpoint(&checkpoint(1, 1, "first"))
+            .is_some());
+    }
+
+    #[test]
+    fn internal_invariant_uses_minimum_first_delay_and_bounded_identity() {
+        let supervisor = FailureSupervisor::new(policy());
+        let error = TurboError::InvalidMessage(
+            "ingress batch must be non-empty and ordered; private payload omitted".to_string(),
+        );
+
+        let decision = supervisor.record_failure(&error, None, Some(4));
+        let snapshot = supervisor.snapshot();
+
+        assert_eq!(decision.delay, policy().min_delay);
+        assert_eq!(
+            snapshot.subtype,
+            Some(PipelineFailureSubtype::BatchOrdering)
+        );
+        assert_eq!(snapshot.stage, Some(PipelineFailureStage::Ingress));
+        assert!(!snapshot.boundary_present);
+        assert_eq!(snapshot.incident_start_checkpoint_ordinal, Some(4));
+        assert!(!serde_json::to_string(&snapshot)
+            .unwrap()
+            .contains("private payload"));
     }
 
     fn range(start: u64, end: u64) -> IngressRange {

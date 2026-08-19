@@ -3,8 +3,8 @@ use jetstream_monitor::{
     config::Settings,
     diagnostics::DiagnosticLogger,
     stats::{
-        comparison_eligibility, AvailabilitySnapshot, StatsAggregator, StreamStatsInternal,
-        UptimeDetailedStats, UptimeMetricsSnapshot, UptimeTracker,
+        comparison_eligibility, AvailabilitySnapshot, ObservationConfig, StatsAggregator,
+        StreamStatsInternal, UptimeDetailedStats, UptimeMetricsSnapshot, UptimeTracker,
     },
     storage::{
         AvailabilityHistory, EventTimeHistory, HourlyStat, HourlyUptime, ReliabilityHistory,
@@ -17,7 +17,7 @@ use std::{sync::Arc, time::Duration};
 
 const HOURLY_INTERVAL_SECONDS: u64 = 3600;
 const HOURLY_INTERVAL_SECONDS_I64: i64 = 3600;
-const HOURLY_UPTIME_CONTRACT_VERSION: i64 = 2;
+const HOURLY_UPTIME_CONTRACT_VERSION: i64 = 3;
 const BASELINE_1_URL: &str =
     "wss://jetstream.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post";
 const BASELINE_2_URL: &str =
@@ -253,7 +253,14 @@ async fn main() -> Result<()> {
             Duration::from_secs(settings.live_lag_threshold_seconds),
             Duration::from_secs(settings.watermark_skew_threshold_seconds),
             Duration::from_secs(settings.stream_idle_timeout_seconds),
-        ),
+        )
+        .with_comparison_config(ObservationConfig {
+            horizon: Duration::from_secs(settings.comparison_horizon_seconds),
+            bucket_width: Duration::from_secs(settings.comparison_bucket_width_seconds),
+            settlement_allowance: Duration::from_secs(
+                settings.comparison_settlement_allowance_seconds,
+            ),
+        }),
     ));
     uptime_tracker
         .write()
@@ -481,6 +488,7 @@ async fn main() -> Result<()> {
                                 &stream_b,
                                 tracker.watermark_skew_threshold(),
                             ),
+                            comparisons: tracker.pairwise_comparisons(),
                         }
                     },
                 };

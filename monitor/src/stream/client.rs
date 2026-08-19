@@ -13,7 +13,7 @@ use crate::diagnostics::{DiagnosticEvent, DiagnosticLogger};
 
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamId {
     A,
@@ -57,6 +57,7 @@ mod tests {
         assert_eq!(observation.source_time_us, 900);
         assert_eq!(observation.lag_us, 100);
         assert_eq!(observation.clock_skew_us, 0);
+        assert_eq!(observation.source_event_id, None);
     }
 
     #[test]
@@ -70,6 +71,46 @@ mod tests {
     fn parser_keeps_timestamp_less_and_invalid_frames_uncovered() {
         assert_eq!(observe_source_event(r#"{"kind":"commit"}"#, 1_000), None);
         assert_eq!(observe_source_event("not-json", 1_000), None);
+    }
+
+    #[test]
+    fn parser_derives_shared_identity_for_raw_and_enriched_commit() {
+        let raw = r#"{"did":"did:plc:alice","time_us":900,"seq":1,"kind":"commit","commit":{"rev":"3k","operation":"create","collection":"app.bsky.feed.post","rkey":"one","cid":"bafy"}}"#;
+        let enriched = r#"{"message":{"did":"did:plc:alice","time_us":900,"seq":999,"kind":"commit","commit":{"rev":"3k","operation":"create","collection":"app.bsky.feed.post","rkey":"one","cid":"bafy"}},"processed_at":"later"}"#;
+
+        let raw_id = observe_source_event(raw, 1_000).unwrap().source_event_id;
+        let enriched_id = observe_source_event(enriched, 1_000)
+            .unwrap()
+            .source_event_id;
+        assert!(raw_id.is_some());
+        assert_eq!(raw_id, enriched_id, "endpoint-local seq is excluded");
+    }
+
+    #[test]
+    fn parser_handles_identity_account_unknown_and_missing_identity_fields() {
+        for kind in ["identity", "account", "unknown"] {
+            let frame =
+                format!(r#"{{"did":"did:plc:alice","time_us":900,"kind":"{kind}","seq":1}}"#);
+            assert!(observe_source_event(&frame, 1_000)
+                .unwrap()
+                .source_event_id
+                .is_some());
+        }
+        assert_eq!(
+            observe_source_event(r#"{"time_us":900}"#, 1_000)
+                .unwrap()
+                .source_event_id,
+            None
+        );
+        assert_eq!(
+            observe_source_event(
+                r#"{"did":"did:plc:alice","time_us":900,"kind":"commit"}"#,
+                1_000,
+            )
+            .unwrap()
+            .source_event_id,
+            None
+        );
     }
 
     #[test]
@@ -219,30 +260,19 @@ mod tests {
 
 const MAX_REPORTED_CLOCK_SKEW_US: u64 = 24 * 60 * 60 * 1_000_000;
 
-#[derive(Deserialize)]
-struct TimestampEnvelope {
-    time_us: Option<u64>,
-    message: Option<NestedTimestamp>,
-}
-
-#[derive(Deserialize)]
-struct NestedTimestamp {
-    time_us: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceEventObservation {
     pub source_time_us: u64,
     pub observed_at_us: u64,
     pub lag_us: u64,
     pub clock_skew_us: u64,
+    pub source_event_id: Option<String>,
 }
 
 fn observe_source_event(text: &str, observed_at_us: u64) -> Option<SourceEventObservation> {
-    let parsed: TimestampEnvelope = serde_json::from_str(text).ok()?;
-    let source_time_us = parsed
-        .time_us
-        .or_else(|| parsed.message.and_then(|message| message.time_us))?;
+    let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
+    let source = parsed.get("message").unwrap_or(&parsed);
+    let source_time_us = source.get("time_us")?.as_u64()?;
     Some(SourceEventObservation {
         source_time_us,
         observed_at_us,
@@ -250,7 +280,38 @@ fn observe_source_event(text: &str, observed_at_us: u64) -> Option<SourceEventOb
         clock_skew_us: source_time_us
             .saturating_sub(observed_at_us)
             .min(MAX_REPORTED_CLOCK_SKEW_US),
+        source_event_id: portable_source_identity(source),
     })
+}
+
+fn portable_source_identity(source: &serde_json::Value) -> Option<String> {
+    let did = source.get("did")?.as_str()?;
+    let kind = source.get("kind")?.as_str()?;
+    let time_us = source.get("time_us")?.as_u64()?.to_string();
+    let mut identity = String::from("v1");
+    push_identity_component(&mut identity, did);
+    push_identity_component(&mut identity, kind);
+    push_identity_component(&mut identity, &time_us);
+    if kind == "commit" {
+        let commit = source.get("commit")?.as_object()?;
+        for field in ["rev", "operation", "collection", "rkey", "cid"] {
+            push_identity_component(
+                &mut identity,
+                commit
+                    .get(field)
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default(),
+            );
+        }
+    }
+    Some(identity)
+}
+
+fn push_identity_component(identity: &mut String, component: &str) {
+    identity.push('|');
+    identity.push_str(&component.len().to_string());
+    identity.push(':');
+    identity.push_str(component);
 }
 
 fn observe_source_event_now(text: &str) -> Option<SourceEventObservation> {
@@ -373,8 +434,9 @@ impl StreamClient {
                                                 stream_id,
                                                 count: cumulative_count.saturating_add(count),
                                                 delivery_latency_us: last_source_event
+                                                    .as_ref()
                                                     .map(|event| event.lag_us),
-                                                source_event: last_source_event,
+                                                source_event: last_source_event.clone(),
                                             })
                                             .is_err()
                                         {
@@ -439,7 +501,9 @@ impl StreamClient {
                             .send(StreamMessage {
                                 stream_id,
                                 count: cumulative_count,
-                                delivery_latency_us: last_source_event.map(|event| event.lag_us),
+                                delivery_latency_us: last_source_event
+                                    .as_ref()
+                                    .map(|event| event.lag_us),
                                 source_event: last_source_event,
                             })
                             .is_err()
@@ -592,8 +656,9 @@ impl StreamClient {
                                                 stream_id,
                                                 count: cumulative_count.saturating_add(count),
                                                 delivery_latency_us: last_source_event
+                                                    .as_ref()
                                                     .map(|event| event.lag_us),
-                                                source_event: last_source_event,
+                                                source_event: last_source_event.clone(),
                                             })
                                             .is_err()
                                         {
@@ -694,7 +759,9 @@ impl StreamClient {
                             .send(StreamMessage {
                                 stream_id,
                                 count: cumulative_count,
-                                delivery_latency_us: last_source_event.map(|event| event.lag_us),
+                                delivery_latency_us: last_source_event
+                                    .as_ref()
+                                    .map(|event| event.lag_us),
                                 source_event: last_source_event,
                             })
                             .is_err()

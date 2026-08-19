@@ -161,6 +161,12 @@ impl IngressBatch {
     pub fn new(events: Vec<IngressEvent>) -> Option<Self> {
         let first = events.first()?;
         let last = events.last()?;
+        if events
+            .windows(2)
+            .any(|pair| pair[1].ordinal != pair[0].ordinal.saturating_add(1))
+        {
+            return None;
+        }
         let range = IngressRange {
             start_ordinal: first.ordinal,
             end_ordinal: last.ordinal,
@@ -182,7 +188,6 @@ impl IngressBatch {
 impl IngressRange {
     pub fn is_valid(&self) -> bool {
         self.start_ordinal <= self.end_ordinal
-            && self.start_cursor.time_us <= self.end_cursor.time_us
     }
 
     pub fn follows(&self, ordinal: u64) -> bool {
@@ -266,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn ingress_range_requires_ordered_ordinals_and_event_time() {
+    fn ingress_range_requires_ordered_ordinals() {
         let cursor = SourceCursor::from_message(&message(10)).unwrap();
         let range = IngressRange {
             start_ordinal: 2,
@@ -276,6 +281,31 @@ mod tests {
         };
 
         assert!(!range.is_valid());
+    }
+
+    #[test]
+    fn ingress_batch_accepts_source_time_regression_with_contiguous_ordinals() {
+        let event = |ordinal, time_us| {
+            let mut source = message(ordinal);
+            source.time_us = Some(time_us);
+            IngressEvent::new(ordinal, source).unwrap()
+        };
+
+        let batch = IngressBatch::new(vec![event(40, 5_000), event(41, 4_500), event(42, 4_750)])
+            .expect("source timestamps do not determine ingress validity");
+
+        assert_eq!(batch.range().start_ordinal, 40);
+        assert_eq!(batch.range().end_ordinal, 42);
+        assert_eq!(batch.range().start_cursor.time_us, 5_000);
+        assert_eq!(batch.range().end_cursor.time_us, 4_750);
+    }
+
+    #[test]
+    fn ingress_batch_rejects_ordinal_gaps_and_reversals() {
+        let event = |ordinal| IngressEvent::new(ordinal, message(ordinal)).unwrap();
+
+        assert!(IngressBatch::new(vec![event(1), event(3)]).is_none());
+        assert!(IngressBatch::new(vec![event(2), event(1)]).is_none());
     }
 
     #[test]
