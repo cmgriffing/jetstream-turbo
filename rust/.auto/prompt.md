@@ -56,7 +56,14 @@ Core hot path (parse → hydrate → serialize):
 
 ## Current state (12 experiments kept)
 
-- **~723k msgs/sec median** (474k baseline → +52%). Confidence ~10-13× noise floor. Machine load 2-4 modulates measurements ±10% (transient dips to 650k look like regressions — always re-measure). measure.sh runs 7× + median.
+- **~765-774k msgs/sec median** (474k baseline → +61-63%). Confidence 11.4× noise floor. Machine load 2-4 modulates measurements ±10%.
+- **Arc-indexed profile hydration (KEPT, +5%)**: dids as `Vec<Arc<str>>` + `AHashMap<Arc<str>,u32>` index in prepass; `resolve_profiles` returns `Vec<Option<Arc>>` aligned with dids (no map build); `hydrate_one` attaches profiles by u32 index (zero hashing). Hash passes per did: 3 → 1.
+
+## Current phase splits (10k batch ~12.9ms at 774k)
+
+- Parse ≈ 4.3-4.8ms — simd-json tape floor (~1GB/s on 350B inputs); record OwnedValue build included.
+- Hydrate ≈ 1.8-2.2ms — prepass (Arc index map) + resolve (moka gets, 10k × ~65ns) + index attachment.
+- Serialize ≈ 5.1-5.3ms — 40% of batch; walled: bench `to_string` per-call alloc ~0.5ms, generic serde ~1.35-1.75GB/s; simd beats serde on both message (2.7 vs 3.1) and metadata (1.8 vs 2.4); no raw-JSON emit hook; custom Serialize == derive; Writable generator unreachable inside serde path.
 - **hydration_time_ms dead-measure removed (KEPT)**: batch design resolves fetches in resolve_profiles BEFORE hydrate_one, so per-message elapsed always rounded to 0 — the clock reads were pure overhead (~0.4ms).
 - **from_slice_with_buffers (KEPT, neutral)**: single-call parse instead of to_tape_with_buffers + tape.deserialize.
 
