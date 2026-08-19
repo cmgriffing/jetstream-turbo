@@ -134,7 +134,8 @@ where
     ) -> TurboResult<EnrichedRecord> {
         let start_time = Instant::now();
 
-        tracing::Span::current().record("did", &author_did);
+        let span = tracing::Span::current();
+        span.record("did", &author_did);
 
         let mut enriched = EnrichedRecord::new_with_timestamp(message, processed_at);
         enriched.hydrated_metadata.hydration_quality = HydrationQuality::Complete;
@@ -142,11 +143,11 @@ where
         if is_post {
             match profiles.get(&author_did) {
                 Some(profile) => {
-                    tracing::Span::current().record("cache_hit", true);
+                    span.record("cache_hit", true);
                     enriched.hydrated_metadata.author_profile = Some(Arc::clone(profile));
                 }
                 None => {
-                    tracing::Span::current().record("cache_hit", false);
+                    span.record("cache_hit", false);
                 }
             }
         }
