@@ -46,7 +46,16 @@ Core hot path (parse → hydrate → serialize):
 
 ## What's Been Tried
 
-- (empty — baseline not yet recorded)
+- **Hydrate micro-opts (KEPT, +3.6-6%)**: AHashSet for did/uri dedup; `resolve_profiles` now returns a `HashMap<String, Arc<BlueskyProfile>>` via a single `get_user_profiles` pass (was contains_key + per-message moka get); `hydrate_one` became sync with HashMap lookups instead of per-message moka gets.
+- **record: serde_json::Value → simd_json::OwnedValue (KEPT, +20% total)**: Parse builds OwnedValue straight off the simd-json tape (record tree ~1ms cheaper), serialize faster. `RecordView` is now a lens over `&OwnedValue` (same accessor API via `simd_json::prelude`). Fixtures/tests use `simd_json::json!`. Serialized record key ORDER changed (hash order vs sorted) — semantically irrelevant.
+
+## Profiling notes (10k batch, post-optimizations)
+
+- Parse ≈ 7.5-8.5ms: envelope tape ~6.4ms floor + OwnedValue record ~1ms + `text.to_string()` copy ~0.3ms.
+- Hydrate ≈ 3.9ms: prepass ~1.2ms + resolve ~0.8ms + per-message ~1.9ms.
+- Serialize ≈ 4.8ms: message ~2.9ms (OwnedValue record now) + metadata ~1.9ms.
+- simd-json has NO RawValue support; raw-record-splice approach blocked (serde has no raw-JSON emit hook; simd-json serializer would escape it).
+- value_trait 0.10.1 has blanket impls so `.get()` works on OwnedValue with `simd_json::prelude` in scope.
 
 ## Key Insight Notes (from initial code reading)
 
