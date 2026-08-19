@@ -258,15 +258,15 @@ mod tests {
     #[test]
     fn test_enriched_record_creation() {
         let message = JetstreamMessage {
-            did: "did:plc:test".to_string(),
+            did: "did:plc:test".into(),
             time_us: Some(1640995200000000),
             seq: Some(12345),
             kind: MessageKind::Commit,
             commit: Some(Box::new(CommitData {
-                rev: Some("test-rev".to_string()),
+                rev: Some("test-rev".into()),
                 operation_type: OperationType::Create,
-                collection: Some("app.bsky.feed.post".to_string()),
-                rkey: Some("test123".to_string()),
+                collection: Some("app.bsky.feed.post".into()),
+                rkey: Some("test123".into()),
                 record: Some(RecordValue::from_value(
                     simd_json::json!({"text": "Hello world"}),
                 )),
@@ -283,15 +283,15 @@ mod tests {
     #[test]
     fn test_cache_hit_rate_calculation() {
         let mut enriched = EnrichedRecord::new(JetstreamMessage {
-            did: "did:plc:test".to_string(),
+            did: "did:plc:test".into(),
             time_us: Some(1640995200000000),
             seq: Some(12345),
             kind: MessageKind::Commit,
             commit: Some(Box::new(CommitData {
-                rev: Some("test-rev".to_string()),
+                rev: Some("test-rev".into()),
                 operation_type: OperationType::Create,
-                collection: Some("app.bsky.feed.post".to_string()),
-                rkey: Some("test123".to_string()),
+                collection: Some("app.bsky.feed.post".into()),
+                rkey: Some("test123".into()),
                 record: Some(RecordValue::from_value(simd_json::json!({"text": "Hello"}))),
                 cid: Some("bafyrei".to_string()),
             })),
@@ -308,15 +308,15 @@ mod tests {
     #[test]
     fn test_empty_hydrated_metadata_serializes_compactly() {
         let message = JetstreamMessage {
-            did: "did:plc:test".to_string(),
+            did: "did:plc:test".into(),
             time_us: Some(1640995200000000),
             seq: Some(12345),
             kind: MessageKind::Commit,
             commit: Some(Box::new(CommitData {
-                rev: Some("test-rev".to_string()),
+                rev: Some("test-rev".into()),
                 operation_type: OperationType::Create,
-                collection: Some("app.bsky.feed.post".to_string()),
-                rkey: Some("test123".to_string()),
+                collection: Some("app.bsky.feed.post".into()),
+                rkey: Some("test123".into()),
                 record: Some(RecordValue::from_value(
                     simd_json::json!({"text": "Hello world"}),
                 )),

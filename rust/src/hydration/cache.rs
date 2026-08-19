@@ -210,7 +210,8 @@ impl TurboCache {
         profiles
     }
 
-    pub fn set_user_profile(&self, did: String, profile: Arc<BlueskyProfile>) {
+    pub fn set_user_profile(&self, did: impl Into<String>, profile: Arc<BlueskyProfile>) {
+        let did: String = did.into();
         // Pre-compute the serialized fragment once per profile so hydrated
         // metadata can splice it verbatim (one-time cost, amortized over reuse).
         let _ = profile.serialized_json();

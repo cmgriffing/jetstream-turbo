@@ -180,7 +180,7 @@ mod tests {
         assert_eq!(message.extract_did(), "did:plc:alice");
         assert_eq!(
             message.extract_at_uri(),
-            Some("at://did:plc:alice/app.bsky.feed.post/3jk7v7mjpxq3y".to_string())
+            Some("at://did:plc:alice/app.bsky.feed.post/3jk7v7mjpxq3y".into())
         );
 
         // Test DID extraction from mentions via RecordView
@@ -205,7 +205,7 @@ mod tests {
         }
         mentioned_dids.sort();
         mentioned_dids.dedup();
-        assert!(mentioned_dids.contains(&"did:plc:bob".to_string()));
+        assert!(mentioned_dids.contains(&"did:plc:bob".into()));
         assert!(!mentioned_dids.is_empty());
     }
 
@@ -218,16 +218,16 @@ mod tests {
 
         // 2. Simulate message reception
         let messages = vec![JetstreamMessage {
-            did: "did:plc:user1".to_string(),
+            did: "did:plc:user1".into(),
             seq: Some(1),
             time_us: Some(1704067200000000),
             kind: MessageKind::Commit,
             commit: Some(Box::new(
                 jetstream_turbo_rs::models::jetstream::CommitData {
-                    rev: Some("test-rev".to_string()),
+                    rev: Some("test-rev".into()),
                     operation_type: OperationType::Create,
-                    collection: Some("app.bsky.feed.post".to_string()),
-                    rkey: Some("1".to_string()),
+                    collection: Some("app.bsky.feed.post".into()),
+                    rkey: Some("1".into()),
                     record: Some(RecordValue::from_value(
                         simd_json::json!({"text": "Hello world"}),
                     )),

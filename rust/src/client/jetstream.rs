@@ -630,7 +630,7 @@ mod tests {
 
     fn checkpoint(time_us: u64, source_seq: Option<u64>) -> IngestionCheckpoint {
         let message = JetstreamMessage {
-            did: "did:plc:cursor".to_string(),
+            did: "did:plc:cursor".into(),
             time_us: Some(time_us),
             seq: source_seq,
             kind: crate::models::jetstream::MessageKind::Account,

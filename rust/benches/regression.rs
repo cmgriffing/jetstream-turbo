@@ -73,15 +73,15 @@ fn create_test_post(i: usize) -> BlueskyPost {
 
 fn create_test_message(i: usize) -> JetstreamMessage {
     JetstreamMessage {
-        did: format!("did:plc:test{i}"),
+        did: format!("did:plc:test{i}").into(),
         time_us: Some(1640995200000000 + i as u64),
         seq: Some(i as u64),
         kind: MessageKind::Commit,
         commit: Some(Box::new(CommitData {
-            rev: Some(format!("3x{i}")),
+            rev: Some(format!("3x{i}").into()),
             operation_type: OperationType::Create,
-            collection: Some("app.bsky.feed.post".to_string()),
-            rkey: Some(format!("{i}")),
+            collection: Some("app.bsky.feed.post".into()),
+            rkey: Some(format!("{i}").into()),
             record: Some(RecordValue::from_value(simd_json::json!({
                 "text": format!("Hello world {}", i),
                 "createdAt": "2024-01-01T00:00:00.000Z"

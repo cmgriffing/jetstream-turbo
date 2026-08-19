@@ -1129,15 +1129,15 @@ mod tests {
 
     fn sample_record() -> EnrichedRecord {
         EnrichedRecord::new(JetstreamMessage {
-            did: "did:plc:test".to_string(),
+            did: "did:plc:test".into(),
             time_us: Some(1640995200000000),
             seq: Some(1),
             kind: MessageKind::Commit,
             commit: Some(Box::new(CommitData {
-                rev: Some("rev-1".to_string()),
+                rev: Some("rev-1".into()),
                 operation_type: OperationType::Create,
-                collection: Some("app.bsky.feed.post".to_string()),
-                rkey: Some("rkey-1".to_string()),
+                collection: Some("app.bsky.feed.post".into()),
+                rkey: Some("rkey-1".into()),
                 record: Some(RecordValue::from_value(
                     simd_json::json!({ "text": "hello" }),
                 )),

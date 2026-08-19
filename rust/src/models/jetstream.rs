@@ -1,3 +1,4 @@
+use compact_str::CompactString;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 use simd_json::OwnedValue;
@@ -66,7 +67,7 @@ impl Serialize for OperationType {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct JetstreamMessage {
-    pub did: String,
+    pub did: CompactString,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_us: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -276,13 +277,13 @@ fn scan_container_end(bytes: &[u8], start: usize, open: u8, close: u8) -> usize 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CommitData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rev: Option<String>,
+    pub rev: Option<CompactString>,
     #[serde(rename = "operation")]
     pub operation_type: OperationType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub collection: Option<String>,
+    pub collection: Option<CompactString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rkey: Option<String>,
+    pub rkey: Option<CompactString>,
     /// Populated post-parse from the wire (see `parse_message`); the value tree
     /// is built lazily on first read.  keeps the field out
     /// of the wire parse (no tree build) while still serializing it.
@@ -388,7 +389,7 @@ mod tests {
         assert!(message.is_create_operation());
         assert_eq!(
             message.extract_at_uri(),
-            Some("at://did:plc:test/app.bsky.feed.post/3mepgzgiatv23".to_string())
+            Some("at://did:plc:test/app.bsky.feed.post/3mepgzgiatv23".into())
         );
     }
 }

@@ -51,15 +51,15 @@ fn realistic_record() -> simd_json::OwnedValue {
 /// A realistic Jetstream commit message wrapping the post record.
 fn realistic_message() -> JetstreamMessage {
     JetstreamMessage {
-        did: "did:plc:author123".to_string(),
+        did: "did:plc:author123".into(),
         time_us: Some(1770949213790196),
         seq: Some(100000),
         kind: MessageKind::Commit,
         commit: Some(Box::new(CommitData {
-            rev: Some("3mepgzgimkv23".to_string()),
+            rev: Some("3mepgzgimkv23".into()),
             operation_type: OperationType::Create,
-            collection: Some("app.bsky.feed.post".to_string()),
-            rkey: Some("3mepgzgiatv23".to_string()),
+            collection: Some("app.bsky.feed.post".into()),
+            rkey: Some("3mepgzgiatv23".into()),
             record: Some(
                 jetstream_turbo_rs::models::jetstream::RecordValue::from_value(realistic_record()),
             ),

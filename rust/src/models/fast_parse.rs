@@ -216,10 +216,10 @@ pub fn parse_envelope_fast(wire: &str) -> Option<(JetstreamMessage, Option<(usiz
             i += 1;
         }
         let commit = CommitData {
-            rev,
+            rev: rev.map(Into::into),
             operation_type: operation?,
-            collection,
-            rkey,
+            collection: collection.map(Into::into),
+            rkey: rkey.map(Into::into),
             record: None,
             cid,
         };
@@ -304,7 +304,7 @@ pub fn parse_envelope_fast(wire: &str) -> Option<(JetstreamMessage, Option<(usiz
         None => (None, None),
     };
     let message = JetstreamMessage {
-        did,
+        did: did.into(),
         time_us,
         seq,
         kind: kind.unwrap_or(MessageKind::Unknown),
@@ -456,15 +456,15 @@ pub fn parse_envelope_shape(wire: &str) -> Option<(JetstreamMessage, Option<(usi
     peek(b, i, b"}}")?;
 
     let commit = Box::new(CommitData {
-        rev: Some(rev.to_string()),
+        rev: Some(rev.into()),
         operation_type,
-        collection: Some(collection.to_string()),
-        rkey: Some(rkey.to_string()),
+        collection: Some(collection.into()),
+        rkey: Some(rkey.into()),
         record: None,
-        cid: Some(cid.to_string()),
+        cid: Some(cid.into()),
     });
     let message = JetstreamMessage {
-        did: did.to_string(),
+        did: did.into(),
         time_us: Some(time_us),
         seq: Some(seq),
         kind: MessageKind::Commit,
