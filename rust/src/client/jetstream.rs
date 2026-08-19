@@ -560,12 +560,12 @@ fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
         let ParseScratch { buffers, input } = &mut *scratch;
         simd_json::serde::from_slice_with_buffers(input, buffers).map_err(TurboError::from)
     })?;
-    message.raw_json = Some(raw_json.clone());
+    let record_raw: Option<Box<str>> = record_span.map(|(start, end)| raw_json[start..end].into());
+    message.raw_json = Some(raw_json);
     if message.commit.is_some() {
-        if let Some((start, end)) = record_span {
-            message.commit.as_mut().unwrap().record = Some(
-                crate::models::jetstream::RecordValue::from_raw(raw_json[start..end].into()),
-            );
+        if let Some(raw) = record_raw {
+            message.commit.as_mut().unwrap().record =
+                Some(crate::models::jetstream::RecordValue::from_raw(raw));
         }
     }
 
