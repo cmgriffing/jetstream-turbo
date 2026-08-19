@@ -118,6 +118,9 @@ where
             })
     }
 
+    // Private hot-path helper; arguments are intentionally explicit to avoid
+    // an allocation or struct indirection per message.
+    #[allow(clippy::too_many_arguments)]
     fn hydrate_one(
         &self,
         message: JetstreamMessage,
@@ -150,7 +153,9 @@ where
 
         for did in &mentioned_dids {
             if let Some(profile) = profiles.get(did) {
-                enriched.hydrated_metadata.add_mentioned_profile(Arc::clone(profile));
+                enriched
+                    .hydrated_metadata
+                    .add_mentioned_profile(Arc::clone(profile));
             }
         }
 
