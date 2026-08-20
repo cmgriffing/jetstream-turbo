@@ -1,5 +1,5 @@
-use simd_json::OwnedValue;
 use simd_json::prelude::*;
+use simd_json::OwnedValue;
 
 /// A zero-allocation, read-only lens over a Bluesky record's raw JSON.
 ///

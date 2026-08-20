@@ -158,9 +158,7 @@ where
         tracing::Span::current().record("did", enriched.message.extract_did());
 
         if is_post {
-            let author_profile = profiles_by_did
-                .get(enriched.message.extract_did())
-                .cloned();
+            let author_profile = profiles_by_did.get(enriched.message.extract_did()).cloned();
             let hit = author_profile.is_some();
             tracing::Span::current().record("cache_hit", hit);
 

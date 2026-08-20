@@ -7,10 +7,10 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use jetstream_turbo_rs::client::JetstreamClient;
 use jetstream_turbo_rs::models::enriched::HydratedMetadata;
+use jetstream_turbo_rs::models::jetstream::owned_record;
 use jetstream_turbo_rs::models::jetstream::{
     CommitData, JetstreamMessage, MessageKind, OperationType,
 };
-use jetstream_turbo_rs::models::jetstream::owned_record;
 use jetstream_turbo_rs::models::record_view::{FacetFeature, RecordView};
 use jetstream_turbo_rs::testing::create_profile;
 use std::hint::black_box;

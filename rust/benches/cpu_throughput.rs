@@ -81,7 +81,9 @@ fn run_batch(
 ) -> (usize, usize, f64, f64, f64) {
     // Parse (shared simd-json buffers across the batch).
     let parse_start = Instant::now();
-    let parsed = client.parse_message_batch(raw_jsons).expect("parse messages");
+    let parsed = client
+        .parse_message_batch(raw_jsons)
+        .expect("parse messages");
     let parse_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
 
     // Hydrate (cache-hit).

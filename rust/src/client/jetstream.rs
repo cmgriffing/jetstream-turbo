@@ -110,9 +110,8 @@ impl JetstreamClient {
     /// Parse a batch of raw messages, reusing simd-json's internal scratch
     /// buffers across messages to avoid per-message buffer allocation.
     pub fn parse_message_batch(&self, raws: &[String]) -> TurboResult<Vec<JetstreamMessage>> {
-        let mut buffers = simd_json::Buffers::new(
-            raws.iter().map(String::len).max().unwrap_or(128).max(128),
-        );
+        let mut buffers =
+            simd_json::Buffers::new(raws.iter().map(String::len).max().unwrap_or(128).max(128));
         let mut out = Vec::with_capacity(raws.len());
         for raw in raws {
             out.push(parse_message_with_buffers(raw, &mut buffers)?);

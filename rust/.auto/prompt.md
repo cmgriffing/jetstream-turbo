@@ -41,3 +41,31 @@ Checks: `./.auto/checks.sh` — runs `cargo test --all-targets --all-features` (
 ## Session notes
 - Bench binaries run directly via `target/release/deps/<name>-<hash>` are smoke tests only for criterion benches; must use `cargo bench --bench <name>` to get real measurements. cpu_throughput is a plain main() so direct runs are fine.
 - Throughput bench fixtures are simple posts (no reply/embed/facets), so RecordView extraction is cheap; hydration is all cache-hits.
+
+## What's Been Tried (updates)
+- **[KEPT] Shared simd-json Buffers across batch parse** (`parse_message_batch` +
+  `parse_message_with_buffers`, `Buffers::new(max_len)` sized once): +34% throughput
+  (468k→628k). Per-message `Deserializer` construction (5 scratch allocs incl. aligned
+  input buffer) was ~40% of parse cost.
+- **[KEPT] Production ws loop uses one shared Buffers** per connection (same win in
+  production; bench-neutral).
+- **[KEPT] Hydrate single-pass**: `resolve_profiles` returns cached profiles via one bulk
+  `get_user_profiles` (no contains_key pass); `hydrate_one` is sync and reads a
+  `HashMap<Arc<str>, Arc<Profile>>` keyed by the profile's own did (no string copies).
+- **[KEPT] ahash for hydrate HashSet/HashMap** (SipHash→ahash, already a dep via moka).
+- **[KEPT] `CommitData.record` → `simd_json::OwnedValue`** (was serde_json::Value/BTreeMap):
+  parse_message_simd_json 2.34→2.12µs, record_view_extract_refs 118→31ns, throughput
+  ~660-700k. ~12 construction sites migrated via `owned_record()` helper.
+- **[KEPT] MessageContext no longer stores author_did String**; dedup clones message.did.
+- **[REVERTED] sqlite store buffer reuse** — sqlx Query holds &str borrows across rows.
+- **[DEAD END] parse input copy removal** — unmeasurable in this bench (bench re-runs the
+  same immutable strings; owned-input paths force an in-region clone).
+- **[DEAD END] raw record JSON capture** — simd-json serde bridge has no raw-span API;
+  serde_json::RawValue unsupported by simd-json.
+
+## Current state (as of last runs)
+- Throughput ≈ 665-700k msgs/sec (median-of-3), baseline 468k → **+42-50%**.
+- Phases per 10k batch (~13.5ms): parse ~4.3ms, hydrate ~2.9ms, encode ~4.9ms.
+- Encode is now the largest phase; message ~2.7ms, metadata ~1.8ms (dominated by output
+  byte writing — near structural limit given the stored format + sqlx owned-String binds).
+- All tier-1/tier-3 secondary benches within CI thresholds (several improved).
