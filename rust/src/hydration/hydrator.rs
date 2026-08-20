@@ -9,7 +9,8 @@ use crate::models::{
     TurboResult,
 };
 use crate::utils::serde_utils::string_utils::is_valid_at_uri;
-use std::collections::HashMap;
+use ahash::RandomState as AHashState;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::info;
@@ -147,8 +148,8 @@ where
         is_post: bool,
         mentioned_dids: Vec<String>,
         post_uris: Vec<String>,
-        profiles_by_did: &HashMap<&str, Arc<BlueskyProfile>>,
-        post_outcomes: &HashMap<String, PostFetchOutcome>,
+        profiles_by_did: &HashMap<&str, Arc<BlueskyProfile>, AHashState>,
+        post_outcomes: &HashMap<String, PostFetchOutcome, AHashState>,
         processed_at: chrono::DateTime<chrono::Utc>,
     ) -> TurboResult<EnrichedRecord> {
         let start_time = Instant::now();
@@ -219,8 +220,8 @@ where
         let message_count = messages.len();
         tracing::Span::current().record("message_count", message_count);
 
-        let mut unique_dids = std::collections::HashSet::new();
-        let mut unique_uris = std::collections::HashSet::new();
+        let mut unique_dids = HashSet::with_hasher(AHashState::default());
+        let mut unique_uris = HashSet::with_hasher(AHashState::default());
         let mut contexts = Vec::with_capacity(message_count);
 
         for message in messages {
@@ -271,8 +272,8 @@ where
 
         let cache_check_start = Instant::now();
         let profiles = self.resolver.resolve_profiles(&dids).await?;
-        let mut profiles_by_did: HashMap<&str, Arc<BlueskyProfile>> =
-            HashMap::with_capacity(dids.len());
+        let mut profiles_by_did: HashMap<&str, Arc<BlueskyProfile>, AHashState> =
+            HashMap::with_capacity_and_hasher(dids.len(), AHashState::default());
         for (did, profile) in dids.iter().zip(profiles) {
             if let Some(profile) = profile {
                 profiles_by_did.insert(did.as_str(), profile);
@@ -289,7 +290,7 @@ where
         let post_outcomes = uris
             .into_iter()
             .zip(post_outcomes)
-            .collect::<HashMap<_, _>>();
+            .collect::<HashMap<_, _, AHashState>>();
         let api_fetch_time = cache_check_start.elapsed().as_millis() as u64;
         tracing::Span::current().record("api_fetch_time_ms", api_fetch_time);
 
@@ -313,8 +314,8 @@ where
     fn hydrate_contexts(
         &self,
         contexts: Vec<MessageContext>,
-        profiles_by_did: &HashMap<&str, Arc<BlueskyProfile>>,
-        post_outcomes: &HashMap<String, PostFetchOutcome>,
+        profiles_by_did: &HashMap<&str, Arc<BlueskyProfile>, AHashState>,
+        post_outcomes: &HashMap<String, PostFetchOutcome, AHashState>,
     ) -> TurboResult<Vec<EnrichedRecord>> {
         let mut results = Vec::with_capacity(contexts.len());
         let processed_at = chrono::Utc::now();
