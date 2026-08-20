@@ -1,0 +1,1 @@
+{"type":"config","name":"Optimize cpu_throughput (msgs/sec) without regressing hot-path & cache benches","metricName":"throughput_msgs_per_sec","metricUnit":"","bestDirection":"higher"}
