@@ -251,7 +251,11 @@ impl MessageSource for JetstreamClient {
                                     match msg_result {
                                 Ok(Message::Text(text)) => {
                                     trace!("Received message: {}", text);
-                                    match parse_message_with_buffers(&text, &mut parse_buffers) {
+                                    // Parse the owned buffer directly (no input copy).
+                                    match parse_message_owned_with_buffers(
+                                        text,
+                                        &mut parse_buffers,
+                                    ) {
                                         Ok(message) => {
                                             if is_in_scope(&message, &wanted_collections) {
                                                 if let Some(event_time_us) = message.time_us {
@@ -325,9 +329,8 @@ impl MessageSource for JetstreamClient {
                                         },
                                         Err(e) => {
                                             warn!(
-                                                "Failed to parse message: {:?}. Raw: {}",
-                                                e,
-                                                &text[..text.len().min(200)]
+                                                "Failed to parse message: {:?} (raw text not retained by owned-parse path)",
+                                                e
                                             );
                                             // Continue processing other messages
                                         }
@@ -541,10 +544,19 @@ fn parse_message_with_buffers(
     text: &str,
     buffers: &mut simd_json::Buffers,
 ) -> TurboResult<JetstreamMessage> {
+    parse_message_owned_with_buffers(text.to_string(), buffers)
+}
+
+/// Parse a message from an already-owned buffer, avoiding the input copy that
+/// the `&str` path must make (simd-json requires mutable input). The Jetstream
+/// socket hands us an owned `String` per message, so production uses this.
+fn parse_message_owned_with_buffers(
+    mut text: String,
+    buffers: &mut simd_json::Buffers,
+) -> TurboResult<JetstreamMessage> {
     // Use simd-json for faster parsing (2-4x faster than serde_json)
     // simd-json requires mutable input and uses unsafe SIMD operations internally
     // The library handles safety internally through careful validation
-    let mut text = text.to_string();
     let message: JetstreamMessage =
         unsafe { simd_json::serde::from_str_with_buffers(&mut text, buffers)? };
 
