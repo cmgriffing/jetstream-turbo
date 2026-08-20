@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize, Serializer};
 
+/// Convert a `serde_json::Value` record into the native simd-json owned DOM
+/// used by `CommitData::record`. Kept as a helper so callers constructing
+/// messages (fixtures, tests) do not need to depend on simd-json directly.
+pub fn owned_record(value: serde_json::Value) -> simd_json::OwnedValue {
+    let mut json = serde_json::to_string(&value).expect("record serializes to JSON");
+    unsafe { simd_json::from_str(&mut json) }.expect("record re-parses as JSON")
+}
+
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -80,7 +88,7 @@ pub struct CommitData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rkey: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub record: Option<serde_json::Value>,
+    pub record: Option<simd_json::OwnedValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
 }

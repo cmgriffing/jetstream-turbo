@@ -10,7 +10,7 @@ use jetstream_turbo_rs::hydration::{Hydrator, TurboCache};
 use jetstream_turbo_rs::models::bluesky::{BlueskyPost, BlueskyProfile};
 use jetstream_turbo_rs::models::enriched::{EnrichedRecord, HydratedMetadata, ProcessingMetrics};
 use jetstream_turbo_rs::models::jetstream::{
-    CommitData, JetstreamMessage, MessageKind, OperationType,
+    owned_record, CommitData, JetstreamMessage, MessageKind, OperationType,
 };
 use jetstream_turbo_rs::storage::{EventPublisher, RecordStore, SQLitePragmaConfig, SQLiteStore};
 use jetstream_turbo_rs::testing::{
@@ -81,10 +81,10 @@ fn create_test_message(i: usize) -> JetstreamMessage {
             operation_type: OperationType::Create,
             collection: Some("app.bsky.feed.post".to_string()),
             rkey: Some(format!("{i}")),
-            record: Some(json!({
+            record: Some(owned_record(json!({
                 "text": format!("Hello world {}", i),
                 "createdAt": "2024-01-01T00:00:00.000Z"
-            })),
+            }))),
             cid: Some(format!("bafyrei{i}")),
         }),
     }

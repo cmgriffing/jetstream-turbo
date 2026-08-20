@@ -10,14 +10,15 @@ use jetstream_turbo_rs::models::enriched::HydratedMetadata;
 use jetstream_turbo_rs::models::jetstream::{
     CommitData, JetstreamMessage, MessageKind, OperationType,
 };
+use jetstream_turbo_rs::models::jetstream::owned_record;
 use jetstream_turbo_rs::models::record_view::{FacetFeature, RecordView};
 use jetstream_turbo_rs::testing::create_profile;
 use std::hint::black_box;
 use std::sync::Arc;
 
 /// A realistic Bluesky post record with reply, embed, and facet references.
-fn realistic_record() -> serde_json::Value {
-    serde_json::json!({
+fn realistic_record() -> simd_json::OwnedValue {
+    owned_record(serde_json::json!({
         "$type": "app.bsky.feed.post",
         "createdAt": "2026-02-13T02:20:02.89585500Z",
         "text": "Hello world #testing with a mention and a link",
@@ -45,7 +46,7 @@ fn realistic_record() -> serde_json::Value {
                 ]
             }
         ]
-    })
+    }))
 }
 
 /// A realistic Jetstream commit message wrapping the post record.

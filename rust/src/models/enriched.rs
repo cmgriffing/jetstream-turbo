@@ -175,6 +175,7 @@ impl EnrichedRecord {
 
     #[inline(always)]
     pub fn get_text(&self) -> Option<&str> {
+        use simd_json::prelude::*;
         self.message
             .commit
             .as_ref()
@@ -232,7 +233,7 @@ impl HydratedMetadata {
 mod tests {
     use super::*;
     use crate::client::{BlueskyOperation, UpstreamFailureCategory};
-    use crate::models::jetstream::{CommitData, MessageKind, OperationType};
+    use crate::models::jetstream::{owned_record, CommitData, MessageKind, OperationType};
     use serde_json::json;
 
     #[test]
@@ -247,7 +248,7 @@ mod tests {
                 operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("test123".to_string()),
-                record: Some(json!({"text": "Hello world"})),
+                record: Some(owned_record(json!({"text": "Hello world"}))),
                 cid: Some("bafyrei".to_string()),
             }),
         };
@@ -269,7 +270,7 @@ mod tests {
                 operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("test123".to_string()),
-                record: Some(json!({"text": "Hello"})),
+                record: Some(owned_record(json!({"text": "Hello"}))),
                 cid: Some("bafyrei".to_string()),
             }),
         });
@@ -293,7 +294,7 @@ mod tests {
                 operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("test123".to_string()),
-                record: Some(json!({"text": "Hello world"})),
+                record: Some(owned_record(json!({"text": "Hello world"}))),
                 cid: Some("bafyrei".to_string()),
             }),
         };

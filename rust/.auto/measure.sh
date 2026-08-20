@@ -16,12 +16,20 @@ emit_estimate() {
 }
 
 # ---------- Primary: throughput (msgs/sec, higher better) ----------
-TP_OUT="$(cargo bench --bench cpu_throughput 2>&1)"
-TP="$(printf '%s\n' "$TP_OUT" | sed -n 's/^msgs\/sec: //p' | tail -1)"
-if [ -z "$TP" ]; then
-    printf 'No msgs/sec line in throughput output:\n%s\n' "$TP_OUT" >&2
-    exit 1
-fi
+# Run the bench 3x and take the median of the medians: single-invocation
+# medians still swing with machine load/thermals, so an outer median
+# cancels invocation-level noise.
+TP_VALUES=()
+for _ in 1 2 3; do
+    TP_OUT="$(cargo bench --bench cpu_throughput 2>&1)"
+    TP="$(printf '%s\n' "$TP_OUT" | sed -n 's/^msgs\/sec: //p' | tail -1)"
+    if [ -z "$TP" ]; then
+        printf 'No msgs/sec line in throughput output:\n%s\n' "$TP_OUT" >&2
+        exit 1
+    fi
+    TP_VALUES+=("$TP")
+done
+TP="$(printf '%s\n' "${TP_VALUES[@]}" | sort -n | sed -n '2p')"
 echo "METRIC throughput_msgs_per_sec=$TP"
 
 # ---------- Secondary: Tier 1 hot path ----------

@@ -1,6 +1,6 @@
 use crate::models::{
     bluesky::BlueskyProfile,
-    jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType},
+    jetstream::{owned_record, CommitData, JetstreamMessage, MessageKind, OperationType},
 };
 use std::sync::Arc;
 
@@ -20,12 +20,12 @@ pub fn create_post_message(index: usize) -> JetstreamMessage {
             operation_type: OperationType::Create,
             collection: Some("app.bsky.feed.post".to_string()),
             rkey: Some(rkey),
-            record: Some(serde_json::json!({
+            record: Some(owned_record(serde_json::json!({
                 "$type": "app.bsky.feed.post",
                 "createdAt": format!("2026-02-13T02:20:{:02}.895Z", index % 60),
                 "text": text,
                 "langs": ["en"]
-            })),
+            }))),
             cid: Some(format!("bafyreia{}", &format!("{index:032x}")[..32])),
         }),
     }
@@ -47,7 +47,7 @@ pub fn create_reply_message(index: usize, parent_did: &str, parent_rkey: &str) -
             operation_type: OperationType::Create,
             collection: Some("app.bsky.feed.post".to_string()),
             rkey: Some(rkey),
-            record: Some(serde_json::json!({
+            record: Some(owned_record(serde_json::json!({
                 "$type": "app.bsky.feed.post",
                 "createdAt": format!("2026-02-13T02:21:{:02}.000Z", index % 60),
                 "text": format!("Replying to the post #{}", index),
@@ -61,7 +61,7 @@ pub fn create_reply_message(index: usize, parent_did: &str, parent_rkey: &str) -
                         "uri": parent_uri
                     }
                 }
-            })),
+            }))),
             cid: Some(format!("bafyreireply{index:06}")),
         }),
     }
