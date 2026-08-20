@@ -1,16 +1,13 @@
 # Ideas Backlog — jetstream-turbo CPU throughput
 
-## Deferred / production-only wins (do NOT move the throughput bench)
+## DONE (production-only wins now implemented)
 
-- **Owned-string parse in the production ws loop** (`Message::Text` already gives an owned
-  `String`; today `parse_message_with_buffers(&text, ...)` copies it). An owned variant
-  `parse_message_owned_with_buffers(String, &mut Buffers)` would skip the ~30-40ns/message
-  copy. **Unmeasurable in `cpu_throughput`** because the bench must re-run batches over the
-  same immutable `raw_jsons` — any owned-input path forces a clone inside the timed region
-  (net zero in the bench). Real production win (~2-3%) though; do it for the ws loop.
-- Similarly `bench_parse_message_simd_json` calls the copy path; an owned variant exists
-  (`bench_parse_message_simd_json_owned`) and measures the same (~equal cost, copy is hidden
-  in parse noise).
+- **Owned-string parse in the ws loop** — DONE (experiment #12): ws `Message::Text` is
+  parsed via `parse_message_owned_with_buffers` (no input copy). The `&str` path remains for
+  `parse_message_batch` and the hot-path bench (unmeasurable there — the bench re-runs the
+  same immutable strings, so an owned path would force a clone inside the timed region).
+- `bench_parse_message_simd_json_owned` already exists and measures the owned path
+  (equivalent cost — the copy is hidden in parse noise).
 
 2. **sqlx store-path serialization buffer reuse** — dead end: `sqlx::Query` holds `&str`
   bind borrows across rows, so a single reused scratch buffer cannot feed the accumulating
