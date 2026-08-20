@@ -22,12 +22,11 @@ struct MessageContext {
     post_uris: Vec<String>,
 }
 
-/// Extract mentioned DIDs from a record view.
-///
-/// Sources: reply parent/root URIs, mention facets, and embed record URIs.
-/// All DIDs are parsed from AT-URIs (`at://did:plc:.../...`).
-fn extract_mentioned_dids_from_view(rv: &RecordView<'_>) -> Vec<String> {
+/// Extract mentioned DIDs and referenced post URIs from a record view in a
+/// single pass (the two kinds share the reply/embed traversals).
+fn extract_refs_from_view(rv: &RecordView<'_>) -> (Vec<String>, Vec<String>) {
     let mut mentioned_dids = Vec::new();
+    let mut uris = Vec::new();
 
     // From reply references
     if let Some(refs) = rv.reply_refs() {
@@ -39,6 +38,16 @@ fn extract_mentioned_dids_from_view(rv: &RecordView<'_>) -> Vec<String> {
         if let Some(did) = refs.root_uri.and_then(extract_did_from_at_uri) {
             if did.starts_with("did:plc:") {
                 mentioned_dids.push(did.to_string());
+            }
+        }
+        if let Some(uri) = refs.parent_uri {
+            if !uri.is_empty() && is_valid_at_uri(uri) {
+                uris.push(uri.to_string());
+            }
+        }
+        if let Some(uri) = refs.root_uri {
+            if !uri.is_empty() && is_valid_at_uri(uri) {
+                uris.push(uri.to_string());
             }
         }
     }
@@ -61,44 +70,16 @@ fn extract_mentioned_dids_from_view(rv: &RecordView<'_>) -> Vec<String> {
                 mentioned_dids.push(did.to_string());
             }
         }
-    }
-
-    mentioned_dids.sort();
-    mentioned_dids.dedup();
-    mentioned_dids
-}
-
-/// Extract referenced post URIs from a record view.
-///
-/// Sources: reply parent/root URIs and embed record URIs.
-/// All URIs are validated with `is_valid_at_uri`.
-fn extract_post_uris_from_view(rv: &RecordView<'_>) -> Vec<String> {
-    let mut uris = Vec::new();
-
-    // From reply references
-    if let Some(refs) = rv.reply_refs() {
-        if let Some(uri) = refs.parent_uri {
-            if !uri.is_empty() && is_valid_at_uri(uri) {
-                uris.push(uri.to_string());
-            }
-        }
-        if let Some(uri) = refs.root_uri {
-            if !uri.is_empty() && is_valid_at_uri(uri) {
-                uris.push(uri.to_string());
-            }
-        }
-    }
-
-    // From embed record
-    if let Some(uri) = rv.embed_record_uri() {
         if !uri.is_empty() && is_valid_at_uri(uri) {
             uris.push(uri.to_string());
         }
     }
 
+    mentioned_dids.sort();
+    mentioned_dids.dedup();
     uris.sort();
     uris.dedup();
-    uris
+    (mentioned_dids, uris)
 }
 
 /// Extract the DID from an AT-URI (`at://did:plc:abc123/...`).
@@ -231,13 +212,7 @@ where
                 .commit
                 .as_ref()
                 .and_then(|c| c.record.as_ref())
-                .map(|r| {
-                    let rv = RecordView::new(r);
-                    (
-                        extract_mentioned_dids_from_view(&rv),
-                        extract_post_uris_from_view(&rv),
-                    )
-                })
+                .map(|r| extract_refs_from_view(&RecordView::new(r)))
                 .unwrap_or_default();
 
             contexts.push(MessageContext {
