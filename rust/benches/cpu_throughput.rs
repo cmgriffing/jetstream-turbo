@@ -49,16 +49,20 @@ fn main() {
     let mut rates = Vec::with_capacity(TIMED_RUNS);
     for _ in 0..TIMED_RUNS {
         let start = Instant::now();
-        let (records, bytes) = run_batch(&rt, &client, &hydrator, &raw_jsons);
+        let (records, bytes, parse_ms, hydrate_ms, encode_ms) =
+            run_batch(&rt, &client, &hydrator, &raw_jsons);
         let elapsed = start.elapsed();
         let msgs_per_sec = batch_size as f64 / elapsed.as_secs_f64();
         rates.push(msgs_per_sec);
         println!(
-            "run: {:.2} msgs/sec ({} records, {} bytes, {:.2} ms)",
+            "run: {:.2} msgs/sec ({} records, {} bytes, {:.2} ms; parse {:.2} ms, hydrate {:.2} ms, encode {:.2} ms)",
             msgs_per_sec,
             records,
             bytes,
-            elapsed.as_secs_f64() * 1000.0
+            elapsed.as_secs_f64() * 1000.0,
+            parse_ms,
+            hydrate_ms,
+            encode_ms
         );
     }
 
@@ -74,20 +78,21 @@ fn run_batch(
     client: &JetstreamClient,
     hydrator: &Hydrator<MockProfileFetcher, MockPostFetcher>,
     raw_jsons: &[String],
-) -> (usize, usize) {
-    // Parse.
-    let mut parsed = Vec::with_capacity(raw_jsons.len());
-    for raw in raw_jsons {
-        let message = client.parse_message(raw).expect("parse message");
-        parsed.push(message);
-    }
+) -> (usize, usize, f64, f64, f64) {
+    // Parse (shared simd-json buffers across the batch).
+    let parse_start = Instant::now();
+    let parsed = client.parse_message_batch(raw_jsons).expect("parse messages");
+    let parse_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
 
     // Hydrate (cache-hit).
+    let hydrate_start = Instant::now();
     let enriched = rt
         .block_on(hydrator.hydrate_batch(parsed))
         .expect("hydrate batch");
+    let hydrate_ms = hydrate_start.elapsed().as_secs_f64() * 1000.0;
 
     // Serialize (message + metadata, mirroring the storage path).
+    let encode_start = Instant::now();
     let mut bytes = 0usize;
     for record in &enriched {
         let message_json = simd_json::to_string(&record.message).expect("serialize message");
@@ -96,6 +101,7 @@ fn run_batch(
         bytes += message_json.len() + metadata_json.len();
         black_box((message_json, metadata_json));
     }
+    let encode_ms = encode_start.elapsed().as_secs_f64() * 1000.0;
 
-    (enriched.len(), bytes)
+    (enriched.len(), bytes, parse_ms, hydrate_ms, encode_ms)
 }

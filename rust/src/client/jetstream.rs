@@ -106,6 +106,19 @@ impl JetstreamClient {
     pub fn parse_message(&self, text: &str) -> TurboResult<JetstreamMessage> {
         parse_message(text)
     }
+
+    /// Parse a batch of raw messages, reusing simd-json's internal scratch
+    /// buffers across messages to avoid per-message buffer allocation.
+    pub fn parse_message_batch(&self, raws: &[String]) -> TurboResult<Vec<JetstreamMessage>> {
+        let mut buffers = simd_json::Buffers::new(
+            raws.iter().map(String::len).max().unwrap_or(128).max(128),
+        );
+        let mut out = Vec::with_capacity(raws.len());
+        for raw in raws {
+            out.push(parse_message_with_buffers(raw, &mut buffers)?);
+        }
+        Ok(out)
+    }
 }
 
 impl MessageSource for JetstreamClient {
@@ -518,11 +531,19 @@ fn endpoint_url(
 }
 
 fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
+    parse_message_with_buffers(text, &mut simd_json::Buffers::new(text.len()))
+}
+
+fn parse_message_with_buffers(
+    text: &str,
+    buffers: &mut simd_json::Buffers,
+) -> TurboResult<JetstreamMessage> {
     // Use simd-json for faster parsing (2-4x faster than serde_json)
     // simd-json requires mutable input and uses unsafe SIMD operations internally
     // The library handles safety internally through careful validation
     let mut text = text.to_string();
-    let message: JetstreamMessage = unsafe { simd_json::from_str(&mut text)? };
+    let message: JetstreamMessage =
+        unsafe { simd_json::serde::from_str_with_buffers(&mut text, buffers)? };
 
     // Validate required fields
     if message.did.is_empty() {
