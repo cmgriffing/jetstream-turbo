@@ -222,6 +222,10 @@ impl MessageSource for JetstreamClient {
                         endpoint_failures[current_endpoint] = 0;
 
                         let (_, mut read) = ws_stream.split();
+                        // Reuse simd-json's internal scratch buffers across all
+                        // messages on this connection (avoids per-message
+                        // allocation of the parse scratch buffers).
+                        let mut parse_buffers = simd_json::Buffers::new(8192);
                         let useful_data_deadline = tokio::time::sleep_until(
                             data_idle_timeout
                                 .map(|timeout| Instant::now() + timeout)
@@ -248,7 +252,7 @@ impl MessageSource for JetstreamClient {
                                     match msg_result {
                                 Ok(Message::Text(text)) => {
                                     trace!("Received message: {}", text);
-                                    match parse_message(&text) {
+                                    match parse_message_with_buffers(&text, &mut parse_buffers) {
                                         Ok(message) => {
                                             if is_in_scope(&message, &wanted_collections) {
                                                 if let Some(event_time_us) = message.time_us {

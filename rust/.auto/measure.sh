@@ -43,3 +43,9 @@ cargo bench --bench regression -- "${CRIT_ARGS[@]}" hydration >/dev/null 2>&1 ||
 for b in single_message_hydration batch_hydration_25_messages; do
     emit_estimate "$b"
 done
+
+# ---------- Secondary: sqlite store guards (keep an eye when touching storage) ----------
+cargo bench --bench regression -- "${CRIT_ARGS[@]}" sqlite >/dev/null 2>&1 || true
+for b in sqlite_store_record sqlite_batch_store; do
+    emit_estimate "$b"
+done
