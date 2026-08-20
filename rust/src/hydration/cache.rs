@@ -183,12 +183,15 @@ impl TurboCache {
         None
     }
 
-    pub fn get_user_profiles(&self, dids: &[String]) -> Vec<Option<Arc<BlueskyProfile>>> {
+    pub fn get_user_profiles<S: AsRef<str>>(
+        &self,
+        dids: &[S],
+    ) -> Vec<Option<Arc<BlueskyProfile>>> {
         let mut profiles = Vec::with_capacity(dids.len());
         let mut misses = 0_u64;
 
         for did in dids {
-            match self.user_cache.get(did) {
+            match self.user_cache.get(did.as_ref()) {
                 Some(profile) => profiles.push(Some(profile)),
                 None => {
                     misses += 1;

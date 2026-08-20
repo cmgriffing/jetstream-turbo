@@ -103,9 +103,9 @@ where
     /// Ensure all given profiles are in cache. Returns one profile per DID
     /// (cache hit or freshly fetched), aligned with `dids`; `None` when a
     /// profile does not exist.
-    pub async fn resolve_profiles(
+    pub async fn resolve_profiles<S: AsRef<str>>(
         &self,
-        dids: &[String],
+        dids: &[S],
     ) -> TurboResult<Vec<Option<Arc<BlueskyProfile>>>> {
         if dids.is_empty() {
             return Ok(Vec::new());
@@ -116,7 +116,7 @@ where
         let mut uncached_indexes = Vec::new();
         for (index, profile) in profiles.iter().enumerate() {
             if profile.is_none() {
-                uncached.push(dids[index].clone());
+                uncached.push(dids[index].as_ref().to_string());
                 uncached_indexes.push(index);
             }
         }
@@ -142,7 +142,10 @@ where
     }
 
     /// Resolve every URI to exactly one ordered outcome.
-    pub async fn resolve_posts(&self, uris: &[String]) -> TurboResult<Vec<PostFetchOutcome>> {
+    pub async fn resolve_posts<S: AsRef<str>>(
+        &self,
+        uris: &[S],
+    ) -> TurboResult<Vec<PostFetchOutcome>> {
         if uris.is_empty() {
             return Ok(Vec::new());
         }
@@ -151,12 +154,12 @@ where
         let mut uncached = Vec::new();
         let mut uncached_indexes = Vec::new();
         for (index, uri) in uris.iter().enumerate() {
-            if let Some(post) = self.cache.get_post(uri) {
+            if let Some(post) = self.cache.get_post(uri.as_ref()) {
                 outcomes[index] = Some(PostFetchOutcome::Found((*post).clone()));
-            } else if let Some(failure) = self.cache.get_unavailable_post(uri) {
+            } else if let Some(failure) = self.cache.get_unavailable_post(uri.as_ref()) {
                 outcomes[index] = Some(PostFetchOutcome::TemporarilyUnavailable(failure));
             } else {
-                uncached.push(uri.clone());
+                uncached.push(uri.as_ref().to_string());
                 uncached_indexes.push(index);
             }
         }
@@ -354,7 +357,8 @@ mod tests {
             Arc::new(MockPostFetcher::new()),
         );
 
-        let resolved = resolver.resolve_profiles(&[]).await.unwrap();
+        let empty_dids: Vec<String> = Vec::new();
+        let resolved = resolver.resolve_profiles(&empty_dids).await.unwrap();
         assert!(resolved.is_empty());
     }
 

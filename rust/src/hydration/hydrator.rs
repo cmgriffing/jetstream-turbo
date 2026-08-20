@@ -17,7 +17,6 @@ use tracing::info;
 
 struct MessageContext {
     message: JetstreamMessage,
-    author_did: String,
     is_post: bool,
     mentioned_dids: Vec<String>,
     post_uris: Vec<String>,
@@ -144,23 +143,24 @@ where
     fn hydrate_one(
         &self,
         message: JetstreamMessage,
-        author_did: &str,
         is_post: bool,
         mentioned_dids: Vec<String>,
         post_uris: Vec<String>,
-        profiles_by_did: &HashMap<&str, Arc<BlueskyProfile>, AHashState>,
+        profiles_by_did: &HashMap<Arc<str>, Arc<BlueskyProfile>, AHashState>,
         post_outcomes: &HashMap<String, PostFetchOutcome, AHashState>,
         processed_at: chrono::DateTime<chrono::Utc>,
     ) -> TurboResult<EnrichedRecord> {
         let start_time = Instant::now();
 
-        tracing::Span::current().record("did", author_did);
-
         let mut enriched = EnrichedRecord::new_with_timestamp(message, processed_at);
         enriched.hydrated_metadata.hydration_quality = HydrationQuality::Complete;
 
+        tracing::Span::current().record("did", enriched.message.extract_did());
+
         if is_post {
-            let author_profile = profiles_by_did.get(author_did).cloned();
+            let author_profile = profiles_by_did
+                .get(enriched.message.extract_did())
+                .cloned();
             let hit = author_profile.is_some();
             tracing::Span::current().record("cache_hit", hit);
 
@@ -174,7 +174,7 @@ where
         }
 
         for uri in post_uris {
-            let outcome = post_outcomes.get(&uri).ok_or_else(|| {
+            let outcome = post_outcomes.get(uri.as_str()).ok_or_else(|| {
                 crate::models::TurboError::InvalidApiResponse(
                     "missing post outcome for requested URI".to_string(),
                 )
@@ -220,12 +220,9 @@ where
         let message_count = messages.len();
         tracing::Span::current().record("message_count", message_count);
 
-        let mut unique_dids = HashSet::with_hasher(AHashState::default());
-        let mut unique_uris = HashSet::with_hasher(AHashState::default());
         let mut contexts = Vec::with_capacity(message_count);
 
         for message in messages {
-            let author_did = message.extract_did().to_string();
             let is_post = message
                 .commit
                 .as_ref()
@@ -245,21 +242,27 @@ where
                 })
                 .unwrap_or_default();
 
-            unique_dids.insert(author_did.clone());
-            for did in &mentioned_dids {
-                unique_dids.insert(did.clone());
-            }
-            for uri in &post_uris {
-                unique_uris.insert(uri.clone());
-            }
-
             contexts.push(MessageContext {
                 message,
-                author_did,
                 is_post,
                 mentioned_dids,
                 post_uris,
             });
+        }
+
+        // Dedup over the stored contexts.
+        let mut unique_dids: HashSet<String, AHashState> =
+            HashSet::with_hasher(AHashState::default());
+        let mut unique_uris: HashSet<String, AHashState> =
+            HashSet::with_hasher(AHashState::default());
+        for ctx in &contexts {
+            unique_dids.insert(ctx.message.did.clone());
+            for did in &ctx.mentioned_dids {
+                unique_dids.insert(did.clone());
+            }
+            for uri in &ctx.post_uris {
+                unique_uris.insert(uri.clone());
+            }
         }
 
         let unique_dids_count = unique_dids.len();
@@ -272,12 +275,12 @@ where
 
         let cache_check_start = Instant::now();
         let profiles = self.resolver.resolve_profiles(&dids).await?;
-        let mut profiles_by_did: HashMap<&str, Arc<BlueskyProfile>, AHashState> =
+        // Key the map by the profile's own did (`Arc<str>`, refcount bump only,
+        // no string copy) and look it up by `&str` via `Borrow<str>`.
+        let mut profiles_by_did: HashMap<Arc<str>, Arc<BlueskyProfile>, AHashState> =
             HashMap::with_capacity_and_hasher(dids.len(), AHashState::default());
-        for (did, profile) in dids.iter().zip(profiles) {
-            if let Some(profile) = profile {
-                profiles_by_did.insert(did.as_str(), profile);
-            }
+        for profile in profiles.into_iter().flatten() {
+            profiles_by_did.insert(Arc::clone(&profile.did), profile);
         }
         let post_outcomes = self.resolver.resolve_posts(&uris).await?;
         if post_outcomes.len() != uris.len() {
@@ -290,7 +293,7 @@ where
         let post_outcomes = uris
             .into_iter()
             .zip(post_outcomes)
-            .collect::<HashMap<_, _, AHashState>>();
+            .collect::<HashMap<String, _, AHashState>>();
         let api_fetch_time = cache_check_start.elapsed().as_millis() as u64;
         tracing::Span::current().record("api_fetch_time_ms", api_fetch_time);
 
@@ -314,7 +317,7 @@ where
     fn hydrate_contexts(
         &self,
         contexts: Vec<MessageContext>,
-        profiles_by_did: &HashMap<&str, Arc<BlueskyProfile>, AHashState>,
+        profiles_by_did: &HashMap<Arc<str>, Arc<BlueskyProfile>, AHashState>,
         post_outcomes: &HashMap<String, PostFetchOutcome, AHashState>,
     ) -> TurboResult<Vec<EnrichedRecord>> {
         let mut results = Vec::with_capacity(contexts.len());
@@ -322,7 +325,6 @@ where
         for ctx in contexts {
             let enriched = self.hydrate_one(
                 ctx.message,
-                &ctx.author_did,
                 ctx.is_post,
                 ctx.mentioned_dids,
                 ctx.post_uris,
