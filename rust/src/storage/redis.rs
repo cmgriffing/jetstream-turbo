@@ -172,7 +172,7 @@ mod tests {
     fn test_generate_message_id() {
         let record = EnrichedRecord {
             message: crate::models::jetstream::JetstreamMessage {
-                did: "did:plc:test".to_string(),
+                did: "did:plc:test".to_string().into(),
                 seq: Some(12345),
                 time_us: Some(1640995200000000),
                 kind: crate::models::jetstream::MessageKind::Commit,

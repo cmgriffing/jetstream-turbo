@@ -583,7 +583,7 @@ mod tests {
 
     fn checkpoint(time_us: u64, source_seq: Option<u64>) -> IngestionCheckpoint {
         let message = JetstreamMessage {
-            did: "did:plc:cursor".to_string(),
+            did: "did:plc:cursor".to_string().into(),
             time_us: Some(time_us),
             seq: source_seq,
             kind: crate::models::jetstream::MessageKind::Account,
@@ -777,7 +777,7 @@ mod tests {
         assert!(result.is_ok());
 
         let message = result.unwrap();
-        assert_eq!(message.did, "did:plc:test");
+        assert_eq!(message.did.as_ref(), "did:plc:test");
         assert_eq!(message.seq, Some(12345));
     }
 
@@ -839,7 +839,7 @@ mod tests {
             .expect("stream should produce a result")
             .expect("recovered message should be valid");
 
-        assert_eq!(message.did, "did:plc:recovered");
+        assert_eq!(message.did.as_ref(), "did:plc:recovered");
         let snapshot = progress.snapshot(ProgressThresholds {
             startup_grace: Duration::from_secs(10),
             ingress_idle: Duration::from_secs(10),
@@ -880,7 +880,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(message.did, "did:plc:recovered");
+        assert_eq!(message.did.as_ref(), "did:plc:recovered");
     }
 
     #[tokio::test]

@@ -1127,7 +1127,7 @@ mod tests {
 
     fn sample_record() -> EnrichedRecord {
         EnrichedRecord::new(JetstreamMessage {
-            did: "did:plc:test".to_string(),
+            did: "did:plc:test".to_string().into(),
             time_us: Some(1640995200000000),
             seq: Some(1),
             kind: MessageKind::Commit,

@@ -34,7 +34,7 @@ fn main() {
     // Pre-populate the cache so hydration is a cache hit (no fetcher I/O).
     let cache = TurboCache::new(batch_size, batch_size);
     for message in &messages {
-        cache.set_user_profile(message.did.clone(), Arc::new(create_profile(&message.did)));
+        cache.set_user_profile(message.did.to_string(), Arc::new(create_profile(&message.did)));
     }
 
     let profile_fetcher = Arc::new(MockProfileFetcher::new());

@@ -839,7 +839,7 @@ mod tests {
     fn test_record(seq: u64) -> EnrichedRecord {
         EnrichedRecord::new_with_timestamp(
             JetstreamMessage {
-                did: "did:plc:stored".to_string(),
+                did: "did:plc:stored".to_string().into(),
                 time_us: Some(1_000_000 + seq),
                 seq: Some(seq),
                 kind: MessageKind::Commit,

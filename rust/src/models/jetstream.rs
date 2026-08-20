@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize, Serializer};
+use std::sync::Arc;
 
 /// Convert a `serde_json::Value` record into the native simd-json owned DOM
 /// used by `CommitData::record`. Kept as a helper so callers constructing
@@ -67,7 +68,7 @@ impl Serialize for OperationType {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct JetstreamMessage {
-    pub did: String,
+    pub did: Arc<str>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_us: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,7 +151,7 @@ mod tests {
         "#;
 
         let message: JetstreamMessage = serde_json::from_str(json_str).unwrap();
-        assert_eq!(message.did, "did:plc:test");
+        assert_eq!(message.did.as_ref(), "did:plc:test");
         assert!(message.is_create_operation());
         assert_eq!(
             message.extract_at_uri(),

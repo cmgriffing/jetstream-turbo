@@ -52,7 +52,7 @@ fn realistic_record() -> simd_json::OwnedValue {
 /// A realistic Jetstream commit message wrapping the post record.
 fn realistic_message() -> JetstreamMessage {
     JetstreamMessage {
-        did: "did:plc:author123".to_string(),
+        did: "did:plc:author123".to_string().into(),
         time_us: Some(1770949213790196),
         seq: Some(100000),
         kind: MessageKind::Commit,

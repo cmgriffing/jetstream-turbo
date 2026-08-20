@@ -98,7 +98,7 @@ async fn test_single_message_flows_through_pipeline() {
     assert_eq!(results.len(), 1, "should produce exactly 1 enriched record");
 
     // Verify: DID matches
-    assert_eq!(results[0].get_did(), did);
+    assert_eq!(results[0].get_did(), did.as_ref());
 
     // Verify: record store was called once with 1 record
     assert_eq!(
@@ -187,7 +187,7 @@ async fn test_reply_message_extracts_mentioned_dids() {
     let results = pipeline.process_batch(vec![reply_message]).await;
 
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].get_did(), reply_did);
+    assert_eq!(results[0].get_did(), reply_did.as_ref());
 }
 
 #[tokio::test]
@@ -227,7 +227,7 @@ async fn test_broadcast_delivers_records() {
     let broadcast_record = receiver
         .try_recv()
         .expect("should receive broadcast record");
-    assert_eq!(broadcast_record.get_did(), did);
+    assert_eq!(broadcast_record.get_did(), did.as_ref());
 }
 
 #[tokio::test]
@@ -247,7 +247,7 @@ async fn test_profile_fetcher_tracks_requested_dids() {
     // At least one call should include our DID
     let all_dids: Vec<String> = requested.iter().flat_map(|v| v.iter().cloned()).collect();
     assert!(
-        all_dids.contains(&did),
+        all_dids.iter().any(|d| d.as_str() == did.as_ref()),
         "profile fetcher should have been asked for the message DID"
     );
 }

@@ -249,14 +249,14 @@ where
         }
 
         // Dedup over the stored contexts.
-        let mut unique_dids: HashSet<String, AHashState> =
+        let mut unique_dids: HashSet<Arc<str>, AHashState> =
             HashSet::with_hasher(AHashState::default());
         let mut unique_uris: HashSet<String, AHashState> =
             HashSet::with_hasher(AHashState::default());
         for ctx in &contexts {
-            unique_dids.insert(ctx.message.did.clone());
+            unique_dids.insert(Arc::clone(&ctx.message.did));
             for did in &ctx.mentioned_dids {
-                unique_dids.insert(did.clone());
+                unique_dids.insert(Arc::from(did.clone()));
             }
             for uri in &ctx.post_uris {
                 unique_uris.insert(uri.clone());
@@ -268,7 +268,7 @@ where
         tracing::Span::current().record("unique_dids", unique_dids_count);
         tracing::Span::current().record("unique_uris", unique_uris_count);
 
-        let dids: Vec<String> = unique_dids.into_iter().collect();
+        let dids: Vec<Arc<str>> = unique_dids.into_iter().collect();
         let uris: Vec<String> = unique_uris.into_iter().collect();
 
         let cache_check_start = Instant::now();

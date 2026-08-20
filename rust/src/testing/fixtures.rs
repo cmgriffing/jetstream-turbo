@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 /// Create a realistic Bluesky post creation message.
 pub fn create_post_message(index: usize) -> JetstreamMessage {
-    let did = format!("did:plc:user{index:04}");
+    let did: Arc<str> = format!("did:plc:user{index:04}").into();
     let rkey = format!("3mepgzgia{index:04}");
     let text = sample_post_text(index);
 
@@ -33,7 +33,7 @@ pub fn create_post_message(index: usize) -> JetstreamMessage {
 
 /// Create a post message that includes a reply reference.
 pub fn create_reply_message(index: usize, parent_did: &str, parent_rkey: &str) -> JetstreamMessage {
-    let did = format!("did:plc:replier{index:04}");
+    let did: Arc<str> = format!("did:plc:replier{index:04}").into();
     let rkey = format!("3reply{index:06}");
     let parent_uri = format!("at://{parent_did}/app.bsky.feed.post/{parent_rkey}");
 

@@ -72,7 +72,7 @@ fn create_test_post(i: usize) -> BlueskyPost {
 
 fn create_test_message(i: usize) -> JetstreamMessage {
     JetstreamMessage {
-        did: format!("did:plc:test{i}"),
+        did: format!("did:plc:test{i}").into(),
         time_us: Some(1640995200000000 + i as u64),
         seq: Some(i as u64),
         kind: MessageKind::Commit,

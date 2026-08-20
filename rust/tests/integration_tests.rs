@@ -77,7 +77,7 @@ mod tests {
         assert!(result.is_ok());
 
         let message = result.unwrap();
-        assert_eq!(message.did, "did:plc:test");
+        assert_eq!(message.did.as_ref(), "did:plc:test");
         assert_eq!(message.seq, Some(12345));
     }
 
@@ -213,7 +213,7 @@ mod tests {
 
         // 2. Simulate message reception
         let messages = vec![JetstreamMessage {
-            did: "did:plc:user1".to_string(),
+            did: "did:plc:user1".to_string().into(),
             seq: Some(1),
             time_us: Some(1704067200000000),
             kind: MessageKind::Commit,

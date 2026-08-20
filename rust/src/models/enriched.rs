@@ -239,7 +239,7 @@ mod tests {
     #[test]
     fn test_enriched_record_creation() {
         let message = JetstreamMessage {
-            did: "did:plc:test".to_string(),
+            did: "did:plc:test".to_string().into(),
             time_us: Some(1640995200000000),
             seq: Some(12345),
             kind: MessageKind::Commit,
@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn test_cache_hit_rate_calculation() {
         let mut enriched = EnrichedRecord::new(JetstreamMessage {
-            did: "did:plc:test".to_string(),
+            did: "did:plc:test".to_string().into(),
             time_us: Some(1640995200000000),
             seq: Some(12345),
             kind: MessageKind::Commit,
@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn test_empty_hydrated_metadata_serializes_compactly() {
         let message = JetstreamMessage {
-            did: "did:plc:test".to_string(),
+            did: "did:plc:test".to_string().into(),
             time_us: Some(1640995200000000),
             seq: Some(12345),
             kind: MessageKind::Commit,
