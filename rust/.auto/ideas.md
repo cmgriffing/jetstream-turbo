@@ -36,3 +36,11 @@
   commit; not introduced by this session.
 - `benches/Cargo.toml` + `tests/Cargo.toml` are separate packages (jetstream-turbo-benches /
   jetstream-turbo-tests) not in the root workspace; root Cargo.toml declares the real benches.
+
+## Dead end (measured, do NOT retry)
+
+4. **Native owned-DOM parse** (`simd_json::to_owned_value_with_buffers` + by-value field
+   extraction via `HashMap::remove`, zero-copy `Arc::from(String)`/`String` moves): the
+   stage3 tape→DOM conversion is ~1.7x SLOWER than simd-json's serde bridge for these
+   small messages. parse phase went 4.3ms → 7.5ms. Reverted (experiment #10).
+   Keep the serde bridge in `parse_message_with_buffers`.
