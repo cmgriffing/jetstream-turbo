@@ -1,6 +1,11 @@
 # Agent Instructions
 
+
 ## Benchmark Baselines
+
+Do not modify or vendor dependencies
+
+Make only minimal changes to tests and avoid modifying actual test logic unless absolutely necessary.
 
 Do not update Criterion baselines from a feature branch worktree.
 
