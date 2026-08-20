@@ -100,37 +100,45 @@ where
 
     // ---- Batch resolution ----
 
-    /// Ensure all given profiles are in cache. Returns the number successfully
-    /// fetched (cache hits are not counted).
-    pub async fn resolve_profiles(&self, dids: &[String]) -> TurboResult<usize> {
+    /// Ensure all given profiles are in cache. Returns one profile per DID
+    /// (cache hit or freshly fetched), aligned with `dids`; `None` when a
+    /// profile does not exist.
+    pub async fn resolve_profiles(
+        &self,
+        dids: &[String],
+    ) -> TurboResult<Vec<Option<Arc<BlueskyProfile>>>> {
         if dids.is_empty() {
-            return Ok(0);
+            return Ok(Vec::new());
         }
 
-        let cached_flags = self.cache.check_user_profiles_cached(dids);
-        let uncached: Vec<String> = dids
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !cached_flags[*i])
-            .map(|(_, did)| did.clone())
-            .collect();
+        let mut profiles = self.cache.get_user_profiles(dids);
+        let mut uncached = Vec::new();
+        let mut uncached_indexes = Vec::new();
+        for (index, profile) in profiles.iter().enumerate() {
+            if profile.is_none() {
+                uncached.push(dids[index].clone());
+                uncached_indexes.push(index);
+            }
+        }
 
         if uncached.is_empty() {
-            return Ok(0);
+            return Ok(profiles);
         }
 
-        let profiles = self.profile_fetcher.bulk_fetch_profiles(&uncached).await?;
+        let fetched = self.profile_fetcher.bulk_fetch_profiles(&uncached).await?;
         let mut resolved = 0;
-
-        for (did, maybe_profile) in uncached.iter().zip(profiles) {
-            if let Some(profile) = maybe_profile {
-                self.cache.set_user_profile(did.clone(), Arc::new(profile));
+        for ((did, index), fetched) in uncached.iter().zip(uncached_indexes).zip(fetched) {
+            if let Some(profile) = fetched {
+                let profile_arc = Arc::new(profile);
+                self.cache
+                    .set_user_profile(did.clone(), Arc::clone(&profile_arc));
+                profiles[index] = Some(profile_arc);
                 resolved += 1;
             }
         }
 
         trace!("Resolved {}/{} missing profiles", resolved, uncached.len());
-        Ok(resolved)
+        Ok(profiles)
     }
 
     /// Resolve every URI to exactly one ordered outcome.
@@ -326,7 +334,8 @@ mod tests {
 
         let dids = vec!["did:plc:alice".to_string(), "did:plc:bob".to_string()];
         let resolved = resolver.resolve_profiles(&dids).await.unwrap();
-        assert_eq!(resolved, 1);
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved.iter().all(|p| p.is_some()));
 
         assert_eq!(
             profile_fetcher
@@ -346,7 +355,7 @@ mod tests {
         );
 
         let resolved = resolver.resolve_profiles(&[]).await.unwrap();
-        assert_eq!(resolved, 0);
+        assert!(resolved.is_empty());
     }
 
     #[tokio::test]

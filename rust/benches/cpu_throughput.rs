@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 /// Number of timed batches to run; the median `msgs/sec` is reported.
-const TIMED_RUNS: usize = 3;
+const TIMED_RUNS: usize = 5;
 
 fn main() {
     let batch_size: usize = std::env::var("THROUGHPUT_BATCH_SIZE")

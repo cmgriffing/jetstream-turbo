@@ -1,6 +1,7 @@
 use crate::client::{PostFetchOutcome, PostFetcher, ProfileFetcher};
 use crate::hydration::resolver::CacheMissResolver;
 use crate::hydration::TurboCache;
+use crate::models::bluesky::BlueskyProfile;
 use crate::models::{
     enriched::{EnrichedRecord, HydrationQuality, ReferencedPost},
     jetstream::JetstreamMessage,
@@ -8,6 +9,7 @@ use crate::models::{
     TurboResult,
 };
 use crate::utils::serde_utils::string_utils::is_valid_at_uri;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::info;
@@ -138,25 +140,26 @@ where
             })
     }
 
-    async fn hydrate_one(
+    fn hydrate_one(
         &self,
         message: JetstreamMessage,
-        author_did: String,
+        author_did: &str,
         is_post: bool,
         mentioned_dids: Vec<String>,
         post_uris: Vec<String>,
-        post_outcomes: &std::collections::HashMap<String, PostFetchOutcome>,
+        profiles_by_did: &HashMap<&str, Arc<BlueskyProfile>>,
+        post_outcomes: &HashMap<String, PostFetchOutcome>,
         processed_at: chrono::DateTime<chrono::Utc>,
     ) -> TurboResult<EnrichedRecord> {
         let start_time = Instant::now();
 
-        tracing::Span::current().record("did", &author_did);
+        tracing::Span::current().record("did", author_did);
 
         let mut enriched = EnrichedRecord::new_with_timestamp(message, processed_at);
         enriched.hydrated_metadata.hydration_quality = HydrationQuality::Complete;
 
         if is_post {
-            let author_profile = self.resolver.resolve_profile(&author_did).await?;
+            let author_profile = profiles_by_did.get(author_did).cloned();
             let hit = author_profile.is_some();
             tracing::Span::current().record("cache_hit", hit);
 
@@ -267,7 +270,14 @@ where
         let uris: Vec<String> = unique_uris.into_iter().collect();
 
         let cache_check_start = Instant::now();
-        self.resolver.resolve_profiles(&dids).await?;
+        let profiles = self.resolver.resolve_profiles(&dids).await?;
+        let mut profiles_by_did: HashMap<&str, Arc<BlueskyProfile>> =
+            HashMap::with_capacity(dids.len());
+        for (did, profile) in dids.iter().zip(profiles) {
+            if let Some(profile) = profile {
+                profiles_by_did.insert(did.as_str(), profile);
+            }
+        }
         let post_outcomes = self.resolver.resolve_posts(&uris).await?;
         if post_outcomes.len() != uris.len() {
             return Err(crate::models::TurboError::InvalidApiResponse(format!(
@@ -279,12 +289,12 @@ where
         let post_outcomes = uris
             .into_iter()
             .zip(post_outcomes)
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<HashMap<_, _>>();
         let api_fetch_time = cache_check_start.elapsed().as_millis() as u64;
         tracing::Span::current().record("api_fetch_time_ms", api_fetch_time);
 
         let hydrate_start = Instant::now();
-        let results = self.hydrate_contexts(contexts, &post_outcomes).await?;
+        let results = self.hydrate_contexts(contexts, &profiles_by_did, &post_outcomes)?;
         let hydrate_time = hydrate_start.elapsed().as_millis() as u64;
         tracing::Span::current().record("hydrate_time_ms", hydrate_time);
 
@@ -300,25 +310,25 @@ where
         Ok(results)
     }
 
-    async fn hydrate_contexts(
+    fn hydrate_contexts(
         &self,
         contexts: Vec<MessageContext>,
-        post_outcomes: &std::collections::HashMap<String, PostFetchOutcome>,
+        profiles_by_did: &HashMap<&str, Arc<BlueskyProfile>>,
+        post_outcomes: &HashMap<String, PostFetchOutcome>,
     ) -> TurboResult<Vec<EnrichedRecord>> {
         let mut results = Vec::with_capacity(contexts.len());
         let processed_at = chrono::Utc::now();
         for ctx in contexts {
-            let enriched = self
-                .hydrate_one(
-                    ctx.message,
-                    ctx.author_did,
-                    ctx.is_post,
-                    ctx.mentioned_dids,
-                    ctx.post_uris,
-                    post_outcomes,
-                    processed_at,
-                )
-                .await?;
+            let enriched = self.hydrate_one(
+                ctx.message,
+                &ctx.author_did,
+                ctx.is_post,
+                ctx.mentioned_dids,
+                ctx.post_uris,
+                profiles_by_did,
+                post_outcomes,
+                processed_at,
+            )?;
             results.push(enriched);
         }
         Ok(results)
