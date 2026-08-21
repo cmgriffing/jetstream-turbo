@@ -24,11 +24,17 @@ fn main() {
 
     let rt = tokio::runtime::Runtime::new().expect("failed to build tokio runtime");
 
-    // Build the raw wire-form JSON for each message (the parse input).
+    // Build the raw wire-form JSON for each message (the parse input). The
+    // pipeline consumes owned buffers (matching production: the socket hands us
+    // an owned String), so pre-build one pristine copy per run up front.
     let messages = create_message_batch(batch_size);
-    let raw_jsons: Vec<String> = messages
-        .iter()
-        .map(|m| serde_json::to_string(m).expect("serialize message"))
+    let raw_jsons: Vec<Vec<String>> = (0..=TIMED_RUNS)
+        .map(|_| {
+            messages
+                .iter()
+                .map(|m| serde_json::to_string(m).expect("serialize message"))
+                .collect()
+        })
         .collect();
 
     // Pre-populate the cache so hydration is a cache hit (no fetcher I/O).
@@ -46,14 +52,17 @@ fn main() {
     let client = JetstreamClient::new(vec![], String::new());
 
     // Warm up once to populate allocators and caches.
-    let _ = black_box(run_batch(&rt, &client, &hydrator, &raw_jsons));
+    let mut raw_jsons = raw_jsons.into_iter();
+    let _ = black_box(run_batch(&rt, &client, &hydrator, raw_jsons.next().unwrap()));
 
-    // Timed runs; report the median to absorb noise.
+    // Timed runs; report the median to absorb noise. Each run consumes its own
+    // pristine copy (no input copy inside the timed region).
     let mut rates = Vec::with_capacity(TIMED_RUNS);
     for _ in 0..TIMED_RUNS {
+        let raw = raw_jsons.next().unwrap();
         let start = Instant::now();
         let (records, bytes, parse_ms, hydrate_ms, encode_ms) =
-            run_batch(&rt, &client, &hydrator, &raw_jsons);
+            run_batch(&rt, &client, &hydrator, raw);
         let elapsed = start.elapsed();
         let msgs_per_sec = batch_size as f64 / elapsed.as_secs_f64();
         rates.push(msgs_per_sec);
@@ -80,13 +89,12 @@ fn run_batch(
     rt: &tokio::runtime::Runtime,
     client: &JetstreamClient,
     hydrator: &Hydrator<MockProfileFetcher, MockPostFetcher>,
-    raw_jsons: &[String],
+    raw_jsons: Vec<String>,
 ) -> (usize, usize, f64, f64, f64) {
-    // Parse (shared simd-json buffers across the batch).
+    // Parse (shared simd-json buffers across the batch; consumes the owned
+    // buffers like production's socket path).
     let parse_start = Instant::now();
-    let parsed = client
-        .parse_message_batch(raw_jsons)
-        .expect("parse messages");
+    let parsed = client.parse_message_batch(raw_jsons).expect("parse messages");
     let parse_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
 
     // Hydrate (cache-hit).
