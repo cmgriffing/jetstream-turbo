@@ -18,6 +18,12 @@ use tracing::info;
 struct MessageContext {
     message: JetstreamMessage,
     is_post: bool,
+    /// Index into the batch's resolved-profiles vec for the author profile.
+    profile_slot: usize,
+    /// Indices into the resolved-profiles vec for mentioned DIDs.
+    mentioned_slots: Vec<usize>,
+    /// Mentioned DIDs extracted from the record; consumed into `mentioned_slots`
+    /// during dedup.
     mentioned_dids: Vec<String>,
     post_uris: Vec<String>,
 }
@@ -88,6 +94,26 @@ fn extract_did_from_at_uri(uri: &str) -> Option<&str> {
     uri.strip_prefix("at://").and_then(|s| s.split('/').next())
 }
 
+/// Assign `did` a stable slot in the dedup'd did list (and resolved-profiles
+/// vec), inserting it if new. Returns the slot index.
+fn slot_for(
+    slots: &mut HashMap<Arc<str>, usize, AHashState>,
+    dids: &mut Vec<Arc<str>>,
+    did: Arc<str>,
+) -> usize {
+    use std::collections::hash_map::Entry;
+    match slots.entry(did) {
+        Entry::Occupied(entry) => *entry.get(),
+        Entry::Vacant(entry) => {
+            let slot = dids.len();
+            dids.push(Arc::clone(entry.key()));
+            entry.insert(slot);
+            slot
+        }
+    }
+}
+
+
 pub struct Hydrator<P, Po> {
     resolver: CacheMissResolver<P, Po>,
 }
@@ -125,9 +151,10 @@ where
         &self,
         message: JetstreamMessage,
         is_post: bool,
-        mentioned_dids: Vec<String>,
+        profile_slot: usize,
+        mentioned_slots: Vec<usize>,
         post_uris: Vec<String>,
-        profiles_by_did: &HashMap<Arc<str>, Arc<BlueskyProfile>, AHashState>,
+        profiles: &[Option<Arc<BlueskyProfile>>],
         post_outcomes: &HashMap<String, PostFetchOutcome, AHashState>,
         processed_at: chrono::DateTime<chrono::Utc>,
         hydration_start: Instant,
@@ -138,15 +165,15 @@ where
         tracing::Span::current().record("did", enriched.message.extract_did());
 
         if is_post {
-            let author_profile = profiles_by_did.get(enriched.message.extract_did()).cloned();
+            let author_profile = profiles.get(profile_slot).cloned().flatten();
             let hit = author_profile.is_some();
             tracing::Span::current().record("cache_hit", hit);
 
             enriched.hydrated_metadata.author_profile = author_profile;
         }
 
-        for did in &mentioned_dids {
-            if let Some(profile) = self.resolver.cache().get_user_profile(did) {
+        for slot in &mentioned_slots {
+            if let Some(profile) = profiles.get(*slot).cloned().flatten() {
                 enriched.hydrated_metadata.add_mentioned_profile(profile);
             }
         }
@@ -223,43 +250,42 @@ where
             contexts.push(MessageContext {
                 message,
                 is_post,
+                profile_slot: 0,
+                mentioned_slots: Vec::new(),
                 mentioned_dids,
                 post_uris,
             });
         }
 
-        // Dedup over the stored contexts.
-        let mut unique_dids: HashSet<Arc<str>, AHashState> =
-            HashSet::with_hasher(AHashState::default());
+        // Dedup over the stored contexts, assigning each unique did a slot
+        // into the resolved-profiles list so hydrate_one can index it directly
+        // (no per-message hash lookup).
+        let mut did_slots: HashMap<Arc<str>, usize, AHashState> =
+            HashMap::with_capacity_and_hasher(contexts.len(), AHashState::default());
+        let mut dids: Vec<Arc<str>> = Vec::with_capacity(contexts.len());
         let mut unique_uris: HashSet<String, AHashState> =
             HashSet::with_hasher(AHashState::default());
-        for ctx in &contexts {
-            unique_dids.insert(Arc::clone(&ctx.message.did));
-            for did in &ctx.mentioned_dids {
-                unique_dids.insert(Arc::from(did.clone()));
-            }
+        for ctx in &mut contexts {
+            ctx.profile_slot = slot_for(&mut did_slots, &mut dids, Arc::clone(&ctx.message.did));
+            ctx.mentioned_slots = std::mem::take(&mut ctx.mentioned_dids)
+                .into_iter()
+                .map(|did| slot_for(&mut did_slots, &mut dids, Arc::from(did)))
+                .collect();
             for uri in &ctx.post_uris {
                 unique_uris.insert(uri.clone());
             }
         }
 
-        let unique_dids_count = unique_dids.len();
+        let unique_dids_count = dids.len();
         let unique_uris_count = unique_uris.len();
         tracing::Span::current().record("unique_dids", unique_dids_count);
         tracing::Span::current().record("unique_uris", unique_uris_count);
 
-        let dids: Vec<Arc<str>> = unique_dids.into_iter().collect();
         let uris: Vec<String> = unique_uris.into_iter().collect();
 
         let cache_check_start = Instant::now();
+        // Aligned with `dids` (slot order); `Option::None` = profile does not exist.
         let profiles = self.resolver.resolve_profiles(&dids).await?;
-        // Key the map by the profile's own did (`Arc<str>`, refcount bump only,
-        // no string copy) and look it up by `&str` via `Borrow<str>`.
-        let mut profiles_by_did: HashMap<Arc<str>, Arc<BlueskyProfile>, AHashState> =
-            HashMap::with_capacity_and_hasher(dids.len(), AHashState::default());
-        for profile in profiles.into_iter().flatten() {
-            profiles_by_did.insert(Arc::clone(&profile.did), profile);
-        }
         let post_outcomes = self.resolver.resolve_posts(&uris).await?;
         if post_outcomes.len() != uris.len() {
             return Err(crate::models::TurboError::InvalidApiResponse(format!(
@@ -276,7 +302,7 @@ where
         tracing::Span::current().record("api_fetch_time_ms", api_fetch_time);
 
         let hydrate_start = Instant::now();
-        let results = self.hydrate_contexts(contexts, &profiles_by_did, &post_outcomes)?;
+        let results = self.hydrate_contexts(contexts, &profiles, &post_outcomes)?;
         let hydrate_time = hydrate_start.elapsed().as_millis() as u64;
         tracing::Span::current().record("hydrate_time_ms", hydrate_time);
 
@@ -295,7 +321,7 @@ where
     fn hydrate_contexts(
         &self,
         contexts: Vec<MessageContext>,
-        profiles_by_did: &HashMap<Arc<str>, Arc<BlueskyProfile>, AHashState>,
+        profiles: &[Option<Arc<BlueskyProfile>>],
         post_outcomes: &HashMap<String, PostFetchOutcome, AHashState>,
     ) -> TurboResult<Vec<EnrichedRecord>> {
         let mut results = Vec::with_capacity(contexts.len());
@@ -305,9 +331,10 @@ where
             let (enriched, hydration_end) = self.hydrate_one(
                 ctx.message,
                 ctx.is_post,
-                ctx.mentioned_dids,
+                ctx.profile_slot,
+                ctx.mentioned_slots,
                 ctx.post_uris,
-                profiles_by_did,
+                profiles,
                 post_outcomes,
                 processed_at,
                 hydration_start,
