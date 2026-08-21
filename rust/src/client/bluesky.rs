@@ -78,6 +78,44 @@ struct BatchCollectorDeps {
     expires_at: Arc<RwLock<Option<String>>>,
 }
 
+/// Monotonic fetch-path counters for one collector kind. Rates (requests/sec,
+/// items per request, average latencies) are derived by differencing over time.
+#[derive(Debug, Default)]
+pub struct FetchDiagnostics {
+    /// Identifiers submitted across all requests (items per request = Δitems / Δrequests).
+    pub items_total: AtomicU64,
+    /// Total wall time spent waiting for the collector lock plus holding it
+    /// during fetch resolution, in nanoseconds. One sample per `add_and_fetch`.
+    pub lock_duration_ns_total: AtomicU64,
+    /// Number of lock-hold samples (one per `add_and_fetch` call).
+    pub lock_duration_count: AtomicU64,
+    /// Total wall time spent in the HTTP fetch chain (incl. retries and
+    /// isolation bisection), in nanoseconds. One sample per `fetch_batch_with_retry`.
+    pub http_duration_ns_total: AtomicU64,
+    /// Number of HTTP chain samples.
+    pub http_duration_count: AtomicU64,
+}
+
+/// A point-in-time snapshot of the fetch counters for one collector kind.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct BlueskyFetchKindDiagnostics {
+    pub requests_total: u64,
+    pub items_total: u64,
+    pub lock_duration_ns_total: u64,
+    pub lock_duration_count: u64,
+    pub http_duration_ns_total: u64,
+    pub http_duration_count: u64,
+}
+
+/// Fetch-path diagnostics for both collector kinds, surfaced on /health and /metrics.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct BlueskyFetchDiagnostics {
+    pub profiles: BlueskyFetchKindDiagnostics,
+    pub posts: BlueskyFetchKindDiagnostics,
+}
+
 struct ProfileBatchCollector {
     config: BatchConfig,
     pending: Vec<String>,
@@ -100,6 +138,7 @@ struct ProfileBatchCollector {
     expires_at: Arc<RwLock<Option<String>>>,
     batches_total: AtomicU64,
     batches_partial: AtomicU64,
+    fetch: FetchDiagnostics,
     isolation_cache: HashMap<String, Option<BlueskyProfile>>,
 }
 
@@ -124,6 +163,7 @@ struct PostBatchCollector {
     expires_at: Arc<RwLock<Option<String>>>,
     batches_total: AtomicU64,
     batches_partial: AtomicU64,
+    fetch: FetchDiagnostics,
     isolation_cache: HashMap<String, Option<BlueskyPost>>,
 }
 
@@ -357,6 +397,14 @@ impl BlueskyClient {
         })
     }
 
+    /// Point-in-time snapshot of the profile and post fetch counters.
+    pub async fn fetch_diagnostics(&self) -> BlueskyFetchDiagnostics {
+        BlueskyFetchDiagnostics {
+            profiles: self.profile_batch_collector.read().await.fetch_snapshot(),
+            posts: self.post_batch_collector.read().await.fetch_snapshot(),
+        }
+    }
+
     pub fn set_failure_recurrence(&self, recurrence: u32) {
         self.isolation_recurrence
             .store(recurrence, Ordering::Release);
@@ -470,11 +518,21 @@ impl ProfileFetcher for BlueskyClient {
             return Ok(vec![]);
         }
 
+        let fetch_started = Instant::now();
         let mut collector = self.profile_batch_collector.write().await;
-        let profiles = collector.add_and_fetch(dids.to_vec()).await?;
+        let profiles = collector.add_and_fetch(dids.to_vec()).await;
         collector.log_partial_percentage();
+        let lock_elapsed_ns = fetch_started.elapsed().as_nanos() as u64;
+        collector
+            .fetch
+            .lock_duration_ns_total
+            .fetch_add(lock_elapsed_ns, Ordering::Relaxed);
+        collector
+            .fetch
+            .lock_duration_count
+            .fetch_add(1, Ordering::Relaxed);
 
-        Ok(profiles)
+        profiles
     }
 }
 
@@ -514,9 +572,19 @@ impl PostFetcher for BlueskyClient {
             return Ok(vec![]);
         }
 
+        let fetch_started = Instant::now();
         let mut collector = self.post_batch_collector.write().await;
         let fetch_result = collector.add_and_fetch(valid_uris.clone()).await;
         collector.log_partial_percentage();
+        let lock_elapsed_ns = fetch_started.elapsed().as_nanos() as u64;
+        collector
+            .fetch
+            .lock_duration_ns_total
+            .fetch_add(lock_elapsed_ns, Ordering::Relaxed);
+        collector
+            .fetch
+            .lock_duration_count
+            .fetch_add(1, Ordering::Relaxed);
 
         match fetch_result {
             Ok(posts) => Ok(posts
@@ -667,6 +735,7 @@ impl ProfileBatchCollector {
             expires_at,
             batches_total: AtomicU64::new(0),
             batches_partial: AtomicU64::new(0),
+            fetch: FetchDiagnostics::default(),
             isolation_cache: HashMap::new(),
         }
     }
@@ -733,7 +802,26 @@ impl ProfileBatchCollector {
         }
     }
 
+    /// Times the full HTTP chain (incl. retries and isolation bisection) for
+    /// one request. The counter pair feeds an average-latency metric.
     async fn fetch_batch_with_retry(
+        &self,
+        dids: &[String],
+    ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
+        let start = Instant::now();
+        let result = self.fetch_batch_with_retry_inner(dids).await;
+        let elapsed_ns = start.elapsed().as_nanos() as u64;
+        self.fetch
+            .http_duration_ns_total
+            .fetch_add(elapsed_ns, Ordering::Relaxed);
+        self.fetch
+            .http_duration_count
+            .fetch_add(1, Ordering::Relaxed);
+        result
+    }
+
+    /// The actual HTTP fetch chain with retries (timed by the wrapper above).
+    async fn fetch_batch_with_retry_inner(
         &self,
         dids: &[String],
     ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
@@ -913,6 +1001,9 @@ impl ProfileBatchCollector {
     }
 
     async fn fetch_batch(&mut self, dids: &[String]) -> TurboResult<Vec<Option<BlueskyProfile>>> {
+        self.fetch
+            .items_total
+            .fetch_add(dids.len() as u64, Ordering::Relaxed);
         let unresolved = dids
             .iter()
             .filter(|did| !self.isolation_cache.contains_key(*did))
@@ -1130,6 +1221,18 @@ impl ProfileBatchCollector {
             );
         }
     }
+
+    /// Point-in-time snapshot of this collector's fetch counters.
+    fn fetch_snapshot(&self) -> BlueskyFetchKindDiagnostics {
+        BlueskyFetchKindDiagnostics {
+            requests_total: self.batches_total.load(Ordering::Relaxed),
+            items_total: self.fetch.items_total.load(Ordering::Relaxed),
+            lock_duration_ns_total: self.fetch.lock_duration_ns_total.load(Ordering::Relaxed),
+            lock_duration_count: self.fetch.lock_duration_count.load(Ordering::Relaxed),
+            http_duration_ns_total: self.fetch.http_duration_ns_total.load(Ordering::Relaxed),
+            http_duration_count: self.fetch.http_duration_count.load(Ordering::Relaxed),
+        }
+    }
 }
 
 impl PostBatchCollector {
@@ -1161,6 +1264,7 @@ impl PostBatchCollector {
             expires_at,
             batches_total: AtomicU64::new(0),
             batches_partial: AtomicU64::new(0),
+            fetch: FetchDiagnostics::default(),
             isolation_cache: HashMap::new(),
         }
     }
@@ -1255,7 +1359,26 @@ impl PostBatchCollector {
         }
     }
 
+    /// Times the full HTTP chain (incl. retries and isolation bisection) for
+    /// one request. The counter pair feeds an average-latency metric.
     async fn fetch_batch_with_retry(
+        &self,
+        uris: &[String],
+    ) -> TurboResult<Vec<Option<BlueskyPost>>> {
+        let start = Instant::now();
+        let result = self.fetch_batch_with_retry_inner(uris).await;
+        let elapsed_ns = start.elapsed().as_nanos() as u64;
+        self.fetch
+            .http_duration_ns_total
+            .fetch_add(elapsed_ns, Ordering::Relaxed);
+        self.fetch
+            .http_duration_count
+            .fetch_add(1, Ordering::Relaxed);
+        result
+    }
+
+    /// The actual HTTP fetch chain with retries (timed by the wrapper above).
+    async fn fetch_batch_with_retry_inner(
         &self,
         uris: &[String],
     ) -> TurboResult<Vec<Option<BlueskyPost>>> {
@@ -1437,6 +1560,9 @@ impl PostBatchCollector {
     }
 
     async fn fetch_batch(&mut self, uris: &[String]) -> TurboResult<Vec<Option<BlueskyPost>>> {
+        self.fetch
+            .items_total
+            .fetch_add(uris.len() as u64, Ordering::Relaxed);
         let unresolved = uris
             .iter()
             .filter(|uri| !self.isolation_cache.contains_key(*uri))
@@ -1645,6 +1771,18 @@ impl PostBatchCollector {
                 "Post batch partial rate: {:.1}% ({}/{})",
                 pct, partial, total
             );
+        }
+    }
+
+    /// Point-in-time snapshot of this collector's fetch counters.
+    fn fetch_snapshot(&self) -> BlueskyFetchKindDiagnostics {
+        BlueskyFetchKindDiagnostics {
+            requests_total: self.batches_total.load(Ordering::Relaxed),
+            items_total: self.fetch.items_total.load(Ordering::Relaxed),
+            lock_duration_ns_total: self.fetch.lock_duration_ns_total.load(Ordering::Relaxed),
+            lock_duration_count: self.fetch.lock_duration_count.load(Ordering::Relaxed),
+            http_duration_ns_total: self.fetch.http_duration_ns_total.load(Ordering::Relaxed),
+            http_duration_count: self.fetch.http_duration_count.load(Ordering::Relaxed),
         }
     }
 }

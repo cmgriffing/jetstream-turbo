@@ -779,6 +779,8 @@ fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> Strin
             .batch_completion_throughput_per_second
             .to_string(),
     );
+    append_bluesky_fetch_metrics(&mut output, &diagnostics.bluesky_fetch);
+
     output.push_str("# HELP jetstream_turbo_reconnects_total Upstream reconnects grouped by initiating reason.\n");
     output.push_str("# TYPE jetstream_turbo_reconnects_total counter\n");
     let mut reconnect_reasons: Vec<_> = diagnostics
@@ -807,6 +809,49 @@ fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> Strin
     }
 
     output
+}
+
+fn append_bluesky_fetch_metrics(
+    output: &mut String,
+    fetch: &crate::client::BlueskyFetchDiagnostics,
+) {
+    append_fetch_kind_metrics(output, "profiles", &fetch.profiles);
+    append_fetch_kind_metrics(output, "posts", &fetch.posts);
+}
+
+fn append_fetch_kind_metrics(
+    output: &mut String,
+    kind: &str,
+    fetch: &crate::client::BlueskyFetchKindDiagnostics,
+) {
+    output.push_str(&format!(
+        "# HELP jetstream_turbo_bluesky_api_requests_total Bluesky API requests by collector kind (rate = requests/sec).\n\
+         # TYPE jetstream_turbo_bluesky_api_requests_total counter\n\
+         jetstream_turbo_bluesky_api_requests_total{{kind=\"{kind}\"}} {}\n",
+        fetch.requests_total
+    ));
+    output.push_str(&format!(
+        "# HELP jetstream_turbo_bluesky_request_items_total Identifiers submitted across Bluesky API requests by kind (items per request = Δitems/Δrequests).\n\
+         # TYPE jetstream_turbo_bluesky_request_items_total counter\n\
+         jetstream_turbo_bluesky_request_items_total{{kind=\"{kind}\"}} {}\n",
+        fetch.items_total
+    ));
+    output.push_str(&format!(
+        "# HELP jetstream_turbo_bluesky_fetch_lock_duration_seconds Wall time per fetch operation: waiting for the collector lock plus holding it during resolution.\n\
+         # TYPE jetstream_turbo_bluesky_fetch_lock_duration_seconds histogram\n\
+         jetstream_turbo_bluesky_fetch_lock_duration_seconds_sum{{kind=\"{kind}\"}} {:.6}\n\
+         jetstream_turbo_bluesky_fetch_lock_duration_seconds_count{{kind=\"{kind}\"}} {}\n",
+        fetch.lock_duration_ns_total as f64 / 1_000_000_000.0,
+        fetch.lock_duration_count
+    ));
+    output.push_str(&format!(
+        "# HELP jetstream_turbo_bluesky_fetch_http_duration_seconds Wall time spent in the Bluesky HTTP fetch chain (incl. retries) per request.\n\
+         # TYPE jetstream_turbo_bluesky_fetch_http_duration_seconds histogram\n\
+         jetstream_turbo_bluesky_fetch_http_duration_seconds_sum{{kind=\"{kind}\"}} {:.6}\n\
+         jetstream_turbo_bluesky_fetch_http_duration_seconds_count{{kind=\"{kind}\"}} {}\n",
+        fetch.http_duration_ns_total as f64 / 1_000_000_000.0,
+        fetch.http_duration_count
+    ));
 }
 
 fn append_gauge_metric(output: &mut String, name: &str, help: &str, value: String) {
@@ -967,6 +1012,7 @@ mod tests {
                 recovery_successes: 1,
             }),
             failure_containment: Default::default(),
+            bluesky_fetch: Default::default(),
         }
     }
 

@@ -1109,6 +1109,7 @@ where
         };
 
         let process_memory = self.diagnostics_collector.capture_memory();
+        let bluesky_fetch = self.bluesky_client.fetch_diagnostics().await;
 
         DiagnosticsCollector::assemble_health(
             process_memory,
@@ -1117,6 +1118,7 @@ where
             not_redis_state,
             pipeline_progress,
             self.failure_supervisor.snapshot(),
+            bluesky_fetch,
         )
     }
 
