@@ -192,9 +192,9 @@ fn bench_simd_json_serialize_record(c: &mut Criterion) {
     c.bench_function("simd_json_serialize_record", |b| {
         b.iter(|| {
             let mut buf = Vec::with_capacity(1024);
-            black_box(message.write_json(&mut buf));
+            message.write_json(&mut buf);
             let metadata_json = simd_json::to_string(black_box(&metadata)).unwrap();
-            black_box((buf, metadata_json));
+            black_box((&buf, metadata_json));
         });
     });
 }

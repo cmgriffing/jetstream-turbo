@@ -757,7 +757,7 @@ mod tests {
     #[test]
     fn user_cache_evicts_oldest_when_at_capacity() {
         let cache = TurboCache::new(2, 2);
-        let mut profile = |did: &str| {
+        let profile = |did: &str| {
             cache.set_user_profile(
                 did.to_string(),
                 Arc::new(BlueskyProfile {

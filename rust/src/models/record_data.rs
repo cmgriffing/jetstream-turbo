@@ -53,81 +53,93 @@ impl RecordData {
     /// Build a `RecordData` from a `serde_json::Value` (fixtures/tests). Mirrors
     /// the wire-extraction semantics.
     pub fn from_value(value: serde_json::Value) -> Self {
-        let mut data = RecordData::default();
-        data.text = value
+        let text = value
             .get("text")
             .and_then(|v| v.as_str())
             .map(str::to_owned);
-        if let Some(reply) = value.get("reply") {
-            data.reply_parent_uri = reply
-                .get("parent")
-                .and_then(|p| p.get("uri"))
-                .and_then(|v| v.as_str())
-                .map(str::to_owned);
-            data.reply_root_uri = reply
-                .get("root")
-                .and_then(|r| r.get("uri"))
-                .and_then(|v| v.as_str())
-                .map(str::to_owned);
-        }
-        if let Some(embed) = value.get("embed") {
-            data.embed_record_uri = embed
-                .get("record")
-                .and_then(|r| r.get("uri"))
-                .and_then(|v| v.as_str())
-                .map(str::to_owned);
-        }
-        if let Some(facets) = value.get("facets").and_then(|v| v.as_array()) {
-            for facet in facets {
-                let Some(index) = facet.get("index") else { continue };
-                let Some(byte_start) = index.get("byteStart").and_then(|v| v.as_u64()) else {
-                    continue;
-                };
-                let Some(byte_end) = index.get("byteEnd").and_then(|v| v.as_u64()) else {
-                    continue;
-                };
-                let features = facet
-                    .get("features")
-                    .and_then(|f| f.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|feature| {
-                                match feature
-                                    .get("$type")
-                                    .and_then(|v| v.as_str())
-                                {
-                                    Some("app.bsky.richtext.facet#tag") => feature
-                                        .get("tag")
-                                        .and_then(|v| v.as_str())
-                                        .map(|tag| FeatureData::Tag {
-                                            tag: tag.to_owned(),
-                                        }),
-                                    Some("app.bsky.richtext.facet#link") => feature
-                                        .get("uri")
-                                        .and_then(|v| v.as_str())
-                                        .map(|uri| FeatureData::Link {
-                                            uri: uri.to_owned(),
-                                        }),
-                                    Some("app.bsky.richtext.facet#mention") => feature
-                                        .get("did")
-                                        .and_then(|v| v.as_str())
-                                        .map(|did| FeatureData::Mention {
-                                            did: did.to_owned(),
-                                        }),
-                                    _ => None,
-                                }
+        let (reply_parent_uri, reply_root_uri) = value
+            .get("reply")
+            .map(|reply| {
+                (
+                    reply
+                        .get("parent")
+                        .and_then(|p| p.get("uri"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
+                    reply
+                        .get("root")
+                        .and_then(|r| r.get("uri"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
+                )
+            })
+            .unwrap_or((None, None));
+        let embed_record_uri = value
+            .get("embed")
+            .and_then(|embed| embed.get("record"))
+            .and_then(|record| record.get("uri"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        let facets = value
+            .get("facets")
+            .and_then(|v| v.as_array())
+            .map(|facets| {
+                facets
+                    .iter()
+                    .filter_map(|facet| {
+                        let index = facet.get("index")?;
+                        let byte_start = index.get("byteStart").and_then(|v| v.as_u64())?;
+                        let byte_end = index.get("byteEnd").and_then(|v| v.as_u64())?;
+                        let features = facet
+                            .get("features")
+                            .and_then(|f| f.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|feature| {
+                                        match feature
+                                            .get("$type")
+                                            .and_then(|v| v.as_str())
+                                        {
+                                            Some("app.bsky.richtext.facet#tag") => feature
+                                                .get("tag")
+                                                .and_then(|v| v.as_str())
+                                                .map(|tag| FeatureData::Tag {
+                                                    tag: tag.to_owned(),
+                                                }),
+                                            Some("app.bsky.richtext.facet#link") => feature
+                                                .get("uri")
+                                                .and_then(|v| v.as_str())
+                                                .map(|uri| FeatureData::Link {
+                                                    uri: uri.to_owned(),
+                                                }),
+                                            Some("app.bsky.richtext.facet#mention") => feature
+                                                .get("did")
+                                                .and_then(|v| v.as_str())
+                                                .map(|did| FeatureData::Mention {
+                                                    did: did.to_owned(),
+                                                }),
+                                            _ => None,
+                                        }
+                                    })
+                                    .collect()
                             })
-                            .collect()
+                            .unwrap_or_default();
+                        Some(FacetData {
+                            byte_start: byte_start as u32,
+                            byte_end: byte_end as u32,
+                            features,
+                        })
                     })
-                    .unwrap_or_default();
-                data.facets.push(FacetData {
-                    byte_start: byte_start as u32,
-                    byte_end: byte_end as u32,
-                    features,
-                });
-            }
+                    .collect()
+            })
+            .unwrap_or_default();
+        RecordData {
+            text,
+            reply_parent_uri,
+            reply_root_uri,
+            embed_record_uri,
+            facets,
         }
-        data
     }
 }
 
@@ -208,7 +220,7 @@ impl<'de> Visitor<'de> for LenStrVisitor {
     where
         A: SeqAccess<'de>,
     {
-        while let Some(_) = seq.next_element::<IgnoredAny>()? {}
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
         Ok(LenStr(None))
     }
 
@@ -216,7 +228,7 @@ impl<'de> Visitor<'de> for LenStrVisitor {
     where
         A: MapAccess<'de>,
     {
-        while let Some(_) = map.next_entry::<IgnoredAny, IgnoredAny>()? {}
+        while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
         Ok(LenStr(None))
     }
 }
@@ -287,7 +299,7 @@ fn drain_map<'de, A>(mut map: A) -> Result<(), A::Error>
 where
     A: MapAccess<'de>,
 {
-    while let Some(_) = map.next_entry::<IgnoredAny, IgnoredAny>()? {}
+    while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
     Ok(())
 }
 
@@ -296,7 +308,7 @@ fn drain_seq<'de, A>(mut seq: A) -> Result<(), A::Error>
 where
     A: SeqAccess<'de>,
 {
-    while let Some(_) = seq.next_element::<IgnoredAny>()? {}
+    while seq.next_element::<IgnoredAny>()?.is_some() {}
     Ok(())
 }
 
