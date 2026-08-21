@@ -227,7 +227,7 @@ mod tests {
 
     fn message(seq: u64) -> JetstreamMessage {
         JetstreamMessage {
-            did: "did:plc:test".to_string(),
+            did: "did:plc:test".to_string().into(),
             time_us: Some(1_640_995_200_000_000),
             seq: Some(seq),
             kind: MessageKind::Commit,
@@ -239,6 +239,7 @@ mod tests {
                 record: None,
                 cid: Some("bafy-test".to_string()),
             }),
+            raw_json: None,
         }
     }
 

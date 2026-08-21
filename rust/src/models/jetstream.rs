@@ -1,4 +1,13 @@
+use crate::models::record_data::RecordData;
 use serde::{Deserialize, Serialize, Serializer};
+use std::sync::Arc;
+
+/// Convert a `serde_json::Value` record into the semantic record view used by
+/// `CommitData::record`. Kept as a helper so callers constructing messages
+/// (fixtures, tests) do not need to depend on record extraction directly.
+pub fn owned_record(value: serde_json::Value) -> RecordData {
+    RecordData::from_value(value)
+}
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, Deserialize, PartialEq, Eq)]
@@ -57,9 +66,9 @@ impl Serialize for OperationType {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct JetstreamMessage {
-    pub did: String,
+    pub did: Arc<str>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_us: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,6 +76,32 @@ pub struct JetstreamMessage {
     pub kind: MessageKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<CommitData>,
+    /// The original wire bytes this message was parsed from (when parsed from
+    /// an owned buffer). Stored verbatim so the storage path can write the
+    /// exact bytes received instead of re-encoding the parsed structure.
+    #[serde(skip)]
+    pub raw_json: Option<String>,
+}
+
+// Manual Serialize: mirrors the derived field-wise output exactly (raw_json is
+// not part of the canonical JSON — it is only emitted via `write_json`).
+impl Serialize for JetstreamMessage {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("JetstreamMessage", 5)?;
+        state.serialize_field("did", &self.did)?;
+        if self.time_us.is_some() {
+            state.serialize_field("time_us", &self.time_us)?;
+        }
+        if self.seq.is_some() {
+            state.serialize_field("seq", &self.seq)?;
+        }
+        state.serialize_field("kind", &self.kind)?;
+        if self.commit.is_some() {
+            state.serialize_field("commit", &self.commit)?;
+        }
+        state.end()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -80,12 +115,25 @@ pub struct CommitData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rkey: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub record: Option<serde_json::Value>,
+    pub record: Option<RecordData>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
 }
 
 impl JetstreamMessage {
+    /// Write this message's JSON to `out`. When the message was parsed from
+    /// owned wire bytes (`raw_json` present), the original bytes are written
+    /// verbatim — byte-faithful to the Jetstream event and avoids re-encoding
+    /// the parsed structure (envelope fields + record DOM) at store time.
+    /// Otherwise falls back to canonical field-wise serialization.
+    pub fn write_json(&self, out: &mut Vec<u8>) {
+        if let Some(raw) = &self.raw_json {
+            out.extend_from_slice(raw.as_bytes());
+        } else {
+            simd_json::to_writer(out, self).expect("serialize message to JSON");
+        }
+    }
+
     #[inline(always)]
     pub fn extract_at_uri(&self) -> Option<String> {
         let commit = self.commit.as_ref()?;
@@ -142,7 +190,7 @@ mod tests {
         "#;
 
         let message: JetstreamMessage = serde_json::from_str(json_str).unwrap();
-        assert_eq!(message.did, "did:plc:test");
+        assert_eq!(message.did.as_ref(), "did:plc:test");
         assert!(message.is_create_operation());
         assert_eq!(
             message.extract_at_uri(),

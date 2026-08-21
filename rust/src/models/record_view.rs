@@ -1,58 +1,52 @@
-use serde_json::Value;
+use crate::models::record_data::{FacetData, FeatureData, RecordData};
 
-/// A zero-allocation, read-only lens over a Bluesky record's raw JSON.
+/// A zero-allocation, read-only lens over a record's extracted semantic data.
 ///
-/// Exposes semantic accessors for facets, reply references, embed URIs, and text
-/// without duplicating JSON traversal across callers.
+/// The wire parser captures `RecordData` (text, reply refs, embed URI, facets)
+/// directly from the JSON tape, so this lens just borrows those fields — no
+/// JSON traversal at read time.
 #[derive(Debug, Clone, Copy)]
 pub struct RecordView<'a> {
-    record: &'a Value,
+    record: &'a RecordData,
 }
 
 impl<'a> RecordView<'a> {
-    /// Create a new `RecordView` wrapping a record JSON value.
+    /// Create a new `RecordView` wrapping a record's extracted data.
     #[inline(always)]
-    pub fn new(record: &'a Value) -> Self {
+    pub fn new(record: &'a RecordData) -> Self {
         Self { record }
     }
 
     /// The post text, if present.
     #[inline(always)]
     pub fn text(&self) -> Option<&'a str> {
-        self.record.get("text")?.as_str()
+        self.record.text.as_deref()
     }
 
     /// Reply parent and root URIs, if this record has a reply.
     #[inline(always)]
     pub fn reply_refs(&self) -> Option<ReplyRefs<'a>> {
-        let reply = self.record.get("reply")?;
+        let (parent, root) = (&self.record.reply_parent_uri, &self.record.reply_root_uri);
+        if parent.is_none() && root.is_none() {
+            return None;
+        }
         Some(ReplyRefs {
-            parent_uri: reply
-                .get("parent")
-                .and_then(|p| p.get("uri"))
-                .and_then(|v| v.as_str()),
-            root_uri: reply
-                .get("root")
-                .and_then(|r| r.get("uri"))
-                .and_then(|v| v.as_str()),
+            parent_uri: parent.as_deref(),
+            root_uri: root.as_deref(),
         })
     }
 
     /// The URI of an embedded record (quote post), if present.
     #[inline(always)]
     pub fn embed_record_uri(&self) -> Option<&'a str> {
-        self.record
-            .get("embed")?
-            .get("record")?
-            .get("uri")?
-            .as_str()
+        self.record.embed_record_uri.as_deref()
     }
 
     /// Iterate over all facets (rich-text annotations) on this record.
     #[inline(always)]
     pub fn facets(&self) -> FacetIter<'a> {
         FacetIter {
-            facets: self.record.get("facets").and_then(|v| v.as_array()),
+            facets: &self.record.facets,
             index: 0,
         }
     }
@@ -68,7 +62,7 @@ pub struct ReplyRefs<'a> {
 /// Iterator over facets in a record.
 #[derive(Debug, Clone)]
 pub struct FacetIter<'a> {
-    facets: Option<&'a Vec<Value>>,
+    facets: &'a [FacetData],
     index: usize,
 }
 
@@ -76,29 +70,13 @@ impl<'a> Iterator for FacetIter<'a> {
     type Item = FacetRef<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let facets = self.facets?;
-        if self.index >= facets.len() {
-            return None;
-        }
-        let facet = &facets[self.index];
+        let facet = self.facets.get(self.index)?;
         self.index += 1;
-
-        let index = facet.get("index")?;
-        let byte_start = index.get("byteStart")?.as_u64()? as u32;
-        let byte_end = index.get("byteEnd")?.as_u64()? as u32;
-
-        Some(FacetRef {
-            byte_start,
-            byte_end,
-            features: facet.get("features").and_then(|f| f.as_array()),
-        })
+        Some(FacetRef { facet })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self
-            .facets
-            .map(|f| f.len().saturating_sub(self.index))
-            .unwrap_or(0);
+        let remaining = self.facets.len().saturating_sub(self.index);
         (remaining, Some(remaining))
     }
 }
@@ -106,17 +84,27 @@ impl<'a> Iterator for FacetIter<'a> {
 /// A single facet with byte indices and its typed features.
 #[derive(Debug, Clone)]
 pub struct FacetRef<'a> {
-    pub byte_start: u32,
-    pub byte_end: u32,
-    features: Option<&'a Vec<Value>>,
+    facet: &'a FacetData,
 }
 
 impl<'a> FacetRef<'a> {
+    /// The byte offset of the facet's start within the record text.
+    #[inline(always)]
+    pub fn byte_start(&self) -> u32 {
+        self.facet.byte_start
+    }
+
+    /// The byte offset of the facet's end within the record text.
+    #[inline(always)]
+    pub fn byte_end(&self) -> u32 {
+        self.facet.byte_end
+    }
+
     /// Iterate over the typed features within this facet.
     #[inline(always)]
     pub fn features(&self) -> FacetFeatureIter<'a> {
         FacetFeatureIter {
-            features: self.features,
+            features: &self.facet.features,
             index: 0,
         }
     }
@@ -125,7 +113,7 @@ impl<'a> FacetRef<'a> {
 /// Iterator over typed features within a facet.
 #[derive(Debug, Clone)]
 pub struct FacetFeatureIter<'a> {
-    features: Option<&'a Vec<Value>>,
+    features: &'a [FeatureData],
     index: usize,
 }
 
@@ -133,22 +121,17 @@ impl<'a> Iterator for FacetFeatureIter<'a> {
     type Item = FacetFeature<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let features = self.features?;
-        while self.index < features.len() {
-            let feature = &features[self.index];
-            self.index += 1;
-            if let Some(parsed) = parse_facet_feature(feature) {
-                return Some(parsed);
-            }
-        }
-        None
+        let feature = self.features.get(self.index)?;
+        self.index += 1;
+        Some(match feature {
+            FeatureData::Tag { tag } => FacetFeature::Tag { tag },
+            FeatureData::Link { uri } => FacetFeature::Link { uri },
+            FeatureData::Mention { did } => FacetFeature::Mention { did },
+        })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self
-            .features
-            .map(|f| f.len().saturating_sub(self.index))
-            .unwrap_or(0);
+        let remaining = self.features.len().saturating_sub(self.index);
         (0, Some(remaining))
     }
 }
@@ -161,34 +144,13 @@ pub enum FacetFeature<'a> {
     Mention { did: &'a str },
 }
 
-/// Parse a single feature JSON value into a typed `FacetFeature`.
-/// Returns `None` for unknown or malformed feature types.
-fn parse_facet_feature(feature: &Value) -> Option<FacetFeature<'_>> {
-    let feature_type = feature.get("$type")?.as_str()?;
-    match feature_type {
-        "app.bsky.richtext.facet#tag" => {
-            let tag = feature.get("tag")?.as_str()?;
-            Some(FacetFeature::Tag { tag })
-        }
-        "app.bsky.richtext.facet#link" => {
-            let uri = feature.get("uri")?.as_str()?;
-            Some(FacetFeature::Link { uri })
-        }
-        "app.bsky.richtext.facet#mention" => {
-            let did = feature.get("did")?.as_str()?;
-            Some(FacetFeature::Mention { did })
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
-    fn sample_post_record() -> Value {
-        json!({
+    fn sample_post_record() -> RecordData {
+        RecordData::from_value(json!({
             "$type": "app.bsky.feed.post",
             "createdAt": "2026-02-13T02:20:02.89585500Z",
             "text": "Hello world #testing",
@@ -215,18 +177,18 @@ mod tests {
                     ]
                 }
             ]
-        })
+        }))
     }
 
-    fn minimal_post_record() -> Value {
-        json!({
+    fn minimal_post_record() -> RecordData {
+        RecordData::from_value(json!({
             "$type": "app.bsky.feed.post",
             "text": "Minimal post"
-        })
+        }))
     }
 
-    fn non_object_record() -> Value {
-        json!("not_an_object")
+    fn non_object_record() -> RecordData {
+        RecordData::from_value(json!("not_an_object"))
     }
 
     #[test]
@@ -289,11 +251,11 @@ mod tests {
         let facets: Vec<_> = rv.facets().collect();
         assert_eq!(facets.len(), 2);
 
-        assert_eq!(facets[0].byte_start, 0);
-        assert_eq!(facets[0].byte_end, 11);
+        assert_eq!(facets[0].byte_start(), 0);
+        assert_eq!(facets[0].byte_end(), 11);
 
-        assert_eq!(facets[1].byte_start, 12);
-        assert_eq!(facets[1].byte_end, 20);
+        assert_eq!(facets[1].byte_start(), 12);
+        assert_eq!(facets[1].byte_end(), 20);
     }
 
     #[test]
@@ -331,7 +293,7 @@ mod tests {
 
     #[test]
     fn facet_features_skips_unknown_types() {
-        let record = json!({
+        let record = RecordData::from_value(json!({
             "facets": [{
                 "index": { "byteStart": 0, "byteEnd": 5 },
                 "features": [
@@ -339,7 +301,7 @@ mod tests {
                     { "$type": "app.bsky.richtext.facet#tag", "tag": "kept" }
                 ]
             }]
-        });
+        }));
         let rv = RecordView::new(&record);
         let facets: Vec<_> = rv.facets().collect();
         let features: Vec<_> = facets[0].features().collect();
@@ -359,7 +321,7 @@ mod tests {
 
     #[test]
     fn facet_features_skips_malformed_features() {
-        let record = json!({
+        let record = RecordData::from_value(json!({
             "facets": [{
                 "index": { "byteStart": 0, "byteEnd": 5 },
                 "features": [
@@ -367,7 +329,7 @@ mod tests {
                     { "$type": "app.bsky.richtext.facet#tag", "tag": "good" }
                 ]
             }]
-        });
+        }));
         let rv = RecordView::new(&record);
         let facets: Vec<_> = rv.facets().collect();
         let features: Vec<_> = facets[0].features().collect();

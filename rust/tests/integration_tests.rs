@@ -77,7 +77,7 @@ mod tests {
         assert!(result.is_ok());
 
         let message = result.unwrap();
-        assert_eq!(message.did, "did:plc:test");
+        assert_eq!(message.did.as_ref(), "did:plc:test");
         assert_eq!(message.seq, Some(12345));
     }
 
@@ -213,7 +213,7 @@ mod tests {
 
         // 2. Simulate message reception
         let messages = vec![JetstreamMessage {
-            did: "did:plc:user1".to_string(),
+            did: "did:plc:user1".to_string().into(),
             seq: Some(1),
             time_us: Some(1704067200000000),
             kind: MessageKind::Commit,
@@ -222,9 +222,12 @@ mod tests {
                 operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("1".to_string()),
-                record: Some(serde_json::json!({"text": "Hello world"})),
+                record: Some(jetstream_turbo_rs::models::jetstream::owned_record(
+                    serde_json::json!({"text": "Hello world"}),
+                )),
                 cid: Some("cid1".to_string()),
             }),
+            raw_json: None,
         }];
 
         // 3. Process messages and simulate hydration

@@ -1,6 +1,7 @@
 use crate::client::{PostFetchOutcome, PostFetcher, ProfileFetcher};
 use crate::hydration::resolver::CacheMissResolver;
 use crate::hydration::TurboCache;
+use crate::models::bluesky::BlueskyProfile;
 use crate::models::{
     enriched::{EnrichedRecord, HydrationQuality, ReferencedPost},
     jetstream::JetstreamMessage,
@@ -8,24 +9,27 @@ use crate::models::{
     TurboResult,
 };
 use crate::utils::serde_utils::string_utils::is_valid_at_uri;
+use ahash::RandomState as AHashState;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::info;
 
 struct MessageContext {
     message: JetstreamMessage,
-    author_did: String,
     is_post: bool,
-    mentioned_dids: Vec<String>,
+    /// Index into the batch's resolved-profiles vec for the author profile.
+    profile_slot: usize,
+    /// Indices into the resolved-profiles vec for mentioned DIDs.
+    mentioned_slots: Vec<usize>,
     post_uris: Vec<String>,
 }
 
-/// Extract mentioned DIDs from a record view.
-///
-/// Sources: reply parent/root URIs, mention facets, and embed record URIs.
-/// All DIDs are parsed from AT-URIs (`at://did:plc:.../...`).
-fn extract_mentioned_dids_from_view(rv: &RecordView<'_>) -> Vec<String> {
+/// Extract mentioned DIDs and referenced post URIs from a record view in a
+/// single pass (the two kinds share the reply/embed traversals).
+fn extract_refs_from_view(rv: &RecordView<'_>) -> (Vec<String>, Vec<String>) {
     let mut mentioned_dids = Vec::new();
+    let mut uris = Vec::new();
 
     // From reply references
     if let Some(refs) = rv.reply_refs() {
@@ -37,6 +41,16 @@ fn extract_mentioned_dids_from_view(rv: &RecordView<'_>) -> Vec<String> {
         if let Some(did) = refs.root_uri.and_then(extract_did_from_at_uri) {
             if did.starts_with("did:plc:") {
                 mentioned_dids.push(did.to_string());
+            }
+        }
+        if let Some(uri) = refs.parent_uri {
+            if !uri.is_empty() && is_valid_at_uri(uri) {
+                uris.push(uri.to_string());
+            }
+        }
+        if let Some(uri) = refs.root_uri {
+            if !uri.is_empty() && is_valid_at_uri(uri) {
+                uris.push(uri.to_string());
             }
         }
     }
@@ -59,50 +73,41 @@ fn extract_mentioned_dids_from_view(rv: &RecordView<'_>) -> Vec<String> {
                 mentioned_dids.push(did.to_string());
             }
         }
-    }
-
-    mentioned_dids.sort();
-    mentioned_dids.dedup();
-    mentioned_dids
-}
-
-/// Extract referenced post URIs from a record view.
-///
-/// Sources: reply parent/root URIs and embed record URIs.
-/// All URIs are validated with `is_valid_at_uri`.
-fn extract_post_uris_from_view(rv: &RecordView<'_>) -> Vec<String> {
-    let mut uris = Vec::new();
-
-    // From reply references
-    if let Some(refs) = rv.reply_refs() {
-        if let Some(uri) = refs.parent_uri {
-            if !uri.is_empty() && is_valid_at_uri(uri) {
-                uris.push(uri.to_string());
-            }
-        }
-        if let Some(uri) = refs.root_uri {
-            if !uri.is_empty() && is_valid_at_uri(uri) {
-                uris.push(uri.to_string());
-            }
-        }
-    }
-
-    // From embed record
-    if let Some(uri) = rv.embed_record_uri() {
         if !uri.is_empty() && is_valid_at_uri(uri) {
             uris.push(uri.to_string());
         }
     }
 
+    mentioned_dids.sort();
+    mentioned_dids.dedup();
     uris.sort();
     uris.dedup();
-    uris
+    (mentioned_dids, uris)
 }
 
 /// Extract the DID from an AT-URI (`at://did:plc:abc123/...`).
 #[inline(always)]
 fn extract_did_from_at_uri(uri: &str) -> Option<&str> {
     uri.strip_prefix("at://").and_then(|s| s.split('/').next())
+}
+
+/// Assign `did` a stable slot in the dedup'd did list (and resolved-profiles
+/// vec), inserting it if new. Returns the slot index.
+fn slot_for(
+    slots: &mut HashMap<Arc<str>, usize, AHashState>,
+    dids: &mut Vec<Arc<str>>,
+    did: Arc<str>,
+) -> usize {
+    use std::collections::hash_map::Entry;
+    match slots.entry(did) {
+        Entry::Occupied(entry) => *entry.get(),
+        Entry::Vacant(entry) => {
+            let slot = dids.len();
+            dids.push(Arc::clone(entry.key()));
+            entry.insert(slot);
+            slot
+        }
+    }
 }
 
 pub struct Hydrator<P, Po> {
@@ -138,39 +143,39 @@ where
             })
     }
 
-    async fn hydrate_one(
+    fn hydrate_one(
         &self,
         message: JetstreamMessage,
-        author_did: String,
         is_post: bool,
-        mentioned_dids: Vec<String>,
+        profile_slot: usize,
+        mentioned_slots: Vec<usize>,
         post_uris: Vec<String>,
-        post_outcomes: &std::collections::HashMap<String, PostFetchOutcome>,
+        profiles: &[Option<Arc<BlueskyProfile>>],
+        post_outcomes: &HashMap<String, PostFetchOutcome, AHashState>,
         processed_at: chrono::DateTime<chrono::Utc>,
-    ) -> TurboResult<EnrichedRecord> {
-        let start_time = Instant::now();
-
-        tracing::Span::current().record("did", &author_did);
-
+        hydration_start: Instant,
+    ) -> TurboResult<(EnrichedRecord, Instant)> {
         let mut enriched = EnrichedRecord::new_with_timestamp(message, processed_at);
         enriched.hydrated_metadata.hydration_quality = HydrationQuality::Complete;
 
+        tracing::Span::current().record("did", enriched.message.extract_did());
+
         if is_post {
-            let author_profile = self.resolver.resolve_profile(&author_did).await?;
+            let author_profile = profiles.get(profile_slot).cloned().flatten();
             let hit = author_profile.is_some();
             tracing::Span::current().record("cache_hit", hit);
 
             enriched.hydrated_metadata.author_profile = author_profile;
         }
 
-        for did in &mentioned_dids {
-            if let Some(profile) = self.resolver.cache().get_user_profile(did) {
+        for slot in &mentioned_slots {
+            if let Some(profile) = profiles.get(*slot).cloned().flatten() {
                 enriched.hydrated_metadata.add_mentioned_profile(profile);
             }
         }
 
         for uri in post_uris {
-            let outcome = post_outcomes.get(&uri).ok_or_else(|| {
+            let outcome = post_outcomes.get(uri.as_str()).ok_or_else(|| {
                 crate::models::TurboError::InvalidApiResponse(
                     "missing post outcome for requested URI".to_string(),
                 )
@@ -203,8 +208,13 @@ where
             metrics::counter!("optional_hydration_partial_records_total").increment(1);
         }
 
-        enriched.metrics.hydration_time_ms = start_time.elapsed().as_millis() as u64;
-        Ok(enriched)
+        // One monotonic read per message: sequential records share the boundary
+        // instant, so this record's duration is measured from the previous
+        // record's completion (or the batch start for the first).
+        let hydration_end = Instant::now();
+        enriched.metrics.hydration_time_ms =
+            hydration_end.duration_since(hydration_start).as_millis() as u64;
+        Ok((enriched, hydration_end))
     }
 
     pub async fn hydrate_batch(
@@ -216,12 +226,18 @@ where
         let message_count = messages.len();
         tracing::Span::current().record("message_count", message_count);
 
-        let mut unique_dids = std::collections::HashSet::new();
-        let mut unique_uris = std::collections::HashSet::new();
         let mut contexts = Vec::with_capacity(message_count);
 
+        // Build contexts and dedup in a single pass, assigning each unique did
+        // a slot into the resolved-profiles list so hydrate_one can index it
+        // directly (no per-message hash lookup).
+        let mut did_slots: HashMap<Arc<str>, usize, AHashState> =
+            HashMap::with_capacity_and_hasher(contexts.len().max(1), AHashState::default());
+        let mut dids: Vec<Arc<str>> = Vec::with_capacity(message_count);
+        let mut unique_uris: HashSet<String, AHashState> =
+            HashSet::with_hasher(AHashState::default());
+
         for message in messages {
-            let author_did = message.extract_did().to_string();
             let is_post = message
                 .commit
                 .as_ref()
@@ -232,42 +248,37 @@ where
                 .commit
                 .as_ref()
                 .and_then(|c| c.record.as_ref())
-                .map(|r| {
-                    let rv = RecordView::new(r);
-                    (
-                        extract_mentioned_dids_from_view(&rv),
-                        extract_post_uris_from_view(&rv),
-                    )
-                })
+                .map(|r| extract_refs_from_view(&RecordView::new(r)))
                 .unwrap_or_default();
 
-            unique_dids.insert(author_did.clone());
-            for did in &mentioned_dids {
-                unique_dids.insert(did.clone());
-            }
+            let profile_slot = slot_for(&mut did_slots, &mut dids, Arc::clone(&message.did));
+            let mentioned_slots = mentioned_dids
+                .into_iter()
+                .map(|did| slot_for(&mut did_slots, &mut dids, Arc::from(did)))
+                .collect();
             for uri in &post_uris {
                 unique_uris.insert(uri.clone());
             }
 
             contexts.push(MessageContext {
                 message,
-                author_did,
                 is_post,
-                mentioned_dids,
+                profile_slot,
+                mentioned_slots,
                 post_uris,
             });
         }
 
-        let unique_dids_count = unique_dids.len();
+        let unique_dids_count = dids.len();
         let unique_uris_count = unique_uris.len();
         tracing::Span::current().record("unique_dids", unique_dids_count);
         tracing::Span::current().record("unique_uris", unique_uris_count);
 
-        let dids: Vec<String> = unique_dids.into_iter().collect();
         let uris: Vec<String> = unique_uris.into_iter().collect();
 
         let cache_check_start = Instant::now();
-        self.resolver.resolve_profiles(&dids).await?;
+        // Aligned with `dids` (slot order); `Option::None` = profile does not exist.
+        let profiles = self.resolver.resolve_profiles(&dids).await?;
         let post_outcomes = self.resolver.resolve_posts(&uris).await?;
         if post_outcomes.len() != uris.len() {
             return Err(crate::models::TurboError::InvalidApiResponse(format!(
@@ -279,12 +290,12 @@ where
         let post_outcomes = uris
             .into_iter()
             .zip(post_outcomes)
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<HashMap<String, _, AHashState>>();
         let api_fetch_time = cache_check_start.elapsed().as_millis() as u64;
         tracing::Span::current().record("api_fetch_time_ms", api_fetch_time);
 
         let hydrate_start = Instant::now();
-        let results = self.hydrate_contexts(contexts, &post_outcomes).await?;
+        let results = self.hydrate_contexts(contexts, &profiles, &post_outcomes)?;
         let hydrate_time = hydrate_start.elapsed().as_millis() as u64;
         tracing::Span::current().record("hydrate_time_ms", hydrate_time);
 
@@ -300,25 +311,28 @@ where
         Ok(results)
     }
 
-    async fn hydrate_contexts(
+    fn hydrate_contexts(
         &self,
         contexts: Vec<MessageContext>,
-        post_outcomes: &std::collections::HashMap<String, PostFetchOutcome>,
+        profiles: &[Option<Arc<BlueskyProfile>>],
+        post_outcomes: &HashMap<String, PostFetchOutcome, AHashState>,
     ) -> TurboResult<Vec<EnrichedRecord>> {
         let mut results = Vec::with_capacity(contexts.len());
         let processed_at = chrono::Utc::now();
+        let mut hydration_start = Instant::now();
         for ctx in contexts {
-            let enriched = self
-                .hydrate_one(
-                    ctx.message,
-                    ctx.author_did,
-                    ctx.is_post,
-                    ctx.mentioned_dids,
-                    ctx.post_uris,
-                    post_outcomes,
-                    processed_at,
-                )
-                .await?;
+            let (enriched, hydration_end) = self.hydrate_one(
+                ctx.message,
+                ctx.is_post,
+                ctx.profile_slot,
+                ctx.mentioned_slots,
+                ctx.post_uris,
+                profiles,
+                post_outcomes,
+                processed_at,
+                hydration_start,
+            )?;
+            hydration_start = hydration_end;
             results.push(enriched);
         }
         Ok(results)

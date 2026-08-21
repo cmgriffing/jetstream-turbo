@@ -106,6 +106,19 @@ impl JetstreamClient {
     pub fn parse_message(&self, text: &str) -> TurboResult<JetstreamMessage> {
         parse_message(text)
     }
+
+    /// Parse a batch of raw messages from owned buffers, reusing simd-json's
+    /// internal scratch buffers across messages. Consumes the buffers (mirrors
+    /// production: the Jetstream socket hands us owned Strings).
+    pub fn parse_message_batch(&self, raws: Vec<String>) -> TurboResult<Vec<JetstreamMessage>> {
+        let mut buffers =
+            simd_json::Buffers::new(raws.iter().map(String::len).max().unwrap_or(128).max(128));
+        let mut out = Vec::with_capacity(raws.len());
+        for raw in raws {
+            out.push(parse_message_owned_with_buffers(raw, &mut buffers)?);
+        }
+        Ok(out)
+    }
 }
 
 impl MessageSource for JetstreamClient {
@@ -135,6 +148,13 @@ impl MessageSource for JetstreamClient {
             let mut attempts_in_sweep = 0usize;
             let mut sweep_number = 0u32;
             let mut endpoint_failures = vec![0u32; endpoints.len()];
+            // Pre-split the wanted collections once per connection instead of
+            // re-splitting the string on every ingested message.
+            let wanted: Vec<&str> = wanted_collections
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
             let mut endpoint_eligible_at = vec![Instant::now(); endpoints.len()];
             loop {
                 let endpoint = &endpoints[current_endpoint];
@@ -209,6 +229,10 @@ impl MessageSource for JetstreamClient {
                         endpoint_failures[current_endpoint] = 0;
 
                         let (_, mut read) = ws_stream.split();
+                        // Reuse simd-json's internal scratch buffers across all
+                        // messages on this connection (avoids per-message
+                        // allocation of the parse scratch buffers).
+                        let mut parse_buffers = simd_json::Buffers::new(8192);
                         let useful_data_deadline = tokio::time::sleep_until(
                             data_idle_timeout
                                 .map(|timeout| Instant::now() + timeout)
@@ -235,9 +259,13 @@ impl MessageSource for JetstreamClient {
                                     match msg_result {
                                 Ok(Message::Text(text)) => {
                                     trace!("Received message: {}", text);
-                                    match parse_message(&text) {
+                                    // Parse the owned buffer directly (no input copy).
+                                    match parse_message_owned_with_buffers(
+                                        text,
+                                        &mut parse_buffers,
+                                    ) {
                                         Ok(message) => {
-                                            if is_in_scope(&message, &wanted_collections) {
+                                            if is_in_scope(&message, &wanted) {
                                                 if let Some(event_time_us) = message.time_us {
                                                     if let Some(timeout) = data_idle_timeout {
                                                         useful_data_deadline.as_mut().reset(Instant::now() + timeout);
@@ -309,9 +337,8 @@ impl MessageSource for JetstreamClient {
                                         },
                                         Err(e) => {
                                             warn!(
-                                                "Failed to parse message: {:?}. Raw: {}",
-                                                e,
-                                                &text[..text.len().min(200)]
+                                                "Failed to parse message: {:?} (raw text not retained by owned-parse path)",
+                                                e
                                             );
                                             // Continue processing other messages
                                         }
@@ -518,11 +545,35 @@ fn endpoint_url(
 }
 
 fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
+    parse_message_with_buffers(text, &mut simd_json::Buffers::new(text.len()))
+}
+
+fn parse_message_with_buffers(
+    text: &str,
+    buffers: &mut simd_json::Buffers,
+) -> TurboResult<JetstreamMessage> {
+    parse_message_owned_with_buffers(text.to_string(), buffers)
+}
+
+/// Parse a message from an already-owned buffer, avoiding the input copy that
+/// the `&str` path must make (simd-json requires mutable input). The Jetstream
+/// socket hands us an owned `String` per message, so production uses this.
+fn parse_message_owned_with_buffers(
+    mut text: String,
+    buffers: &mut simd_json::Buffers,
+) -> TurboResult<JetstreamMessage> {
+    // Capture the original wire bytes before parsing: simd-json rewrites
+    // escaped strings in place, so the input is not preserved across the
+    // parse. The storage path writes this copy verbatim instead of
+    // re-encoding the parsed structure (envelope + record DOM).
+    let raw_json: String = text.clone();
+
     // Use simd-json for faster parsing (2-4x faster than serde_json)
     // simd-json requires mutable input and uses unsafe SIMD operations internally
     // The library handles safety internally through careful validation
-    let mut text = text.to_string();
-    let message: JetstreamMessage = unsafe { simd_json::from_str(&mut text)? };
+    let mut message: JetstreamMessage =
+        unsafe { simd_json::serde::from_str_with_buffers(&mut text, buffers)? };
+    message.raw_json = Some(raw_json);
 
     // Validate required fields
     if message.did.is_empty() {
@@ -532,17 +583,13 @@ fn parse_message(text: &str) -> TurboResult<JetstreamMessage> {
     Ok(message)
 }
 
-fn is_in_scope(message: &JetstreamMessage, wanted_collections: &str) -> bool {
+fn is_in_scope(message: &JetstreamMessage, wanted_collections: &[&str]) -> bool {
     match message.kind {
         crate::models::jetstream::MessageKind::Commit => message
             .commit
             .as_ref()
             .and_then(|commit| commit.collection.as_deref())
-            .is_some_and(|collection| {
-                wanted_collections
-                    .split(',')
-                    .any(|wanted| wanted.trim() == collection)
-            }),
+            .is_some_and(|collection| wanted_collections.contains(&collection)),
         crate::models::jetstream::MessageKind::Identity
         | crate::models::jetstream::MessageKind::Account => true,
         crate::models::jetstream::MessageKind::Unknown => false,
@@ -559,11 +606,12 @@ mod tests {
 
     fn checkpoint(time_us: u64, source_seq: Option<u64>) -> IngestionCheckpoint {
         let message = JetstreamMessage {
-            did: "did:plc:cursor".to_string(),
+            did: "did:plc:cursor".to_string().into(),
             time_us: Some(time_us),
             seq: source_seq,
             kind: crate::models::jetstream::MessageKind::Account,
             commit: None,
+            raw_json: None,
         };
         IngestionCheckpoint {
             ingress_ordinal: 42,
@@ -753,7 +801,7 @@ mod tests {
         assert!(result.is_ok());
 
         let message = result.unwrap();
-        assert_eq!(message.did, "did:plc:test");
+        assert_eq!(message.did.as_ref(), "did:plc:test");
         assert_eq!(message.seq, Some(12345));
     }
 
@@ -815,7 +863,7 @@ mod tests {
             .expect("stream should produce a result")
             .expect("recovered message should be valid");
 
-        assert_eq!(message.did, "did:plc:recovered");
+        assert_eq!(message.did.as_ref(), "did:plc:recovered");
         let snapshot = progress.snapshot(ProgressThresholds {
             startup_grace: Duration::from_secs(10),
             ingress_idle: Duration::from_secs(10),
@@ -856,7 +904,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(message.did, "did:plc:recovered");
+        assert_eq!(message.did.as_ref(), "did:plc:recovered");
     }
 
     #[tokio::test]

@@ -179,7 +179,7 @@ impl EnrichedRecord {
             .commit
             .as_ref()
             .and_then(|c| c.record.as_ref())
-            .and_then(|r| r.get("text").and_then(|v| v.as_str()))
+            .and_then(|r| r.text.as_deref())
     }
 
     #[inline(always)]
@@ -232,13 +232,13 @@ impl HydratedMetadata {
 mod tests {
     use super::*;
     use crate::client::{BlueskyOperation, UpstreamFailureCategory};
-    use crate::models::jetstream::{CommitData, MessageKind, OperationType};
+    use crate::models::jetstream::{owned_record, CommitData, MessageKind, OperationType};
     use serde_json::json;
 
     #[test]
     fn test_enriched_record_creation() {
         let message = JetstreamMessage {
-            did: "did:plc:test".to_string(),
+            did: "did:plc:test".to_string().into(),
             time_us: Some(1640995200000000),
             seq: Some(12345),
             kind: MessageKind::Commit,
@@ -247,9 +247,10 @@ mod tests {
                 operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("test123".to_string()),
-                record: Some(json!({"text": "Hello world"})),
+                record: Some(owned_record(json!({"text": "Hello world"}))),
                 cid: Some("bafyrei".to_string()),
             }),
+            raw_json: None,
         };
 
         let enriched = EnrichedRecord::new(message);
@@ -260,7 +261,7 @@ mod tests {
     #[test]
     fn test_cache_hit_rate_calculation() {
         let mut enriched = EnrichedRecord::new(JetstreamMessage {
-            did: "did:plc:test".to_string(),
+            did: "did:plc:test".to_string().into(),
             time_us: Some(1640995200000000),
             seq: Some(12345),
             kind: MessageKind::Commit,
@@ -269,9 +270,10 @@ mod tests {
                 operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("test123".to_string()),
-                record: Some(json!({"text": "Hello"})),
+                record: Some(owned_record(json!({"text": "Hello"}))),
                 cid: Some("bafyrei".to_string()),
             }),
+            raw_json: None,
         });
 
         enriched.metrics.cache_hits = 8;
@@ -284,7 +286,7 @@ mod tests {
     #[test]
     fn test_empty_hydrated_metadata_serializes_compactly() {
         let message = JetstreamMessage {
-            did: "did:plc:test".to_string(),
+            did: "did:plc:test".to_string().into(),
             time_us: Some(1640995200000000),
             seq: Some(12345),
             kind: MessageKind::Commit,
@@ -293,9 +295,10 @@ mod tests {
                 operation_type: OperationType::Create,
                 collection: Some("app.bsky.feed.post".to_string()),
                 rkey: Some("test123".to_string()),
-                record: Some(json!({"text": "Hello world"})),
+                record: Some(owned_record(json!({"text": "Hello world"}))),
                 cid: Some("bafyrei".to_string()),
             }),
+            raw_json: None,
         };
 
         let enriched = EnrichedRecord::new(message);
