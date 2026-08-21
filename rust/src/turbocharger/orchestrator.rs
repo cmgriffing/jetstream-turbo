@@ -23,6 +23,7 @@ use crate::turbocharger::progress::{
     PipelineProgressSnapshot, PipelineReadinessState, ProgressThresholds,
 };
 use crate::turbocharger::{FailureSupervisor, RecoveryDecision};
+use chrono::{DateTime, Timelike, Utc};
 use futures::StreamExt;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -810,6 +811,34 @@ fn recovery_phase_code(phase: crate::models::recovery::RecoveryPhase) -> f64 {
     }
 }
 
+/// Whether `current_hour` (UTC) falls inside the configured low-traffic
+/// window `[start_hour, end_hour)`, handling windows that wrap past midnight
+/// (e.g. 22:00-02:00).
+fn in_vacuum_window(current_hour: u32, start_hour: u32, end_hour: u32) -> bool {
+    if start_hour < end_hour {
+        current_hour >= start_hour && current_hour < end_hour
+    } else {
+        current_hour >= start_hour || current_hour < end_hour
+    }
+}
+
+/// Scheduling decision for a pending VACUUM: run when the current UTC hour is
+/// inside the window, or when the pending age exceeds `max_defer_hours`.
+fn vacuum_should_run_now(
+    now: DateTime<Utc>,
+    pending_since: Option<DateTime<Utc>>,
+    window_start_hour: u32,
+    window_end_hour: u32,
+    max_defer_hours: u64,
+) -> bool {
+    if in_vacuum_window(now.hour(), window_start_hour, window_end_hour) {
+        return true;
+    }
+    pending_since
+        .map(|since| now.signed_duration_since(since).num_hours() >= max_defer_hours as i64)
+        .unwrap_or(false)
+}
+
 async fn persist_batch_completion(
     frontier: &Mutex<CompletionFrontier>,
     sqlite_store: &SQLiteStore,
@@ -1071,6 +1100,15 @@ where
                 journal_mode: Some(snapshot.journal_mode),
                 journal_size_limit_bytes: Some(snapshot.journal_size_limit_bytes),
                 partial_records: Some(snapshot.partial_records),
+                vacuum_pending: Some(snapshot.vacuum_pending),
+                vacuum_pending_reason: snapshot.vacuum_pending_reason,
+                vacuum_pending_since: snapshot.vacuum_pending_since,
+                vacuum_last_run_at: snapshot.vacuum_last_run_at,
+                vacuum_last_run_duration_ms: snapshot.vacuum_last_run_duration_ms,
+                vacuum_last_run_bytes_reclaimed: snapshot.vacuum_last_run_bytes_reclaimed,
+                freelist_ratio: snapshot.freelist_ratio,
+                over_budget: Some(snapshot.over_budget),
+                over_budget_after_vacuum: Some(snapshot.over_budget_after_vacuum),
                 collection_error: None,
             },
             Err(e) => SQLiteStateDiagnostics {
@@ -1085,6 +1123,15 @@ where
                 journal_mode: None,
                 journal_size_limit_bytes: None,
                 partial_records: None,
+                vacuum_pending: None,
+                vacuum_pending_reason: None,
+                vacuum_pending_since: None,
+                vacuum_last_run_at: None,
+                vacuum_last_run_duration_ms: None,
+                vacuum_last_run_bytes_reclaimed: None,
+                freelist_ratio: None,
+                over_budget: None,
+                over_budget_after_vacuum: None,
                 collection_error: Some(e.to_string()),
             },
         };
@@ -1137,8 +1184,7 @@ where
                 .cleanup_with_vacuum(
                     self.settings.db_retention_days,
                     max_size_bytes,
-                    self.settings.vacuum_min_bytes_freed,
-                    self.settings.vacuum_min_percent_freed,
+                    self.settings.vacuum_freelist_ratio,
                     self.settings.cleanup_chunk_size,
                     self.settings.cleanup_chunk_delay_ms,
                 )
@@ -1152,6 +1198,11 @@ where
             return Ok(Some(result));
         }
 
+        // Under budget: still evaluate proactive freelist-bloat reclamation
+        // (no records are deleted in this path).
+        self.sqlite_store
+            .check_vacuum_bloat(max_size_bytes, self.settings.vacuum_freelist_ratio)
+            .await?;
         Ok(None)
     }
 
@@ -1198,12 +1249,96 @@ where
                         consecutive_skip_count = 0;
                     }
                 }
+
+                // Awaited VACUUM scheduling: run a pending VACUUM inside the
+                // low-traffic window, or immediately once it has been deferred
+                // past the maximum defer duration.
+                if let Err(e) = this.maybe_run_pending_vacuum().await {
+                    error!("Scheduled VACUUM failed: {}", e);
+                }
             }
         });
         info!(
             "Started database cleanup task (base: {}min, max: {}min, reset after {} skips)",
             base_interval_minutes, max_interval_minutes, reset_skip_count
         );
+    }
+
+    /// Runs a pending VACUUM when the current UTC hour is inside the configured
+    /// low-traffic window, or when it has been pending longer than
+    /// `vacuum_max_defer_hours`. Records the outcome in the store and updates
+    /// the vacuum gauges.
+    async fn maybe_run_pending_vacuum(&self) -> TurboResult<()> {
+        let vacuum_state = self.sqlite_store.get_vacuum_state();
+
+        if !vacuum_state.pending {
+            return Ok(());
+        }
+
+        let now = Utc::now();
+        let should_run = vacuum_should_run_now(
+            now,
+            vacuum_state.pending_since,
+            self.settings.vacuum_window_start_hour,
+            self.settings.vacuum_window_end_hour,
+            self.settings.vacuum_max_defer_hours,
+        );
+
+        if !should_run {
+            info!(
+                reason = ?vacuum_state.pending_reason,
+                pending_hours = vacuum_state
+                    .pending_since
+                    .map(|since| now.signed_duration_since(since).num_hours()),
+                window = format_args!(
+                    "{}:00-{}:00 UTC",
+                    self.settings.vacuum_window_start_hour,
+                    self.settings.vacuum_window_end_hour
+                ),
+                "VACUUM pending but outside low-traffic window; deferring"
+            );
+            self.emit_vacuum_gauges().await;
+            return Ok(());
+        }
+
+        let max_size_bytes = (self.settings.max_db_size_mb as i64) * 1024 * 1024;
+        let run = self.sqlite_store.run_vacuum(max_size_bytes).await?;
+        info!(
+            reason = ?vacuum_state.pending_reason,
+            reclaimed_bytes = run.bytes_reclaimed,
+            duration_ms = run.duration_ms,
+            over_budget_after_vacuum = run.over_budget_after_vacuum,
+            "Scheduled VACUUM completed"
+        );
+        self.emit_vacuum_gauges().await;
+        Ok(())
+    }
+
+    /// Reflects the current SQLite vacuum state in Prometheus gauges.
+    async fn emit_vacuum_gauges(&self) {
+        match self.sqlite_store.get_state_snapshot().await {
+            Ok(snapshot) => {
+                metrics::gauge!("jetstream_turbo_db_size_bytes").set(snapshot.db_size_bytes as f64);
+                if let Some(ratio) = snapshot.freelist_ratio {
+                    metrics::gauge!("jetstream_turbo_db_freelist_ratio").set(ratio);
+                }
+                metrics::gauge!("jetstream_turbo_vacuum_pending").set(if snapshot.vacuum_pending {
+                    1.0
+                } else {
+                    0.0
+                });
+                if let Some(duration_ms) = snapshot.vacuum_last_run_duration_ms {
+                    metrics::gauge!("jetstream_turbo_vacuum_last_duration_ms")
+                        .set(duration_ms as f64);
+                }
+                metrics::gauge!("jetstream_turbo_db_over_budget").set(if snapshot.over_budget {
+                    1.0
+                } else {
+                    0.0
+                });
+            }
+            Err(e) => warn!("Failed to read SQLite snapshot for vacuum gauges: {}", e),
+        }
     }
 }
 
@@ -2270,5 +2405,93 @@ mod tests {
         assert_eq!(publisher.call_count.load(Ordering::SeqCst), 0);
         assert!(broadcast_receiver.try_recv().is_err());
         assert_eq!(result.range.end_ordinal, 1);
+    }
+
+    #[test]
+    fn vacuum_window_is_half_open_and_wraps_past_midnight() {
+        // Default 03:00-05:00 window.
+        assert!(in_vacuum_window(3, 3, 5));
+        assert!(in_vacuum_window(4, 3, 5));
+        assert!(!in_vacuum_window(5, 3, 5), "end hour is exclusive");
+        assert!(!in_vacuum_window(2, 3, 5));
+        assert!(!in_vacuum_window(23, 3, 5));
+
+        // Overnight window 22:00-02:00.
+        assert!(in_vacuum_window(22, 22, 2));
+        assert!(in_vacuum_window(23, 22, 2));
+        assert!(in_vacuum_window(0, 22, 2));
+        assert!(in_vacuum_window(1, 22, 2));
+        assert!(!in_vacuum_window(2, 22, 2));
+        assert!(!in_vacuum_window(12, 22, 2));
+    }
+
+    #[test]
+    fn pending_vacuum_stays_pending_outside_window_before_defer_elapses() {
+        let now = Utc::now();
+        let pending_since = now - chrono::Duration::hours(1);
+
+        // Outside the window (assuming the current hour is not 3-4) and well
+        // under the 6h defer: must NOT run.
+        let outside_hour = (now.hour() + 6) % 24;
+        assert!(!in_vacuum_window(outside_hour, now.hour(), now.hour() + 1));
+        assert!(!vacuum_should_run_now(
+            now,
+            Some(pending_since),
+            outside_hour,
+            (outside_hour + 1) % 24,
+            6,
+        ));
+    }
+
+    #[test]
+    fn pending_vacuum_runs_inside_window() {
+        let now = Utc::now();
+        let current_hour = now.hour();
+        let window_start = current_hour;
+        let window_end = (current_hour + 1) % 24;
+
+        // Inside the window, even freshly pending: must run.
+        assert!(vacuum_should_run_now(
+            now,
+            Some(now),
+            window_start,
+            window_end,
+            6,
+        ));
+        // Without a pending-since timestamp the window alone decides.
+        assert!(vacuum_should_run_now(
+            now,
+            None,
+            window_start,
+            window_end,
+            6
+        ));
+    }
+
+    #[test]
+    fn pending_vacuum_runs_after_max_defer_hours_even_outside_window() {
+        let now = Utc::now();
+        let pending_since = now - chrono::Duration::hours(7);
+        let outside_hour = (now.hour() + 6) % 24;
+
+        // Outside the window but past the 6h defer: must run regardless.
+        assert!(!in_vacuum_window(outside_hour, now.hour(), now.hour() + 1));
+        assert!(vacuum_should_run_now(
+            now,
+            Some(pending_since),
+            outside_hour,
+            (outside_hour + 1) % 24,
+            6,
+        ));
+
+        // Just under the defer limit: must stay pending.
+        let recent = now - chrono::Duration::hours(5);
+        assert!(!vacuum_should_run_now(
+            now,
+            Some(recent),
+            outside_hour,
+            (outside_hour + 1) % 24,
+            6,
+        ));
     }
 }

@@ -12,15 +12,50 @@ use sqlx::{
 };
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::Instant;
 use tokio::time::{sleep, Duration};
-use tracing::{error, info, instrument, trace, warn};
+use tracing::{info, instrument, trace, warn};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VacuumPendingReason {
+    /// The database file exceeded `max_db_size_mb` after the retention delete loop.
+    OverBudget,
+    /// The freelist ratio exceeded `vacuum_freelist_ratio` while under the size limit.
+    Bloat,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct VacuumState {
+    pub pending: bool,
+    pub pending_reason: Option<VacuumPendingReason>,
+    pub pending_since: Option<DateTime<Utc>>,
+    pub last_run_at: Option<DateTime<Utc>>,
+    pub last_run_duration_ms: Option<u64>,
+    pub last_run_bytes_reclaimed: Option<i64>,
+    /// Whether the database file was over budget at the last cleanup evaluation.
+    pub over_budget: bool,
+    /// Whether the database file was still over budget after the most recent VACUUM.
+    pub over_budget_after_vacuum: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VacuumRunResult {
+    pub started_at: DateTime<Utc>,
+    pub duration_ms: u64,
+    pub size_before: i64,
+    pub size_after: i64,
+    pub bytes_reclaimed: i64,
+    pub over_budget_after_vacuum: bool,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CleanupResult {
     pub records_deleted: u64,
     pub new_size_bytes: i64,
     pub vacuum_pending: bool,
+    pub vacuum_pending_reason: Option<VacuumPendingReason>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -30,11 +65,20 @@ pub struct SQLiteStateSnapshot {
     pub page_count: i64,
     pub page_size_bytes: i64,
     pub freelist_count: i64,
+    pub freelist_ratio: Option<f64>,
     pub cache_size_pages: i64,
     pub mmap_size_bytes: i64,
     pub journal_mode: String,
     pub journal_size_limit_bytes: i64,
     pub partial_records: i64,
+    pub vacuum_pending: bool,
+    pub vacuum_pending_reason: Option<VacuumPendingReason>,
+    pub vacuum_pending_since: Option<DateTime<Utc>>,
+    pub vacuum_last_run_at: Option<DateTime<Utc>>,
+    pub vacuum_last_run_duration_ms: Option<u64>,
+    pub vacuum_last_run_bytes_reclaimed: Option<i64>,
+    pub over_budget: bool,
+    pub over_budget_after_vacuum: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -61,6 +105,7 @@ pub trait RecordStore {
 pub struct SQLiteStore {
     pool: SqlitePool,
     db_path: String,
+    vacuum_state: Mutex<VacuumState>,
 }
 
 impl SQLiteStore {
@@ -108,6 +153,7 @@ impl SQLiteStore {
         Ok(Self {
             pool,
             db_path: db_path_str,
+            vacuum_state: Mutex::new(VacuumState::default()),
         })
     }
 
@@ -585,6 +631,12 @@ impl SQLiteStore {
             sqlx::query_scalar("SELECT COUNT(*) FROM records WHERE hydration_quality = 'partial'")
                 .fetch_one(&self.pool)
                 .await?;
+        let freelist_ratio = if page_count > 0 {
+            Some(freelist_count as f64 / page_count as f64)
+        } else {
+            None
+        };
+        let vacuum_state = self.get_vacuum_state();
 
         Ok(SQLiteStateSnapshot {
             db_size_bytes,
@@ -592,11 +644,20 @@ impl SQLiteStore {
             page_count,
             page_size_bytes,
             freelist_count,
+            freelist_ratio,
             cache_size_pages,
             mmap_size_bytes,
             journal_mode,
             journal_size_limit_bytes,
             partial_records,
+            vacuum_pending: vacuum_state.pending,
+            vacuum_pending_reason: vacuum_state.pending_reason,
+            vacuum_pending_since: vacuum_state.pending_since,
+            vacuum_last_run_at: vacuum_state.last_run_at,
+            vacuum_last_run_duration_ms: vacuum_state.last_run_duration_ms,
+            vacuum_last_run_bytes_reclaimed: vacuum_state.last_run_bytes_reclaimed,
+            over_budget: vacuum_state.over_budget,
+            over_budget_after_vacuum: vacuum_state.over_budget_after_vacuum,
         })
     }
 
@@ -617,89 +678,200 @@ impl SQLiteStore {
         &self,
         retention_days: u32,
         max_size_bytes: i64,
-        vacuum_min_bytes_freed: u64,
-        vacuum_min_percent_freed: f64,
+        vacuum_freelist_ratio: f64,
         cleanup_chunk_size: u32,
         cleanup_chunk_delay_ms: u64,
     ) -> TurboResult<CleanupResult> {
         let initial_size = self.get_db_size().await?;
-        let mut current_retention = retention_days;
         let mut total_deleted: u64 = 0;
-        let max_iterations = 3;
 
-        for iteration in 0..max_iterations {
-            let cutoff = Utc::now() - chrono::Duration::days(current_retention as i64);
-            let deleted = self
-                .cleanup_old_records(cutoff, cleanup_chunk_size, cleanup_chunk_delay_ms)
-                .await?;
-            total_deleted += deleted;
+        // The retention delete loop only runs when the file is over budget:
+        // SQLite (auto_vacuum = NONE) never shrinks the file on DELETE, so
+        // deleting below the limit is pointless work that only grows the
+        // freelist. Size only decreases via VACUUM.
+        if initial_size > max_size_bytes {
+            let mut current_retention = retention_days;
+            let max_iterations = 3;
 
-            let current_size = self.get_db_size().await?;
+            for iteration in 0..max_iterations {
+                let cutoff = Utc::now() - chrono::Duration::days(current_retention as i64);
+                let deleted = self
+                    .cleanup_old_records(cutoff, cleanup_chunk_size, cleanup_chunk_delay_ms)
+                    .await?;
+                total_deleted += deleted;
 
-            if current_size <= max_size_bytes {
-                break;
-            }
+                let current_size = self.get_db_size().await?;
 
-            info!(
-                "Iteration {}: DB still {}MB over limit, reducing retention from {} to {} days",
-                iteration + 1,
-                current_size / (1024 * 1024),
-                current_retention,
-                (current_retention / 2).max(1)
-            );
+                if current_size <= max_size_bytes {
+                    break;
+                }
 
-            current_retention = (current_retention / 2).max(1);
+                info!(
+                    "Iteration {}: DB still {}MB over limit, reducing retention from {} to {} days",
+                    iteration + 1,
+                    current_size / (1024 * 1024),
+                    current_retention,
+                    (current_retention / 2).max(1)
+                );
 
-            if iteration < max_iterations - 1 {
-                sleep(Duration::from_secs(2)).await;
+                current_retention = (current_retention / 2).max(1);
+
+                if iteration < max_iterations - 1 {
+                    sleep(Duration::from_secs(2)).await;
+                }
             }
         }
 
         let post_delete_size = self.get_db_size().await?;
-        let bytes_freed = initial_size.saturating_sub(post_delete_size);
-        let percent_freed = if initial_size > 0 {
-            (bytes_freed as f64 / initial_size as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        let should_vacuum = bytes_freed as i64 >= vacuum_min_bytes_freed as i64
-            || percent_freed >= vacuum_min_percent_freed;
-
-        let mut vacuum_pending = false;
-
-        if should_vacuum {
-            let pool = self.pool.clone();
-            let freed_mb = bytes_freed / (1024 * 1024);
-            let freed_percent = percent_freed as u64;
-            tokio::spawn(async move {
-                info!(
-                    "Starting background VACUUM (freed {}MB, {}%)",
-                    freed_mb, freed_percent
-                );
-                match sqlx::query("VACUUM").execute(&pool).await {
-                    Ok(_) => info!("Background VACUUM completed"),
-                    Err(e) => error!("Background VACUUM failed: {}", e),
-                }
-            });
-
-            sleep(Duration::from_millis(500)).await;
-            vacuum_pending = true;
-        } else {
-            info!(
-                "Skipping VACUUM: freed {}MB ({}%), below threshold ({}MB, {}%)",
-                bytes_freed / (1024 * 1024),
-                percent_freed as u64,
-                vacuum_min_bytes_freed / (1024 * 1024),
-                vacuum_min_percent_freed as u64
-            );
-        }
+        let vacuum_pending_reason = self
+            .decide_vacuum_pending(max_size_bytes, vacuum_freelist_ratio)
+            .await?;
 
         Ok(CleanupResult {
             records_deleted: total_deleted,
             new_size_bytes: post_delete_size,
-            vacuum_pending,
+            vacuum_pending: vacuum_pending_reason.is_some(),
+            vacuum_pending_reason,
         })
+    }
+
+    /// Under-budget cleanup cycle: evaluate only the proactive freelist-bloat
+    /// check without deleting any records.
+    pub async fn check_vacuum_bloat(
+        &self,
+        max_size_bytes: i64,
+        vacuum_freelist_ratio: f64,
+    ) -> TurboResult<Option<VacuumPendingReason>> {
+        self.decide_vacuum_pending(max_size_bytes, vacuum_freelist_ratio)
+            .await
+    }
+
+    /// Decides whether a VACUUM should be pending: over budget after the delete
+    /// loop, or freelist ratio above the configured threshold while under the
+    /// size limit. Records the decision in `vacuum_state`; an existing pending
+    /// flag is preserved (with its original pending-since timestamp) while the
+    /// same reason still applies, so the scheduler's defer/escalation logic is
+    /// stable across cycles.
+    async fn decide_vacuum_pending(
+        &self,
+        max_size_bytes: i64,
+        vacuum_freelist_ratio: f64,
+    ) -> TurboResult<Option<VacuumPendingReason>> {
+        let db_size = self.get_db_size().await?;
+        let reason = if db_size > max_size_bytes {
+            Some(VacuumPendingReason::OverBudget)
+        } else {
+            let (freelist_count,): (i64,) = sqlx::query_as("PRAGMA freelist_count")
+                .fetch_one(&self.pool)
+                .await?;
+            let (page_count,): (i64,) = sqlx::query_as("PRAGMA page_count")
+                .fetch_one(&self.pool)
+                .await?;
+            let ratio = if page_count > 0 {
+                freelist_count as f64 / page_count as f64
+            } else {
+                0.0
+            };
+            if ratio > vacuum_freelist_ratio {
+                Some(VacuumPendingReason::Bloat)
+            } else {
+                None
+            }
+        };
+
+        let mut state = self
+            .vacuum_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.over_budget = db_size > max_size_bytes;
+        if let Some(reason) = reason {
+            if !state.pending || state.pending_reason != Some(reason) {
+                state.pending = true;
+                state.pending_reason = Some(reason);
+                state.pending_since = Some(Utc::now());
+            }
+            info!(
+                ?reason,
+                size_mb = db_size / (1024 * 1024),
+                max_size_mb = max_size_bytes / (1024 * 1024),
+                "VACUUM scheduled (pending)"
+            );
+        } else {
+            trace!(
+                size_mb = db_size / (1024 * 1024),
+                max_size_mb = max_size_bytes / (1024 * 1024),
+                "No VACUUM scheduled this cycle"
+            );
+        }
+        drop(state);
+        Ok(reason)
+    }
+
+    /// Runs a VACUUM on a dedicated connection, awaited by the caller:
+    /// `PRAGMA wal_checkpoint(TRUNCATE)` first, then `VACUUM`, recording the
+    /// duration and bytes reclaimed from the file-size delta. Clears any
+    /// pending flag on success and tracks whether the file is still over
+    /// budget afterwards.
+    pub async fn run_vacuum(&self, max_size_bytes: i64) -> TurboResult<VacuumRunResult> {
+        let started_at = Utc::now();
+        let start = Instant::now();
+        let size_before = self.get_db_size().await?;
+
+        let mut conn = self.pool.acquire().await?;
+        if let Err(e) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&mut *conn)
+            .await
+        {
+            warn!("wal_checkpoint(TRUNCATE) before VACUUM failed: {e}; continuing");
+        }
+        sqlx::query("VACUUM").execute(&mut *conn).await?;
+        drop(conn);
+
+        let duration = start.elapsed();
+        let duration_ms = duration.as_millis() as u64;
+        let size_after = self.get_db_size().await?;
+        let bytes_reclaimed = size_before.saturating_sub(size_after);
+        let over_budget_after_vacuum = size_after > max_size_bytes;
+
+        {
+            let mut state = self
+                .vacuum_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.pending = false;
+            state.pending_reason = None;
+            state.pending_since = None;
+            state.last_run_at = Some(started_at);
+            state.last_run_duration_ms = Some(duration_ms);
+            state.last_run_bytes_reclaimed = Some(bytes_reclaimed);
+            state.over_budget = over_budget_after_vacuum;
+            state.over_budget_after_vacuum = over_budget_after_vacuum;
+        }
+
+        info!(
+            size_before_mb = size_before / (1024 * 1024),
+            size_after_mb = size_after / (1024 * 1024),
+            bytes_reclaimed,
+            duration_ms,
+            over_budget_after_vacuum,
+            "VACUUM completed"
+        );
+
+        Ok(VacuumRunResult {
+            started_at,
+            duration_ms,
+            size_before,
+            size_after,
+            bytes_reclaimed,
+            over_budget_after_vacuum,
+        })
+    }
+
+    pub fn get_vacuum_state(&self) -> VacuumState {
+        self.vacuum_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     pub async fn get_db_path(&self) -> &str {
@@ -1118,6 +1290,21 @@ mod tests {
                 || snapshot.journal_size_limit_bytes == -1,
             "journal_size_limit should be configured or report SQLite's unlimited sentinel"
         );
+        assert!(
+            snapshot.freelist_ratio.is_some_and(|ratio| ratio >= 0.0),
+            "freelist ratio should be present and non-negative"
+        );
+        assert!(
+            !snapshot.vacuum_pending,
+            "no VACUUM should be pending initially"
+        );
+        assert_eq!(snapshot.vacuum_pending_reason, None);
+        assert_eq!(snapshot.vacuum_pending_since, None);
+        assert_eq!(snapshot.vacuum_last_run_at, None);
+        assert_eq!(snapshot.vacuum_last_run_duration_ms, None);
+        assert_eq!(snapshot.vacuum_last_run_bytes_reclaimed, None);
+        assert!(!snapshot.over_budget);
+        assert!(!snapshot.over_budget_after_vacuum);
 
         store.close().await.unwrap();
     }
@@ -1256,7 +1443,7 @@ mod tests {
 
         let max_size = size_before / 2;
         let result = store
-            .cleanup_with_vacuum(7, max_size, 1024, 1.0, 1000, 50)
+            .cleanup_with_vacuum(7, max_size, 0.10, 1000, 50)
             .await
             .unwrap();
 
@@ -1299,13 +1486,150 @@ mod tests {
 
         let large_size = 100_000_000_000i64;
         let result = store
-            .cleanup_with_vacuum(7, large_size, 1024, 1.0, 1000, 50)
+            .cleanup_with_vacuum(7, large_size, 0.10, 1000, 50)
             .await
             .unwrap();
 
         assert_eq!(
             result.records_deleted, 0,
             "Should not delete anything when under limit"
+        );
+        assert!(
+            !result.vacuum_pending,
+            "Fresh DB under limit should not schedule a VACUUM"
+        );
+
+        store.close().await.unwrap();
+    }
+
+    /// Inserts `count` records dated `age_days` in the past so the retention
+    /// delete loop treats them as expired.
+    async fn insert_expired_records(store: &SQLiteStore, count: u32, age_days: i64) {
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        let old_time = now - chrono::Duration::days(age_days);
+        let old_time_str = old_time.to_rfc3339();
+
+        for i in 0..count {
+            sqlx::query(
+                r#"INSERT INTO records (at_uri, did, time_us, message, message_metadata, created_at, hydrated_at, hydration_time_ms, api_calls_count, cache_hit_rate, cache_hits, cache_misses)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
+            )
+            .bind(format!("at://vacuum{i}.bsky.social/app.bsky.feed.post/1"))
+            .bind(format!("did:plc:vacuum{i}"))
+            .bind(1000i64 + i as i64)
+            .bind(r#"{"foo":"bar","payload":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"#)
+            .bind(r#"{}"#)
+            .bind(&old_time_str)
+            .bind(&now_str)
+            .bind(100i64)
+            .bind(1i64)
+            .bind(0.5)
+            .bind(10i64)
+            .bind(10i64)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn over_budget_vacuum_runs_and_actually_shrinks_the_file() {
+        let store = create_test_db().await;
+
+        insert_expired_records(&store, 200, 10).await;
+
+        let size_with_data = store.get_db_size().await.unwrap();
+        // Force the database over budget, then run the full cleanup path.
+        let max_size_bytes = size_with_data / 2;
+        let result = store
+            .cleanup_with_vacuum(7, max_size_bytes, 0.10, 1000, 0)
+            .await
+            .unwrap();
+
+        assert!(
+            result.records_deleted > 0,
+            "over-budget cleanup should delete expired records"
+        );
+        assert!(result.vacuum_pending);
+        assert_eq!(
+            result.vacuum_pending_reason,
+            Some(VacuumPendingReason::OverBudget)
+        );
+
+        // DELETE does not shrink the file (auto_vacuum = NONE): the file is
+        // still over budget, so VACUUM must be the lever that reclaims space.
+        assert!(
+            result.new_size_bytes >= size_with_data,
+            "DELETE alone must not shrink the database file"
+        );
+
+        let run = store.run_vacuum(max_size_bytes).await.unwrap();
+        assert!(
+            run.size_after < run.size_before,
+            "VACUUM must actually shrink the file ({} -> {})",
+            run.size_before,
+            run.size_after
+        );
+        assert!(run.bytes_reclaimed > 0);
+        assert!(
+            !run.over_budget_after_vacuum,
+            "VACUUM should bring the file back under the forced budget"
+        );
+
+        let state = store.get_vacuum_state();
+        assert!(!state.pending, "pending flag must be cleared after VACUUM");
+        assert_eq!(state.pending_reason, None);
+        assert!(state.last_run_at.is_some());
+        assert_eq!(
+            state.last_run_duration_ms,
+            Some(run.duration_ms),
+            "last run duration should be recorded"
+        );
+        assert_eq!(
+            state.last_run_bytes_reclaimed,
+            Some(run.bytes_reclaimed),
+            "bytes reclaimed should be recorded"
+        );
+        assert!(!state.over_budget_after_vacuum);
+
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn freelist_bloat_schedules_vacuum_even_under_size_limit() {
+        let store = create_test_db().await;
+
+        // Fill the DB with records, then delete them all: with auto_vacuum =
+        // NONE the file keeps its size and the freed pages sit on the freelist.
+        insert_expired_records(&store, 300, 10).await;
+        let deleted = store
+            .cleanup_old_records(Utc::now() - chrono::Duration::days(1), 1000, 0)
+            .await
+            .unwrap();
+        assert!(deleted > 0);
+
+        let size = store.get_db_size().await.unwrap();
+        let large_max = size * 2;
+
+        let reason = store.check_vacuum_bloat(large_max, 0.05).await.unwrap();
+        assert_eq!(
+            reason,
+            Some(VacuumPendingReason::Bloat),
+            "freelist ratio above threshold must schedule a VACUUM under the size limit"
+        );
+
+        let state = store.get_vacuum_state();
+        assert!(state.pending);
+        assert_eq!(state.pending_reason, Some(VacuumPendingReason::Bloat));
+        assert!(state.pending_since.is_some());
+        assert!(!state.over_budget);
+
+        // An impossible threshold must not schedule anything.
+        let none = store.check_vacuum_bloat(large_max, 1.0).await.unwrap();
+        assert_eq!(
+            none, None,
+            "ratio below threshold must not schedule a VACUUM"
         );
 
         store.close().await.unwrap();
