@@ -5,7 +5,7 @@ use crate::models::{
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use simd_json::to_string as simd_json_to_string;
+use simd_json::to_writer as simd_json_to_writer;
 use sqlx::{
     sqlite::SqliteConnectOptions, sqlite::SqliteJournalMode, sqlite::SqlitePoolOptions, Row,
     SqliteConnection, SqlitePool,
@@ -266,8 +266,15 @@ impl SQLiteStore {
     pub async fn store_record(&self, record: &EnrichedRecord) -> TurboResult<i64> {
         let now = Utc::now();
 
-        let message_json = simd_json_to_string(&record.message).unwrap();
-        let metadata_json = simd_json_to_string(&record.hydrated_metadata).unwrap();
+        // Serialize both JSON columns into one buffer (one allocation instead
+        // of two), then bind the two non-overlapping UTF-8 slices.
+        let mut buf = Vec::with_capacity(1024);
+        simd_json_to_writer(&mut buf, &record.message).unwrap();
+        let message_end = buf.len();
+        simd_json_to_writer(&mut buf, &record.hydrated_metadata).unwrap();
+        let combined = String::from_utf8(buf).expect("serialized JSON is UTF-8");
+        let message_json = &combined[..message_end];
+        let metadata_json = &combined[message_end..];
 
         let id: i64 = sqlx::query_scalar(
             r#"
@@ -767,14 +774,30 @@ impl RecordStore for SQLiteStore {
 
             let mut query = sqlx::query(&insert_sql);
 
+            // Serialize every row's message+metadata into one owned buffer each
+            // (a single allocation per row instead of two), then bind the two
+            // non-overlapping UTF-8 slices. The buffers are collected before the
+            // binds so sqlx's borrowed `&str` arguments outlive the query.
+            let mut serialized: Vec<(String, usize)> = Vec::with_capacity(chunk.len());
             for record in chunk {
+                let mut buf = Vec::with_capacity(1024);
+                simd_json_to_writer(&mut buf, &record.message).unwrap();
+                let message_end = buf.len();
+                simd_json_to_writer(&mut buf, &record.hydrated_metadata).unwrap();
+                serialized.push((String::from_utf8(buf).expect("JSON is UTF-8"), message_end));
+            }
+
+            for (record, (combined, message_end)) in chunk.iter().zip(&serialized) {
+                let message_json = &combined[..*message_end];
+                let metadata_json = &combined[*message_end..];
+
                 query = query
                     .bind(record.get_at_uri())
                     .bind(record.get_did())
                     .bind(record.message.time_us.map(|t| t as i64))
                     .bind(record.source_event_id().to_string())
-                    .bind(simd_json_to_string(&record.message).unwrap())
-                    .bind(simd_json_to_string(&record.hydrated_metadata).unwrap())
+                    .bind(message_json)
+                    .bind(metadata_json)
                     .bind(record.processed_at.to_rfc3339())
                     .bind(&now_str)
                     .bind(record.metrics.hydration_time_ms as i64)

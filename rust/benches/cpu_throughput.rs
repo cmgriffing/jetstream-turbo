@@ -96,15 +96,17 @@ fn run_batch(
         .expect("hydrate batch");
     let hydrate_ms = hydrate_start.elapsed().as_secs_f64() * 1000.0;
 
-    // Serialize (message + metadata, mirroring the storage path).
+    // Serialize (message + metadata into one buffer per record, mirroring the
+    // storage path).
     let encode_start = Instant::now();
     let mut bytes = 0usize;
     for record in &enriched {
-        let message_json = simd_json::to_string(&record.message).expect("serialize message");
-        let metadata_json =
-            simd_json::to_string(&record.hydrated_metadata).expect("serialize metadata");
-        bytes += message_json.len() + metadata_json.len();
-        black_box((message_json, metadata_json));
+        let mut buf = Vec::with_capacity(1024);
+        simd_json::to_writer(&mut buf, &record.message).expect("serialize message");
+        let message_end = buf.len();
+        simd_json::to_writer(&mut buf, &record.hydrated_metadata).expect("serialize metadata");
+        bytes += buf.len();
+        black_box((&buf[..message_end], &buf[message_end..]));
     }
     let encode_ms = encode_start.elapsed().as_secs_f64() * 1000.0;
 
