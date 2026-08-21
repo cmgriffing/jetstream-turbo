@@ -35,22 +35,21 @@ Checks: `./.auto/checks.sh` — runs `cargo test --all-targets --all-features` (
 - CI benchmark regression thresholds vs main: Tier1 2%, Tier2 5%, Tier3 5%
 - Keep code simple; equal perf with less code = keep; ugly complexity for tiny gain = discard
 
-## Current State (as of last run: 895.6k msgs/sec, +91% vs 468k baseline)
+## Current State (as of last run: 993.2k msgs/sec median-of-3, direct runs ~1.02M; +112% vs 468k baseline)
 
-Phase costs per 10k batch (~11.7ms total at 895k):
-- **parse ~5.4ms**: simd-json tape build ~2.8ms (floor) + envelope Strings ~0.7ms (did/rev/collection/rkey/cid) + **record DOM build ~1.6ms** (biggest parse item) + raw capture clone ~0.3ms
-- **hydrate ~1.7-2.0ms**: extract_refs ~0.1ms + dedup slot-assign ~0.2ms + RwLock bulk get ~0.05ms + hydrate_one loop ~0.5ms
-- **encode ~2.0ms**: message raw write ~0.1ms (wire-faithful) + metadata ~1.9ms (unique profile per message — structural)
-- **drop ~1.7-1.9ms**: record DOM ~8 deallocs/msg + 4 envelope Strings + raw_json (allocator-bound)
+Phase costs per 10k batch (~9.9ms total):
+- **parse ~5.2ms**: simd-json tape build ~3.2ms (incl. per-message Tape Vec alloc — dep-internal) + envelope Strings ~0.6ms (did/rev/collection/rkey/cid; rev/cid feed SourceEventId) + RecordData walker ~0.15ms + raw capture clone ~0.3ms
+- **hydrate ~1.8ms**: extract ~0.03ms + dedup slot-assign ~0.25ms + RwLock bulk get ~0.05ms + hydrate_one loop ~0.5ms + async/misc
+- **encode ~1.9ms**: message raw write ~0.1ms + metadata ~1.86ms (profile serialize ~1.64ms at ~1.5GB/s — near structural floor)
+- **drop ~0.9ms**: RecordData + envelope Strings + raw (halved by DOM removal)
 
 ## What's Been Tried (session log; details in .auto/log.jsonl + .auto/ideas.md)
 - **[KEPT #16] Wire-faithful storage**: `JetstreamMessage.raw_json: Option<String>` captured at parse (1 clone before simd-json mutates input) + `write_json()` emitting original bytes at store time. Encode 4.4→2.0ms. Byte-faithful round-trip. +10-25%.
 - **[KEPT #17] moka → RwLock<HashMap> caches**: moka get was 160-560ns; lazy TTL + FIFO eviction preserve semantics. Hydrate 4.4→2.0-2.6ms; all cache benches 2-6x faster. +5.5%.
-- **[KEPT #18] Slot-indexed hydrate**: dedup assigns profile_slot per context; hydrate_one reads `profiles[slot]` — no per-message hash lookups, no profiles_by_did map. Hydrate 2.4→1.7ms; hydration benches best-yet (696ns / 8.0µs). +3.6%.
-- Earlier keeps: shared Buffers parse, hydrate single-pass, ahash maps, OwnedValue record (BTreeMap→HashMap), MessageContext did dedup, owned ws-loop parse, one-buffer store serialize.
-- Dead ends: native owned-DOM parse (1.7x slower), sqlx buffer reuse (borrows), raw-span capture via serde bridge (no API), Arc<str> raw_json (double copy).
+- **[KEPT #18] Slot-indexed hydrate**: dedup assigns profile_slot per context; hydrate_one reads `profiles[slot]` — no per-message hash lookups. Hydrate 2.4→1.7ms; hydration benches best-yet. +3.6%.
+- **[KEEP #19] Record-DOM elimination**: `CommitData.record` is now `RecordData` (text/reply/embed/facets) extracted leniently from the parser's tape via deserialize_any visitors (Cow keys, draining IgnoredAny skips) instead of a full OwnedValue HashMap. Storage keeps writing raw wire bytes; redis blob splices write_json+metadata; fixtures build wire JSON and parse; hot-path bench inputs are real wire forms. Parse benches 2180→1633ns, record_view 31→2.3ns, serialize 1269→516ns, hydration batch 8.0→5.9µs. Throughput 895.6k→993k. +10.9%.
+- Earlier keeps: shared Buffers parse, hydrate single-pass, ahash maps, MessageContext did dedup, owned ws-loop parse, one-buffer store serialize.
+- Dead ends: native owned-DOM parse (1.7x slower), sqlx buffer reuse (borrows), raw-span capture via serde bridge (no API), Arc<str> raw_json (double copy), `&str` walker keys (break serde_json), non-draining visitors (cursor desync).
 
-## What's Left (see .auto/ideas.md for full design)
-- **Record-DOM elimination (~+20-25%)**: PARKED — needs CommitData.record type change + redis/fixture raw-aware round-trip; high churn/risk.
-- Envelope `rev`/`cid` skip: fields nothing reads but model/round-trip depend on them — skipped.
-- Metadata encode, tape build: structural floors.
+## What's Left (see .auto/ideas.md for full details)
+- All remaining phases are near their structural floors within the no-dependency-change / no-format-drift constraints (tape alloc is dep-internal; metadata profile write ~1.5GB/s; envelope strings feed SourceEventId).
