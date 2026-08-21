@@ -154,11 +154,25 @@ fn generate_message_id(record: &EnrichedRecord) -> String {
 }
 
 fn publication_values(record: &EnrichedRecord) -> TurboResult<Vec<(&'static str, String)>> {
+    // The message JSON is written byte-faithfully from the captured wire form
+    // (serde cannot splice raw JSON into the blob). The rest of the envelope
+    // keeps the derived field order: message, hydrated_metadata, processed_at,
+    // metrics.
+    let mut message_buf = Vec::with_capacity(1024);
+    record.message.write_json(&mut message_buf);
+    let message_json = String::from_utf8(message_buf).expect("message JSON is UTF-8");
+    let metadata_json = serde_json::to_string(&record.hydrated_metadata)?;
+    let metrics_json = serde_json::to_string(&record.metrics)?;
+    let envelope = format!(
+        "{{\"message\":{message_json},\"hydrated_metadata\":{metadata_json},\"processed_at\":\"{}\",\"metrics\":{metrics_json}}}",
+        record.processed_at.to_rfc3339()
+    );
+
     Ok(vec![
         ("at_uri", record.get_at_uri().unwrap_or_default()),
         ("did", record.get_did().to_string()),
         ("source_event_id", record.source_event_id().to_string()),
-        ("message", serde_json::to_string(record)?),
+        ("message", envelope),
         ("hydrated_at", record.processed_at.to_rfc3339()),
     ])
 }

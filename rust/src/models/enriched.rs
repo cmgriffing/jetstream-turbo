@@ -175,12 +175,11 @@ impl EnrichedRecord {
 
     #[inline(always)]
     pub fn get_text(&self) -> Option<&str> {
-        use simd_json::prelude::*;
         self.message
             .commit
             .as_ref()
             .and_then(|c| c.record.as_ref())
-            .and_then(|r| r.get("text").and_then(|v| v.as_str()))
+            .and_then(|r| r.text.as_deref())
     }
 
     #[inline(always)]

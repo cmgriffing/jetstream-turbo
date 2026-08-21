@@ -1,12 +1,12 @@
+use crate::models::record_data::RecordData;
 use serde::{Deserialize, Serialize, Serializer};
 use std::sync::Arc;
 
-/// Convert a `serde_json::Value` record into the native simd-json owned DOM
-/// used by `CommitData::record`. Kept as a helper so callers constructing
-/// messages (fixtures, tests) do not need to depend on simd-json directly.
-pub fn owned_record(value: serde_json::Value) -> simd_json::OwnedValue {
-    let mut json = serde_json::to_string(&value).expect("record serializes to JSON");
-    unsafe { simd_json::from_str(&mut json) }.expect("record re-parses as JSON")
+/// Convert a `serde_json::Value` record into the semantic record view used by
+/// `CommitData::record`. Kept as a helper so callers constructing messages
+/// (fixtures, tests) do not need to depend on record extraction directly.
+pub fn owned_record(value: serde_json::Value) -> RecordData {
+    RecordData::from_value(value)
 }
 
 #[repr(u8)]
@@ -115,7 +115,7 @@ pub struct CommitData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rkey: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub record: Option<simd_json::OwnedValue>,
+    pub record: Option<RecordData>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cid: Option<String>,
 }

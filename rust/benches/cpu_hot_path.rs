@@ -7,18 +7,18 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use jetstream_turbo_rs::client::JetstreamClient;
 use jetstream_turbo_rs::models::enriched::HydratedMetadata;
-use jetstream_turbo_rs::models::jetstream::owned_record;
 use jetstream_turbo_rs::models::jetstream::{
     CommitData, JetstreamMessage, MessageKind, OperationType,
 };
+use jetstream_turbo_rs::models::record_data::RecordData;
 use jetstream_turbo_rs::models::record_view::{FacetFeature, RecordView};
 use jetstream_turbo_rs::testing::create_profile;
 use std::hint::black_box;
 use std::sync::Arc;
 
 /// A realistic Bluesky post record with reply, embed, and facet references.
-fn realistic_record() -> simd_json::OwnedValue {
-    owned_record(serde_json::json!({
+fn realistic_record() -> RecordData {
+    RecordData::from_value(serde_json::json!({
         "$type": "app.bsky.feed.post",
         "createdAt": "2026-02-13T02:20:02.89585500Z",
         "text": "Hello world #testing with a mention and a link",
@@ -70,7 +70,49 @@ fn realistic_message() -> JetstreamMessage {
 
 /// The raw JSON wire form of the message, as received from the Jetstream socket.
 fn realistic_message_json() -> String {
-    serde_json::to_string(&realistic_message()).unwrap()
+    serde_json::json!({
+        "did": "did:plc:author123",
+        "time_us": 1779884003790196_u64,
+        "seq": 100000,
+        "kind": "commit",
+        "commit": {
+            "rev": "3mepgzgimkv23",
+            "operation": "create",
+            "collection": "app.bsky.feed.post",
+            "rkey": "3mepgzgiatv23",
+            "record": {
+                "$type": "app.bsky.feed.post",
+                "createdAt": "2026-02-13T02:20:02.89585500Z",
+                "text": "Hello world #testing with a mention and a link",
+                "langs": ["en"],
+                "reply": {
+                    "parent": { "cid": "bafyreiparent", "uri": "at://did:plc:parent123/app.bsky.feed.post/parent456" },
+                    "root": { "cid": "bafyreiroot", "uri": "at://did:plc:root789/app.bsky.feed.post/root000" }
+                },
+                "embed": {
+                    "$type": "app.bsky.embed.record",
+                    "record": { "uri": "at://did:plc:embed000/app.bsky.feed.post/embed111" }
+                },
+                "facets": [
+                    {
+                        "index": { "byteStart": 0, "byteEnd": 11 },
+                        "features": [
+                            { "$type": "app.bsky.richtext.facet#tag", "tag": "Hello" },
+                            { "$type": "app.bsky.richtext.facet#link", "uri": "https://example.com" }
+                        ]
+                    },
+                    {
+                        "index": { "byteStart": 12, "byteEnd": 20 },
+                        "features": [
+                            { "$type": "app.bsky.richtext.facet#mention", "did": "did:plc:mentioned" }
+                        ]
+                    }
+                ]
+            },
+            "cid": "bafyreiassbuahzdwy64xwlefqcwh6zk4stb4lhht24oozhxn3fhzomrxg4"
+        }
+    })
+    .to_string()
 }
 
 /// A realistic hydrated-metadata payload for serialization benchmarks.
@@ -139,15 +181,20 @@ fn bench_record_view_extract_refs(c: &mut Criterion) {
 }
 
 fn bench_simd_json_serialize_record(c: &mut Criterion) {
-    let message = realistic_message();
+    // Mirrors the storage path: the message JSON is the captured wire bytes
+    // (write_json), then the metadata is serialized alongside.
+    let client = JetstreamClient::new(vec![], String::new());
+    let message = client
+        .parse_message(&realistic_message_json())
+        .unwrap();
     let metadata = realistic_metadata();
 
     c.bench_function("simd_json_serialize_record", |b| {
         b.iter(|| {
-            // Mirrors the storage path: message and metadata serialized separately.
-            let message_json = simd_json::to_string(black_box(&message)).unwrap();
+            let mut buf = Vec::with_capacity(1024);
+            black_box(message.write_json(&mut buf));
             let metadata_json = simd_json::to_string(black_box(&metadata)).unwrap();
-            black_box((message_json, metadata_json));
+            black_box((buf, metadata_json));
         });
     });
 }

@@ -32,7 +32,11 @@ fn main() {
         .map(|_| {
             messages
                 .iter()
-                .map(|m| serde_json::to_string(m).expect("serialize message"))
+                .map(|m| {
+                    let mut buf = Vec::with_capacity(1024);
+                    m.write_json(&mut buf);
+                    String::from_utf8(buf).expect("message JSON is UTF-8")
+                })
                 .collect()
         })
         .collect();
