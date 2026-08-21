@@ -13,8 +13,10 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Number of timed batches to run; the median `msgs/sec` is reported.
-const TIMED_RUNS: usize = 5;
+/// Number of timed batches to run; the median `msgs/sec` is reported. An odd
+/// count keeps the median an actual sample; more samples make the estimate
+/// robust to load-driven single-batch swings without changing the workload.
+const TIMED_RUNS: usize = 9;
 
 fn main() {
     let batch_size: usize = std::env::var("THROUGHPUT_BATCH_SIZE")
