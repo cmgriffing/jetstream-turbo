@@ -1,5 +1,13 @@
 # Ideas Backlog — jetstream-turbo CPU throughput
 
+## STATUS: EXHAUSTED (31 experiments, +112-124%, all paths closed)
+
+No open optimization ideas remain within the project constraints. This file is
+retained as a durable record of what was tried and why — do NOT treat any entry
+below as an open task. The two paths that could yield ~5-10% each require a
+constraint lift (a dependency change or a storage-format change) and are marked
+as such.
+
 ## DONE (production wins implemented — see prompt.md "What's Been Tried")
 
 - Shared simd-json Buffers, single-pass hydrate, ahash maps, MessageContext
