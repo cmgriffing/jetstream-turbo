@@ -96,10 +96,7 @@ impl RecordData {
                             .map(|arr| {
                                 arr.iter()
                                     .filter_map(|feature| {
-                                        match feature
-                                            .get("$type")
-                                            .and_then(|v| v.as_str())
-                                        {
+                                        match feature.get("$type").and_then(|v| v.as_str()) {
                                             Some("app.bsky.richtext.facet#tag") => feature
                                                 .get("tag")
                                                 .and_then(|v| v.as_str())
@@ -598,9 +595,7 @@ impl<'de> Visitor<'de> for FacetVisitor {
 
 impl<'de> Deserialize<'de> for FacetView {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer
-            .deserialize_any(FacetVisitor)
-            .map(FacetView)
+        deserializer.deserialize_any(FacetVisitor).map(FacetView)
     }
 }
 
@@ -642,7 +637,10 @@ impl<'de> Visitor<'de> for IndexVisitor {
         A: SeqAccess<'de>,
     {
         drain_seq(seq)?;
-        Ok(IndexView { start: None, end: None })
+        Ok(IndexView {
+            start: None,
+            end: None,
+        })
     }
 }
 

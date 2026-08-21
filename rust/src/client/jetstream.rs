@@ -611,7 +611,7 @@ mod tests {
             seq: source_seq,
             kind: crate::models::jetstream::MessageKind::Account,
             commit: None,
-        raw_json: None,
+            raw_json: None,
         };
         IngestionCheckpoint {
             ingress_ordinal: 42,

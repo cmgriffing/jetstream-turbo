@@ -1141,7 +1141,7 @@ mod tests {
                 )),
                 cid: Some("bafyrei".to_string()),
             }),
-        raw_json: None,
+            raw_json: None,
         })
     }
 

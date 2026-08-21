@@ -250,7 +250,7 @@ mod tests {
                 record: Some(owned_record(json!({"text": "Hello world"}))),
                 cid: Some("bafyrei".to_string()),
             }),
-        raw_json: None,
+            raw_json: None,
         };
 
         let enriched = EnrichedRecord::new(message);
@@ -273,7 +273,7 @@ mod tests {
                 record: Some(owned_record(json!({"text": "Hello"}))),
                 cid: Some("bafyrei".to_string()),
             }),
-        raw_json: None,
+            raw_json: None,
         });
 
         enriched.metrics.cache_hits = 8;
@@ -298,7 +298,7 @@ mod tests {
                 record: Some(owned_record(json!({"text": "Hello world"}))),
                 cid: Some("bafyrei".to_string()),
             }),
-        raw_json: None,
+            raw_json: None,
         };
 
         let enriched = EnrichedRecord::new(message);

@@ -227,7 +227,7 @@ mod tests {
                 )),
                 cid: Some("cid1".to_string()),
             }),
-        raw_json: None,
+            raw_json: None,
         }];
 
         // 3. Process messages and simulate hydration

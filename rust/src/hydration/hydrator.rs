@@ -110,7 +110,6 @@ fn slot_for(
     }
 }
 
-
 pub struct Hydrator<P, Po> {
     resolver: CacheMissResolver<P, Po>,
 }
@@ -213,9 +212,8 @@ where
         // instant, so this record's duration is measured from the previous
         // record's completion (or the batch start for the first).
         let hydration_end = Instant::now();
-        enriched.metrics.hydration_time_ms = hydration_end
-            .duration_since(hydration_start)
-            .as_millis() as u64;
+        enriched.metrics.hydration_time_ms =
+            hydration_end.duration_since(hydration_start).as_millis() as u64;
         Ok((enriched, hydration_end))
     }
 

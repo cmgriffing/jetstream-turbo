@@ -484,9 +484,7 @@ impl TurboCache {
             .post_cache
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        uris.iter()
-            .map(|uri| map.contains_key(uri))
-            .collect()
+        uris.iter().map(|uri| map.contains_key(uri)).collect()
     }
 
     pub fn get_metrics(&self) -> CacheMetricsSnapshot {
@@ -780,7 +778,10 @@ mod tests {
         profile("did:plc:b");
         profile("did:plc:c");
 
-        assert!(cache.get_user_profile("did:plc:a").is_none(), "oldest evicted");
+        assert!(
+            cache.get_user_profile("did:plc:a").is_none(),
+            "oldest evicted"
+        );
         assert!(cache.get_user_profile("did:plc:b").is_some());
         assert!(cache.get_user_profile("did:plc:c").is_some());
         assert_eq!(cache.get_metrics().cache_evictions, 1);

@@ -59,7 +59,12 @@ fn main() {
 
     // Warm up once to populate allocators and caches.
     let mut raw_jsons = raw_jsons.into_iter();
-    let _ = black_box(run_batch(&rt, &client, &hydrator, raw_jsons.next().unwrap()));
+    let _ = black_box(run_batch(
+        &rt,
+        &client,
+        &hydrator,
+        raw_jsons.next().unwrap(),
+    ));
 
     // Timed runs; report the median to absorb noise. Each run consumes its own
     // pristine copy (no input copy inside the timed region).
@@ -100,7 +105,9 @@ fn run_batch(
     // Parse (shared simd-json buffers across the batch; consumes the owned
     // buffers like production's socket path).
     let parse_start = Instant::now();
-    let parsed = client.parse_message_batch(raw_jsons).expect("parse messages");
+    let parsed = client
+        .parse_message_batch(raw_jsons)
+        .expect("parse messages");
     let parse_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
 
     // Hydrate (cache-hit).

@@ -64,7 +64,7 @@ fn realistic_message() -> JetstreamMessage {
             record: Some(realistic_record()),
             cid: Some("bafyreiassbuahzdwy64xwlefqcwh6zk4stb4lhht24oozhxn3fhzomrxg4".to_string()),
         }),
-    raw_json: None,
+        raw_json: None,
     }
 }
 
@@ -184,9 +184,7 @@ fn bench_simd_json_serialize_record(c: &mut Criterion) {
     // Mirrors the storage path: the message JSON is the captured wire bytes
     // (write_json), then the metadata is serialized alongside.
     let client = JetstreamClient::new(vec![], String::new());
-    let message = client
-        .parse_message(&realistic_message_json())
-        .unwrap();
+    let message = client.parse_message(&realistic_message_json()).unwrap();
     let metadata = realistic_metadata();
 
     c.bench_function("simd_json_serialize_record", |b| {
