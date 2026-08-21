@@ -30,11 +30,16 @@
 
 ## Dead ends (measured, do NOT retry)
 
-- **Hand-rolled metadata/profile JSON writer** (bypassing serde dispatch): measured
-  SLOWER than `simd_json::to_writer` (2.70ms vs 2.09ms per 10k) — the cost is
-  the string escape scan (NEON-accelerated in value-trait on arm64) plus
-  unavoidable per-field writes, NOT serde dispatch. Byte-equality prototype
-  verified; discarded for speed.
+## Dead ends (measured, do NOT retry)
+
+- **Hand-rolled metadata/profile JSON writer** (bypassing serde dispatch): with a
+  proper aarch64 NEON escape scan (same movemask as value-trait), the manual
+  writer is only ~2% faster than `simd_json::to_writer` (2.019ms vs 2.062ms per
+  10k) — NOT worth the unsafe SIMD + format-drift risk. Breakdown measured:
+  empty-string profiles 146ns/msg (12 fields + 13 keys + nulls = pure field
+  structure, which ANY writer must emit) vs full profiles 192ns/msg — so the
+  serde dispatch is NOT the cost; the field writes and the NEON scan are both
+  already near-optimal. Metadata encode confirmed structural (~1.55GB/s).
 - **Per-message tape Vec reuse in parse**: `to_tape_with_buffers`/`from_str_*
   with_buffers` always allocate a fresh `Vec<Node>`; `Tape::reset` can't feed a
   subsequent parse and lifetimes block Deserializer reuse. The ~50k tape-realloc
