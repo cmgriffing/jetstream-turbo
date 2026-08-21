@@ -130,9 +130,8 @@ where
         profiles_by_did: &HashMap<Arc<str>, Arc<BlueskyProfile>, AHashState>,
         post_outcomes: &HashMap<String, PostFetchOutcome, AHashState>,
         processed_at: chrono::DateTime<chrono::Utc>,
-    ) -> TurboResult<EnrichedRecord> {
-        let start_time = Instant::now();
-
+        hydration_start: Instant,
+    ) -> TurboResult<(EnrichedRecord, Instant)> {
         let mut enriched = EnrichedRecord::new_with_timestamp(message, processed_at);
         enriched.hydrated_metadata.hydration_quality = HydrationQuality::Complete;
 
@@ -186,8 +185,14 @@ where
             metrics::counter!("optional_hydration_partial_records_total").increment(1);
         }
 
-        enriched.metrics.hydration_time_ms = start_time.elapsed().as_millis() as u64;
-        Ok(enriched)
+        // One monotonic read per message: sequential records share the boundary
+        // instant, so this record's duration is measured from the previous
+        // record's completion (or the batch start for the first).
+        let hydration_end = Instant::now();
+        enriched.metrics.hydration_time_ms = hydration_end
+            .duration_since(hydration_start)
+            .as_millis() as u64;
+        Ok((enriched, hydration_end))
     }
 
     pub async fn hydrate_batch(
@@ -295,8 +300,9 @@ where
     ) -> TurboResult<Vec<EnrichedRecord>> {
         let mut results = Vec::with_capacity(contexts.len());
         let processed_at = chrono::Utc::now();
+        let mut hydration_start = Instant::now();
         for ctx in contexts {
-            let enriched = self.hydrate_one(
+            let (enriched, hydration_end) = self.hydrate_one(
                 ctx.message,
                 ctx.is_post,
                 ctx.mentioned_dids,
@@ -304,7 +310,9 @@ where
                 profiles_by_did,
                 post_outcomes,
                 processed_at,
+                hydration_start,
             )?;
+            hydration_start = hydration_end;
             results.push(enriched);
         }
         Ok(results)
