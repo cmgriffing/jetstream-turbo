@@ -49,6 +49,7 @@ pub struct HealthDiagnostics {
     pub not_redis_state: NotRedisStateDiagnostics,
     pub pipeline_progress: PipelineProgressSnapshot,
     pub failure_containment: FailureContainmentSnapshot,
+    pub bluesky_fetch: crate::client::BlueskyFetchDiagnostics,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -187,6 +188,7 @@ impl DiagnosticsCollector {
         not_redis_state: NotRedisStateDiagnostics,
         pipeline_progress: PipelineProgressSnapshot,
         failure_containment: FailureContainmentSnapshot,
+        bluesky_fetch: crate::client::BlueskyFetchDiagnostics,
     ) -> HealthDiagnostics {
         HealthDiagnostics {
             process_memory,
@@ -195,6 +197,7 @@ impl DiagnosticsCollector {
             not_redis_state,
             pipeline_progress,
             failure_containment,
+            bluesky_fetch,
         }
     }
 }

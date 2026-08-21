@@ -11,12 +11,12 @@ use crate::models::{
 use crate::utils::serde_utils::string_utils::is_valid_at_uri;
 use governor::{Quota, RateLimiter};
 use reqwest::{Client, StatusCode};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, instrument, warn};
 
 pub trait ProfileFetcher {
@@ -78,10 +78,73 @@ struct BatchCollectorDeps {
     expires_at: Arc<RwLock<Option<String>>>,
 }
 
-struct ProfileBatchCollector {
-    config: BatchConfig,
+/// Monotonic fetch-path counters for one collector kind. Rates (requests/sec,
+/// items per request, average latencies) are derived by differencing over time.
+#[derive(Debug, Default)]
+pub struct FetchDiagnostics {
+    /// Identifiers submitted across all requests (items per request = Δitems / Δrequests).
+    pub items_total: AtomicU64,
+    /// Total wall time spent waiting for the collector lock plus holding it
+    /// during fetch resolution, in nanoseconds. One sample per `add_and_fetch`.
+    pub lock_duration_ns_total: AtomicU64,
+    /// Number of lock-hold samples (one per `add_and_fetch` call).
+    pub lock_duration_count: AtomicU64,
+    /// Total wall time spent in the HTTP fetch chain (incl. retries and
+    /// isolation bisection), in nanoseconds. One sample per `fetch_batch_with_retry`.
+    pub http_duration_ns_total: AtomicU64,
+    /// Number of HTTP chain samples.
+    pub http_duration_count: AtomicU64,
+}
+
+/// A point-in-time snapshot of the fetch counters for one collector kind.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct BlueskyFetchKindDiagnostics {
+    pub requests_total: u64,
+    pub items_total: u64,
+    pub lock_duration_ns_total: u64,
+    pub lock_duration_count: u64,
+    pub http_duration_ns_total: u64,
+    pub http_duration_count: u64,
+}
+
+/// Fetch-path diagnostics for both collector kinds, surfaced on /health and /metrics.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct BlueskyFetchDiagnostics {
+    pub profiles: BlueskyFetchKindDiagnostics,
+    pub posts: BlueskyFetchKindDiagnostics,
+}
+
+/// Shared collector state guarded by a short lock. The lock is held only for
+/// queue/claim and cache sections; network I/O happens outside it so
+/// concurrent pipeline calls fetch in parallel instead of serializing behind
+/// a single global write lock.
+struct ProfileCollectorState {
     pending: Vec<String>,
     last_flush: Instant,
+    isolation_cache: HashMap<String, Option<BlueskyProfile>>,
+}
+
+impl ProfileCollectorState {
+    /// Claim one request worth of identifiers: a full batch if one is
+    /// available, otherwise a partial flush once the wait window has elapsed
+    /// since the previous claim.
+    fn claim_next(&mut self, batch_size: usize, wait_ms: u64) -> Vec<String> {
+        if self.pending.len() >= batch_size {
+            self.last_flush = Instant::now();
+            return self.pending.drain(..batch_size).collect();
+        }
+        if !self.pending.is_empty() && self.last_flush.elapsed() >= Duration::from_millis(wait_ms) {
+            self.last_flush = Instant::now();
+            return std::mem::take(&mut self.pending);
+        }
+        Vec::new()
+    }
+}
+
+struct ProfileBatchCollector {
+    config: BatchConfig,
     http_client: Client,
     session_strings: Arc<RwLock<Vec<String>>>,
     rate_limiter: Arc<
@@ -98,15 +161,35 @@ struct ProfileBatchCollector {
     auth_client: Option<Arc<BlueskyAuthClient>>,
     refresh_jwt: Arc<RwLock<Option<String>>>,
     expires_at: Arc<RwLock<Option<String>>>,
+    state: Mutex<ProfileCollectorState>,
     batches_total: AtomicU64,
     batches_partial: AtomicU64,
-    isolation_cache: HashMap<String, Option<BlueskyProfile>>,
+    fetch: FetchDiagnostics,
+}
+
+/// Shared post collector state guarded by a short lock; see ProfileCollectorState.
+struct PostCollectorState {
+    pending: Vec<String>,
+    last_flush: Instant,
+    isolation_cache: HashMap<String, Option<BlueskyPost>>,
+}
+
+impl PostCollectorState {
+    fn claim_next(&mut self, batch_size: usize, wait_ms: u64) -> Vec<String> {
+        if self.pending.len() >= batch_size {
+            self.last_flush = Instant::now();
+            return self.pending.drain(..batch_size).collect();
+        }
+        if !self.pending.is_empty() && self.last_flush.elapsed() >= Duration::from_millis(wait_ms) {
+            self.last_flush = Instant::now();
+            return std::mem::take(&mut self.pending);
+        }
+        Vec::new()
+    }
 }
 
 struct PostBatchCollector {
     config: BatchConfig,
-    pending: Vec<String>,
-    last_flush: Instant,
     http_client: Client,
     session_strings: Arc<RwLock<Vec<String>>>,
     rate_limiter: Arc<
@@ -122,9 +205,10 @@ struct PostBatchCollector {
     auth_client: Option<Arc<BlueskyAuthClient>>,
     refresh_jwt: Arc<RwLock<Option<String>>>,
     expires_at: Arc<RwLock<Option<String>>>,
+    state: Mutex<PostCollectorState>,
     batches_total: AtomicU64,
     batches_partial: AtomicU64,
-    isolation_cache: HashMap<String, Option<BlueskyPost>>,
+    fetch: FetchDiagnostics,
 }
 
 fn retry_entropy(fingerprint: &str, attempt: u32) -> u64 {
@@ -357,6 +441,14 @@ impl BlueskyClient {
         })
     }
 
+    /// Point-in-time snapshot of the profile and post fetch counters.
+    pub async fn fetch_diagnostics(&self) -> BlueskyFetchDiagnostics {
+        BlueskyFetchDiagnostics {
+            profiles: self.profile_batch_collector.read().await.fetch_snapshot(),
+            posts: self.post_batch_collector.read().await.fetch_snapshot(),
+        }
+    }
+
     pub fn set_failure_recurrence(&self, recurrence: u32) {
         self.isolation_recurrence
             .store(recurrence, Ordering::Release);
@@ -470,11 +562,21 @@ impl ProfileFetcher for BlueskyClient {
             return Ok(vec![]);
         }
 
-        let mut collector = self.profile_batch_collector.write().await;
-        let profiles = collector.add_and_fetch(dids.to_vec()).await?;
+        let fetch_started = Instant::now();
+        let collector = self.profile_batch_collector.read().await;
+        let profiles = collector.add_and_fetch(dids.to_vec()).await;
         collector.log_partial_percentage();
+        let lock_elapsed_ns = fetch_started.elapsed().as_nanos() as u64;
+        collector
+            .fetch
+            .lock_duration_ns_total
+            .fetch_add(lock_elapsed_ns, Ordering::Relaxed);
+        collector
+            .fetch
+            .lock_duration_count
+            .fetch_add(1, Ordering::Relaxed);
 
-        Ok(profiles)
+        profiles
     }
 }
 
@@ -514,9 +616,19 @@ impl PostFetcher for BlueskyClient {
             return Ok(vec![]);
         }
 
-        let mut collector = self.post_batch_collector.write().await;
+        let fetch_started = Instant::now();
+        let collector = self.post_batch_collector.read().await;
         let fetch_result = collector.add_and_fetch(valid_uris.clone()).await;
         collector.log_partial_percentage();
+        let lock_elapsed_ns = fetch_started.elapsed().as_nanos() as u64;
+        collector
+            .fetch
+            .lock_duration_ns_total
+            .fetch_add(lock_elapsed_ns, Ordering::Relaxed);
+        collector
+            .fetch
+            .lock_duration_count
+            .fetch_add(1, Ordering::Relaxed);
 
         match fetch_result {
             Ok(posts) => Ok(posts
@@ -530,22 +642,22 @@ impl PostFetcher for BlueskyClient {
                 let Some(failure) = optional_post_failure(&error, &valid_uris) else {
                     return Err(error);
                 };
-                let outcomes = valid_uris
-                    .iter()
-                    .map(|uri| {
-                        collector
-                            .isolation_cache
-                            .get(uri)
-                            .cloned()
-                            .map(|post| {
-                                post.map(PostFetchOutcome::Found)
-                                    .unwrap_or(PostFetchOutcome::Missing)
-                            })
-                            .unwrap_or_else(|| {
-                                PostFetchOutcome::TemporarilyUnavailable(failure.clone())
-                            })
-                    })
-                    .collect();
+                let mut outcomes = Vec::with_capacity(valid_uris.len());
+                let state = collector.state.lock().await;
+                for uri in &valid_uris {
+                    let outcome = state
+                        .isolation_cache
+                        .get(uri)
+                        .cloned()
+                        .map(|post| {
+                            post.map(PostFetchOutcome::Found)
+                                .unwrap_or(PostFetchOutcome::Missing)
+                        })
+                        .unwrap_or_else(|| {
+                            PostFetchOutcome::TemporarilyUnavailable(failure.clone())
+                        });
+                    outcomes.push(outcome);
+                }
                 Ok(outcomes)
             }
         }
@@ -653,8 +765,6 @@ impl ProfileBatchCollector {
         } = deps;
         Self {
             config,
-            pending: Vec::new(),
-            last_flush: Instant::now(),
             http_client,
             session_strings,
             rate_limiter,
@@ -665,9 +775,14 @@ impl ProfileBatchCollector {
             auth_client,
             refresh_jwt,
             expires_at,
+            state: Mutex::new(ProfileCollectorState {
+                pending: Vec::new(),
+                last_flush: Instant::now(),
+                isolation_cache: HashMap::new(),
+            }),
             batches_total: AtomicU64::new(0),
             batches_partial: AtomicU64::new(0),
-            isolation_cache: HashMap::new(),
+            fetch: FetchDiagnostics::default(),
         }
     }
 
@@ -733,7 +848,26 @@ impl ProfileBatchCollector {
         }
     }
 
+    /// Times the full HTTP chain (incl. retries and isolation bisection) for
+    /// one request. The counter pair feeds an average-latency metric.
     async fn fetch_batch_with_retry(
+        &self,
+        dids: &[String],
+    ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
+        let start = Instant::now();
+        let result = self.fetch_batch_with_retry_inner(dids).await;
+        let elapsed_ns = start.elapsed().as_nanos() as u64;
+        self.fetch
+            .http_duration_ns_total
+            .fetch_add(elapsed_ns, Ordering::Relaxed);
+        self.fetch
+            .http_duration_count
+            .fetch_add(1, Ordering::Relaxed);
+        result
+    }
+
+    /// The actual HTTP fetch chain with retries (timed by the wrapper above).
+    async fn fetch_batch_with_retry_inner(
         &self,
         dids: &[String],
     ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
@@ -912,16 +1046,29 @@ impl ProfileBatchCollector {
         }
     }
 
-    async fn fetch_batch(&mut self, dids: &[String]) -> TurboResult<Vec<Option<BlueskyProfile>>> {
-        let unresolved = dids
-            .iter()
-            .filter(|did| !self.isolation_cache.contains_key(*did))
-            .cloned()
-            .collect::<Vec<_>>();
+    async fn fetch_batch(&self, dids: &[String]) -> TurboResult<Vec<Option<BlueskyProfile>>> {
+        self.fetch
+            .items_total
+            .fetch_add(dids.len() as u64, Ordering::Relaxed);
+        // Resolve cache hits under a short lock; the fetch runs unlocked so
+        // concurrent callers overlap their network I/O.
+        let (unresolved, hits): (Vec<String>, HashMap<String, Option<BlueskyProfile>>) = {
+            let state = self.state.lock().await;
+            let mut unresolved = Vec::new();
+            let mut hits = HashMap::new();
+            for did in dids {
+                if let Some(profile) = state.isolation_cache.get(did) {
+                    hits.insert(did.clone(), profile.clone());
+                } else {
+                    unresolved.push(did.clone());
+                }
+            }
+            (unresolved, hits)
+        };
         if unresolved.is_empty() {
             return Ok(dids
                 .iter()
-                .map(|did| self.isolation_cache.get(did).cloned().unwrap_or(None))
+                .map(|did| hits.get(did).cloned().unwrap_or(None))
                 .collect());
         }
 
@@ -934,8 +1081,7 @@ impl ProfileBatchCollector {
                 Ok(dids
                     .iter()
                     .map(|did| {
-                        self.isolation_cache
-                            .get(did)
+                        hits.get(did)
                             .cloned()
                             .unwrap_or_else(|| by_identifier.get(did).cloned().unwrap_or(None))
                     })
@@ -954,7 +1100,7 @@ impl ProfileBatchCollector {
     }
 
     async fn isolate_profiles(
-        &mut self,
+        &self,
         mut identifiers: Vec<String>,
         root_error: TurboError,
     ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
@@ -987,7 +1133,8 @@ impl ProfileBatchCollector {
             remaining_budget -= 1;
             match self.fetch_batch_with_retry(&half).await {
                 Ok(results) => {
-                    self.isolation_cache.extend(half.into_iter().zip(results));
+                    let mut state = self.state.lock().await;
+                    state.isolation_cache.extend(half.into_iter().zip(results));
                 }
                 Err(error) => {
                     first_categories.push(transient_upstream_category(&error));
@@ -1028,7 +1175,12 @@ impl ProfileBatchCollector {
                 }
                 remaining_budget -= 1;
                 match self.fetch_batch_with_retry(&subset).await {
-                    Ok(results) => self.isolation_cache.extend(subset.into_iter().zip(results)),
+                    Ok(results) => {
+                        let mut state = self.state.lock().await;
+                        state
+                            .isolation_cache
+                            .extend(subset.into_iter().zip(results));
+                    }
                     Err(error) => {
                         last_error = error;
                         failures.push_back(subset);
@@ -1037,71 +1189,56 @@ impl ProfileBatchCollector {
             }
         }
 
+        let state = self.state.lock().await;
         Ok(requested
             .iter()
-            .map(|did| self.isolation_cache.get(did).cloned().unwrap_or(None))
+            .map(|did| state.isolation_cache.get(did).cloned().unwrap_or(None))
             .collect())
     }
 
     pub async fn add_and_fetch(
-        &mut self,
+        &self,
         dids: Vec<String>,
     ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
-        let mut results = Vec::new();
-        let mut remaining: Vec<String> = dids.into_iter().collect();
+        // Enqueue our identifiers once; any concurrent caller may claim and
+        // resolve them, so delivery happens through the shared cache. Skip ids
+        // already queued or resolved: a failed claim's ids are requeued and a
+        // retry re-submits the same set.
+        {
+            let mut state = self.state.lock().await;
+            for did in &dids {
+                if !state.pending.contains(did) && !state.isolation_cache.contains_key(did) {
+                    state.pending.push(did.clone());
+                }
+            }
+        }
+        let mut remaining: HashSet<String> = dids.iter().cloned().collect();
 
         while !remaining.is_empty() {
-            self.pending.append(&mut remaining);
+            let claim: Vec<String> = {
+                let mut state = self.state.lock().await;
+                state.claim_next(self.config.batch_size, self.config.wait_ms)
+            };
 
-            while self.pending.len() >= self.config.batch_size {
-                let batch: Vec<String> = self.pending.drain(..self.config.batch_size).collect();
-                self.batches_total.fetch_add(1, Ordering::Relaxed);
-                let batch_len = batch.len();
-                if batch_len < self.config.batch_size {
-                    self.batches_partial.fetch_add(1, Ordering::Relaxed);
+            if claim.is_empty() {
+                // Nothing fetchable yet: the queue is still filling or the
+                // partial-flush window has not elapsed. Another caller may
+                // have resolved some of our ids meanwhile; re-check the
+                // shared cache, then yield briefly.
+                {
+                    let state = self.state.lock().await;
+                    remaining.retain(|id| !state.isolation_cache.contains_key(id));
                 }
-                let pct = (batch_len as f64 / self.config.batch_size as f64) * 100.0;
-                info!(
-                    "Profile batch capacity: {}/{} ({:.0}%)",
-                    batch_len, self.config.batch_size, pct
-                );
-
-                let batch_results = self.fetch_batch(&batch).await?;
-                results.extend(batch_results);
-                self.last_flush = Instant::now();
-            }
-
-            if !self.pending.is_empty()
-                && self.last_flush.elapsed() >= Duration::from_millis(self.config.wait_ms)
-            {
-                let batch: Vec<String> = std::mem::take(&mut self.pending);
-                self.batches_total.fetch_add(1, Ordering::Relaxed);
-                let batch_len = batch.len();
-                if batch_len < self.config.batch_size {
-                    self.batches_partial.fetch_add(1, Ordering::Relaxed);
+                if remaining.is_empty() {
+                    break;
                 }
-                let pct = (batch_len as f64 / self.config.batch_size as f64) * 100.0;
-                info!(
-                    "Profile batch capacity: {}/{} ({:.0}%)",
-                    batch_len, self.config.batch_size, pct
-                );
-
-                let batch_results = self.fetch_batch(&batch).await?;
-                results.extend(batch_results);
-                self.last_flush = Instant::now();
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
             }
 
-            if self.pending.is_empty() {
-                break;
-            }
-
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-
-        if !self.pending.is_empty() {
-            let batch: Vec<String> = std::mem::take(&mut self.pending);
+            // Request accounting.
             self.batches_total.fetch_add(1, Ordering::Relaxed);
-            let batch_len = batch.len();
+            let batch_len = claim.len();
             if batch_len < self.config.batch_size {
                 self.batches_partial.fetch_add(1, Ordering::Relaxed);
             }
@@ -1111,12 +1248,42 @@ impl ProfileBatchCollector {
                 batch_len, self.config.batch_size, pct
             );
 
-            let batch_results = self.fetch_batch(&batch).await?;
-            results.extend(batch_results);
-            self.last_flush = Instant::now();
+            // Network I/O happens without holding the collector lock so
+            // concurrent pipeline calls overlap their fetches.
+            let batch_results = match self.fetch_batch(&claim).await {
+                Ok(results) => results,
+                Err(error) => {
+                    // Requeue the still-unresolved identifiers (dedup) so
+                    // another caller or a retry can resolve them, then fail
+                    // like the original flow did for this caller.
+                    let mut state = self.state.lock().await;
+                    for id in claim {
+                        if !state.isolation_cache.contains_key(&id) && !state.pending.contains(&id)
+                        {
+                            state.pending.push(id);
+                        }
+                    }
+                    return Err(error);
+                }
+            };
+
+            // Merge into the shared cache so every caller resolves the ids it
+            // submitted.
+            {
+                let mut state = self.state.lock().await;
+                for (id, profile) in claim.into_iter().zip(batch_results) {
+                    state.isolation_cache.insert(id.clone(), profile.clone());
+                    remaining.remove(&id);
+                }
+            }
         }
 
-        Ok(results)
+        // Deliver results in the caller's original order from the shared cache.
+        let state = self.state.lock().await;
+        Ok(dids
+            .into_iter()
+            .map(|did| state.isolation_cache.get(&did).cloned().unwrap_or(None))
+            .collect())
     }
 
     pub fn log_partial_percentage(&self) {
@@ -1128,6 +1295,18 @@ impl ProfileBatchCollector {
                 "Profile batch partial rate: {:.1}% ({}/{})",
                 pct, partial, total
             );
+        }
+    }
+
+    /// Point-in-time snapshot of this collector's fetch counters.
+    fn fetch_snapshot(&self) -> BlueskyFetchKindDiagnostics {
+        BlueskyFetchKindDiagnostics {
+            requests_total: self.batches_total.load(Ordering::Relaxed),
+            items_total: self.fetch.items_total.load(Ordering::Relaxed),
+            lock_duration_ns_total: self.fetch.lock_duration_ns_total.load(Ordering::Relaxed),
+            lock_duration_count: self.fetch.lock_duration_count.load(Ordering::Relaxed),
+            http_duration_ns_total: self.fetch.http_duration_ns_total.load(Ordering::Relaxed),
+            http_duration_count: self.fetch.http_duration_count.load(Ordering::Relaxed),
         }
     }
 }
@@ -1148,8 +1327,6 @@ impl PostBatchCollector {
         } = deps;
         Self {
             config,
-            pending: Vec::new(),
-            last_flush: Instant::now(),
             http_client,
             session_strings,
             rate_limiter,
@@ -1159,9 +1336,14 @@ impl PostBatchCollector {
             auth_client,
             refresh_jwt,
             expires_at,
+            state: Mutex::new(PostCollectorState {
+                pending: Vec::new(),
+                last_flush: Instant::now(),
+                isolation_cache: HashMap::new(),
+            }),
             batches_total: AtomicU64::new(0),
             batches_partial: AtomicU64::new(0),
-            isolation_cache: HashMap::new(),
+            fetch: FetchDiagnostics::default(),
         }
     }
 
@@ -1255,7 +1437,26 @@ impl PostBatchCollector {
         }
     }
 
+    /// Times the full HTTP chain (incl. retries and isolation bisection) for
+    /// one request. The counter pair feeds an average-latency metric.
     async fn fetch_batch_with_retry(
+        &self,
+        uris: &[String],
+    ) -> TurboResult<Vec<Option<BlueskyPost>>> {
+        let start = Instant::now();
+        let result = self.fetch_batch_with_retry_inner(uris).await;
+        let elapsed_ns = start.elapsed().as_nanos() as u64;
+        self.fetch
+            .http_duration_ns_total
+            .fetch_add(elapsed_ns, Ordering::Relaxed);
+        self.fetch
+            .http_duration_count
+            .fetch_add(1, Ordering::Relaxed);
+        result
+    }
+
+    /// The actual HTTP fetch chain with retries (timed by the wrapper above).
+    async fn fetch_batch_with_retry_inner(
         &self,
         uris: &[String],
     ) -> TurboResult<Vec<Option<BlueskyPost>>> {
@@ -1436,16 +1637,29 @@ impl PostBatchCollector {
         }
     }
 
-    async fn fetch_batch(&mut self, uris: &[String]) -> TurboResult<Vec<Option<BlueskyPost>>> {
-        let unresolved = uris
-            .iter()
-            .filter(|uri| !self.isolation_cache.contains_key(*uri))
-            .cloned()
-            .collect::<Vec<_>>();
+    async fn fetch_batch(&self, uris: &[String]) -> TurboResult<Vec<Option<BlueskyPost>>> {
+        self.fetch
+            .items_total
+            .fetch_add(uris.len() as u64, Ordering::Relaxed);
+        // Resolve cache hits under a short lock; the fetch runs unlocked so
+        // concurrent callers overlap their network I/O.
+        let (unresolved, hits): (Vec<String>, HashMap<String, Option<BlueskyPost>>) = {
+            let state = self.state.lock().await;
+            let mut unresolved = Vec::new();
+            let mut hits = HashMap::new();
+            for uri in uris {
+                if let Some(post) = state.isolation_cache.get(uri) {
+                    hits.insert(uri.clone(), post.clone());
+                } else {
+                    unresolved.push(uri.clone());
+                }
+            }
+            (unresolved, hits)
+        };
         if unresolved.is_empty() {
             return Ok(uris
                 .iter()
-                .map(|uri| self.isolation_cache.get(uri).cloned().unwrap_or(None))
+                .map(|uri| hits.get(uri).cloned().unwrap_or(None))
                 .collect());
         }
 
@@ -1458,8 +1672,7 @@ impl PostBatchCollector {
                 Ok(uris
                     .iter()
                     .map(|uri| {
-                        self.isolation_cache
-                            .get(uri)
+                        hits.get(uri)
                             .cloned()
                             .unwrap_or_else(|| by_identifier.get(uri).cloned().unwrap_or(None))
                     })
@@ -1473,7 +1686,7 @@ impl PostBatchCollector {
     }
 
     async fn isolate_posts(
-        &mut self,
+        &self,
         mut identifiers: Vec<String>,
         root_error: TurboError,
     ) -> TurboResult<Vec<Option<BlueskyPost>>> {
@@ -1505,7 +1718,10 @@ impl PostBatchCollector {
             }
             remaining_budget -= 1;
             match self.fetch_batch_with_retry(&half).await {
-                Ok(results) => self.isolation_cache.extend(half.into_iter().zip(results)),
+                Ok(results) => {
+                    let mut state = self.state.lock().await;
+                    state.isolation_cache.extend(half.into_iter().zip(results));
+                }
                 Err(error) => {
                     first_categories.push(transient_upstream_category(&error));
                     last_error = error;
@@ -1545,7 +1761,12 @@ impl PostBatchCollector {
                 }
                 remaining_budget -= 1;
                 match self.fetch_batch_with_retry(&subset).await {
-                    Ok(results) => self.isolation_cache.extend(subset.into_iter().zip(results)),
+                    Ok(results) => {
+                        let mut state = self.state.lock().await;
+                        state
+                            .isolation_cache
+                            .extend(subset.into_iter().zip(results));
+                    }
                     Err(error) => {
                         last_error = error;
                         failures.push_back(subset);
@@ -1554,71 +1775,53 @@ impl PostBatchCollector {
             }
         }
 
+        let state = self.state.lock().await;
         Ok(requested
             .iter()
-            .map(|uri| self.isolation_cache.get(uri).cloned().unwrap_or(None))
+            .map(|uri| state.isolation_cache.get(uri).cloned().unwrap_or(None))
             .collect())
     }
 
-    pub async fn add_and_fetch(
-        &mut self,
-        uris: Vec<String>,
-    ) -> TurboResult<Vec<Option<BlueskyPost>>> {
-        let mut results = Vec::new();
-        let mut remaining: Vec<String> = uris.into_iter().collect();
+    pub async fn add_and_fetch(&self, uris: Vec<String>) -> TurboResult<Vec<Option<BlueskyPost>>> {
+        // Enqueue our ids once; any concurrent caller may claim and
+        // resolve them, so delivery happens through the shared cache. Skip ids
+        // already queued or resolved: a failed claim's ids are requeued and a
+        // retry re-submits the same set.
+        {
+            let mut state = self.state.lock().await;
+            for uri in &uris {
+                if !state.pending.contains(uri) && !state.isolation_cache.contains_key(uri) {
+                    state.pending.push(uri.clone());
+                }
+            }
+        }
+        let mut remaining: HashSet<String> = uris.iter().cloned().collect();
 
         while !remaining.is_empty() {
-            self.pending.append(&mut remaining);
+            let claim: Vec<String> = {
+                let mut state = self.state.lock().await;
+                state.claim_next(self.config.batch_size, self.config.wait_ms)
+            };
 
-            while self.pending.len() >= self.config.batch_size {
-                let batch: Vec<String> = self.pending.drain(..self.config.batch_size).collect();
-                self.batches_total.fetch_add(1, Ordering::Relaxed);
-                let batch_len = batch.len();
-                if batch_len < self.config.batch_size {
-                    self.batches_partial.fetch_add(1, Ordering::Relaxed);
+            if claim.is_empty() {
+                // Nothing fetchable yet: the queue is still filling or the
+                // partial-flush window has not elapsed. Another caller may
+                // have resolved some of our ids meanwhile; re-check the
+                // shared cache, then yield briefly.
+                {
+                    let state = self.state.lock().await;
+                    remaining.retain(|uri| !state.isolation_cache.contains_key(uri));
                 }
-                let pct = (batch_len as f64 / self.config.batch_size as f64) * 100.0;
-                info!(
-                    "Post batch capacity: {}/{} ({:.0}%)",
-                    batch_len, self.config.batch_size, pct
-                );
-
-                let batch_results = self.fetch_batch(&batch).await?;
-                results.extend(batch_results);
-                self.last_flush = Instant::now();
-            }
-
-            if !self.pending.is_empty()
-                && self.last_flush.elapsed() >= Duration::from_millis(self.config.wait_ms)
-            {
-                let batch: Vec<String> = std::mem::take(&mut self.pending);
-                self.batches_total.fetch_add(1, Ordering::Relaxed);
-                let batch_len = batch.len();
-                if batch_len < self.config.batch_size {
-                    self.batches_partial.fetch_add(1, Ordering::Relaxed);
+                if remaining.is_empty() {
+                    break;
                 }
-                let pct = (batch_len as f64 / self.config.batch_size as f64) * 100.0;
-                info!(
-                    "Post batch capacity: {}/{} ({:.0}%)",
-                    batch_len, self.config.batch_size, pct
-                );
-
-                let batch_results = self.fetch_batch(&batch).await?;
-                results.extend(batch_results);
-                self.last_flush = Instant::now();
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
             }
 
-            if self.pending.is_empty() {
-                break;
-            }
-
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-
-        if !self.pending.is_empty() {
-            let batch: Vec<String> = std::mem::take(&mut self.pending);
+            // Request accounting.
             self.batches_total.fetch_add(1, Ordering::Relaxed);
-            let batch_len = batch.len();
+            let batch_len = claim.len();
             if batch_len < self.config.batch_size {
                 self.batches_partial.fetch_add(1, Ordering::Relaxed);
             }
@@ -1628,12 +1831,43 @@ impl PostBatchCollector {
                 batch_len, self.config.batch_size, pct
             );
 
-            let batch_results = self.fetch_batch(&batch).await?;
-            results.extend(batch_results);
-            self.last_flush = Instant::now();
+            // Network I/O happens without holding the collector lock so
+            // concurrent pipeline calls overlap their fetches.
+            let batch_results = match self.fetch_batch(&claim).await {
+                Ok(results) => results,
+                Err(error) => {
+                    // Requeue the still-unresolved identifiers (dedup) so
+                    // another caller or a retry can resolve them, then fail
+                    // like the original flow did for this caller.
+                    let mut state = self.state.lock().await;
+                    for uri in claim {
+                        if !state.isolation_cache.contains_key(&uri)
+                            && !state.pending.contains(&uri)
+                        {
+                            state.pending.push(uri);
+                        }
+                    }
+                    return Err(error);
+                }
+            };
+
+            // Merge into the shared cache so every caller resolves the ids it
+            // submitted.
+            {
+                let mut state = self.state.lock().await;
+                for (uri, post) in claim.into_iter().zip(batch_results) {
+                    state.isolation_cache.insert(uri.clone(), post.clone());
+                    remaining.remove(&uri);
+                }
+            }
         }
 
-        Ok(results)
+        // Deliver results in the caller's original order from the shared cache.
+        let state = self.state.lock().await;
+        Ok(uris
+            .into_iter()
+            .map(|uri| state.isolation_cache.get(&uri).cloned().unwrap_or(None))
+            .collect())
     }
 
     pub fn log_partial_percentage(&self) {
@@ -1645,6 +1879,18 @@ impl PostBatchCollector {
                 "Post batch partial rate: {:.1}% ({}/{})",
                 pct, partial, total
             );
+        }
+    }
+
+    /// Point-in-time snapshot of this collector's fetch counters.
+    fn fetch_snapshot(&self) -> BlueskyFetchKindDiagnostics {
+        BlueskyFetchKindDiagnostics {
+            requests_total: self.batches_total.load(Ordering::Relaxed),
+            items_total: self.fetch.items_total.load(Ordering::Relaxed),
+            lock_duration_ns_total: self.fetch.lock_duration_ns_total.load(Ordering::Relaxed),
+            lock_duration_count: self.fetch.lock_duration_count.load(Ordering::Relaxed),
+            http_duration_ns_total: self.fetch.http_duration_ns_total.load(Ordering::Relaxed),
+            http_duration_count: self.fetch.http_duration_count.load(Ordering::Relaxed),
         }
     }
 }
@@ -2165,5 +2411,37 @@ mod tests {
 
         let sessions = client.session_strings.read().await;
         assert_eq!(sessions.as_slice(), ["new_access_token"]);
+    }
+
+    #[tokio::test]
+    async fn concurrent_batch_fetches_overlap_instead_of_serializing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.actor.getProfiles"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"profiles": []}))
+                    .set_delay(Duration::from_millis(250)),
+            )
+            .mount(&server)
+            .await;
+        let client = client_for_server(&server, 0, ContainmentPolicy::default()).await;
+
+        // Four requests worth of work across two independent calls. If fetches
+        // serialized behind one lock this would take ~1000ms; the unlocked
+        // fetch path overlaps them to ~500-750ms.
+        let first: Vec<String> = (0..50).map(|i| format!("did:plc:a{i:02}")).collect();
+        let second: Vec<String> = (0..50).map(|i| format!("did:plc:b{i:02}")).collect();
+        let start = Instant::now();
+        let (r1, r2) = tokio::join!(
+            client.bulk_fetch_profiles(&first),
+            client.bulk_fetch_profiles(&second),
+        );
+        let elapsed = start.elapsed();
+        assert!(r1.is_ok() && r2.is_ok());
+        assert!(
+            elapsed < Duration::from_millis(1200),
+            "concurrent fetches took {elapsed:?}; expected overlap"
+        );
     }
 }
