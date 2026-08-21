@@ -22,9 +22,6 @@ struct MessageContext {
     profile_slot: usize,
     /// Indices into the resolved-profiles vec for mentioned DIDs.
     mentioned_slots: Vec<usize>,
-    /// Mentioned DIDs extracted from the record; consumed into `mentioned_slots`
-    /// during dedup.
-    mentioned_dids: Vec<String>,
     post_uris: Vec<String>,
 }
 
@@ -233,6 +230,15 @@ where
 
         let mut contexts = Vec::with_capacity(message_count);
 
+        // Build contexts and dedup in a single pass, assigning each unique did
+        // a slot into the resolved-profiles list so hydrate_one can index it
+        // directly (no per-message hash lookup).
+        let mut did_slots: HashMap<Arc<str>, usize, AHashState> =
+            HashMap::with_capacity_and_hasher(contexts.len().max(1), AHashState::default());
+        let mut dids: Vec<Arc<str>> = Vec::with_capacity(message_count);
+        let mut unique_uris: HashSet<String, AHashState> =
+            HashSet::with_hasher(AHashState::default());
+
         for message in messages {
             let is_post = message
                 .commit
@@ -247,33 +253,22 @@ where
                 .map(|r| extract_refs_from_view(&RecordView::new(r)))
                 .unwrap_or_default();
 
-            contexts.push(MessageContext {
-                message,
-                is_post,
-                profile_slot: 0,
-                mentioned_slots: Vec::new(),
-                mentioned_dids,
-                post_uris,
-            });
-        }
-
-        // Dedup over the stored contexts, assigning each unique did a slot
-        // into the resolved-profiles list so hydrate_one can index it directly
-        // (no per-message hash lookup).
-        let mut did_slots: HashMap<Arc<str>, usize, AHashState> =
-            HashMap::with_capacity_and_hasher(contexts.len(), AHashState::default());
-        let mut dids: Vec<Arc<str>> = Vec::with_capacity(contexts.len());
-        let mut unique_uris: HashSet<String, AHashState> =
-            HashSet::with_hasher(AHashState::default());
-        for ctx in &mut contexts {
-            ctx.profile_slot = slot_for(&mut did_slots, &mut dids, Arc::clone(&ctx.message.did));
-            ctx.mentioned_slots = std::mem::take(&mut ctx.mentioned_dids)
+            let profile_slot = slot_for(&mut did_slots, &mut dids, Arc::clone(&message.did));
+            let mentioned_slots = mentioned_dids
                 .into_iter()
                 .map(|did| slot_for(&mut did_slots, &mut dids, Arc::from(did)))
                 .collect();
-            for uri in &ctx.post_uris {
+            for uri in &post_uris {
                 unique_uris.insert(uri.clone());
             }
+
+            contexts.push(MessageContext {
+                message,
+                is_post,
+                profile_slot,
+                mentioned_slots,
+                post_uris,
+            });
         }
 
         let unique_dids_count = dids.len();
