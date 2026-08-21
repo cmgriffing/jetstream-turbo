@@ -117,6 +117,15 @@ pub struct SQLiteStateDiagnostics {
     pub journal_mode: Option<String>,
     pub journal_size_limit_bytes: Option<i64>,
     pub partial_records: Option<i64>,
+    pub vacuum_pending: Option<bool>,
+    pub vacuum_pending_reason: Option<crate::storage::VacuumPendingReason>,
+    pub vacuum_pending_since: Option<chrono::DateTime<chrono::Utc>>,
+    pub vacuum_last_run_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub vacuum_last_run_duration_ms: Option<u64>,
+    pub vacuum_last_run_bytes_reclaimed: Option<i64>,
+    pub freelist_ratio: Option<f64>,
+    pub over_budget: Option<bool>,
+    pub over_budget_after_vacuum: Option<bool>,
     pub collection_error: Option<String>,
 }
 

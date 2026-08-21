@@ -567,6 +567,36 @@ fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> Strin
     );
     append_gauge_metric(
         &mut output,
+        "jetstream_turbo_db_size_bytes",
+        "Current SQLite database file size in bytes.",
+        optional_i64_metric_value(diagnostics.sqlite_state.db_size_bytes),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_db_freelist_ratio",
+        "Ratio of freelist pages to total pages in the SQLite database.",
+        optional_f64_metric_value(diagnostics.sqlite_state.freelist_ratio),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_vacuum_pending",
+        "Whether a VACUUM is scheduled and waiting (1 = yes, 0 = no).",
+        optional_bool_metric_value(diagnostics.sqlite_state.vacuum_pending),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_vacuum_last_duration_ms",
+        "Duration of the most recent completed VACUUM in milliseconds.",
+        optional_u64_metric_value(diagnostics.sqlite_state.vacuum_last_run_duration_ms),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_db_over_budget",
+        "Whether the database file exceeds the configured maximum size (1 = yes, 0 = no).",
+        optional_bool_metric_value(diagnostics.sqlite_state.over_budget),
+    );
+    append_gauge_metric(
+        &mut output,
         "jetstream_turbo_sqlite_wal_size_bytes",
         "Current SQLite WAL file size in bytes.",
         optional_i64_metric_value(diagnostics.sqlite_state.wal_size_bytes),
@@ -916,6 +946,14 @@ fn optional_f64_metric_value(value: Option<f64>) -> String {
         .unwrap_or_else(|| "NaN".to_string())
 }
 
+fn optional_bool_metric_value(value: Option<bool>) -> String {
+    match value {
+        Some(true) => "1".to_string(),
+        Some(false) => "0".to_string(),
+        None => "NaN".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -995,6 +1033,15 @@ mod tests {
                 journal_mode: Some("wal".to_string()),
                 journal_size_limit_bytes: Some(5368709120),
                 partial_records: Some(3),
+                vacuum_pending: Some(true),
+                vacuum_pending_reason: Some(crate::storage::VacuumPendingReason::Bloat),
+                vacuum_pending_since: Some(chrono::Utc::now()),
+                vacuum_last_run_at: Some(chrono::Utc::now()),
+                vacuum_last_run_duration_ms: Some(1250),
+                vacuum_last_run_bytes_reclaimed: Some(4096),
+                freelist_ratio: Some(0.25),
+                over_budget: Some(false),
+                over_budget_after_vacuum: Some(true),
                 collection_error: None,
             },
             not_redis_state: NotRedisStateDiagnostics {
@@ -1093,6 +1140,33 @@ mod tests {
         );
         assert!(json["data"]["diagnostics"]["cache_state"]["user_capacity"].is_number());
         assert!(json["data"]["diagnostics"]["sqlite_state"]["journal_mode"].is_string());
+        assert!(json["data"]["diagnostics"]["sqlite_state"]["vacuum_pending"].is_boolean());
+        assert_eq!(
+            json["data"]["diagnostics"]["sqlite_state"]["vacuum_pending_reason"],
+            "bloat"
+        );
+        assert!(json["data"]["diagnostics"]["sqlite_state"]["vacuum_pending_since"].is_string());
+        assert!(json["data"]["diagnostics"]["sqlite_state"]["vacuum_last_run_at"].is_string());
+        assert_eq!(
+            json["data"]["diagnostics"]["sqlite_state"]["vacuum_last_run_duration_ms"],
+            1250
+        );
+        assert_eq!(
+            json["data"]["diagnostics"]["sqlite_state"]["vacuum_last_run_bytes_reclaimed"],
+            4096
+        );
+        assert_eq!(
+            json["data"]["diagnostics"]["sqlite_state"]["freelist_ratio"],
+            0.25
+        );
+        assert_eq!(
+            json["data"]["diagnostics"]["sqlite_state"]["over_budget"],
+            false
+        );
+        assert_eq!(
+            json["data"]["diagnostics"]["sqlite_state"]["over_budget_after_vacuum"],
+            true
+        );
         assert!(json["data"]["diagnostics"]["not_redis_state"]["stream_name"].is_string());
         assert_eq!(json["data"]["readiness"]["state"], "healthy");
         assert!(json["data"]["diagnostics"]["pipeline_progress"]["ingress_messages"].is_number());
@@ -1118,6 +1192,11 @@ mod tests {
         assert!(output.contains("jetstream_turbo_cache_post_entries 2"));
         assert!(output.contains("jetstream_turbo_sqlite_available 1"));
         assert!(output.contains("jetstream_turbo_sqlite_db_size_bytes 8192"));
+        assert!(output.contains("jetstream_turbo_db_size_bytes 8192"));
+        assert!(output.contains("jetstream_turbo_db_freelist_ratio 0.25"));
+        assert!(output.contains("jetstream_turbo_vacuum_pending 1"));
+        assert!(output.contains("jetstream_turbo_vacuum_last_duration_ms 1250"));
+        assert!(output.contains("jetstream_turbo_db_over_budget 0"));
         assert!(output.contains("jetstream_turbo_not_redis_connected 1"));
         assert!(output.contains("jetstream_turbo_not_redis_stream_length 7"));
         assert!(output.contains("jetstream_turbo_pipeline_ingress_messages_total 1"));
@@ -1158,6 +1237,10 @@ mod tests {
             .peaks_24h
             .virtual_memory_peak_unix_seconds = None;
         diagnostics.sqlite_state.db_size_bytes = None;
+        diagnostics.sqlite_state.freelist_ratio = None;
+        diagnostics.sqlite_state.vacuum_pending = None;
+        diagnostics.sqlite_state.vacuum_last_run_duration_ms = None;
+        diagnostics.sqlite_state.over_budget = None;
         diagnostics.not_redis_state.stream_length = None;
         diagnostics.not_redis_state.configured_max_length = None;
 
@@ -1167,6 +1250,11 @@ mod tests {
         assert!(output.contains("jetstream_turbo_process_memory_rss_peak_24h_bytes NaN"));
         assert!(output.contains("jetstream_turbo_process_memory_virtual_peak_24h_unix_seconds NaN"));
         assert!(output.contains("jetstream_turbo_sqlite_db_size_bytes NaN"));
+        assert!(output.contains("jetstream_turbo_db_size_bytes NaN"));
+        assert!(output.contains("jetstream_turbo_db_freelist_ratio NaN"));
+        assert!(output.contains("jetstream_turbo_vacuum_pending NaN"));
+        assert!(output.contains("jetstream_turbo_vacuum_last_duration_ms NaN"));
+        assert!(output.contains("jetstream_turbo_db_over_budget NaN"));
         assert!(output.contains("jetstream_turbo_not_redis_stream_length NaN"));
         assert!(output.contains("jetstream_turbo_not_redis_configured_max_length NaN"));
     }

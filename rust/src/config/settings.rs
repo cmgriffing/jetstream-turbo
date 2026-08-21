@@ -30,8 +30,14 @@ pub struct Settings {
     pub max_db_size_mb: u64,
     pub db_retention_days: u32,
     pub cleanup_check_interval_minutes: u64,
-    pub vacuum_min_bytes_freed: u64,
-    pub vacuum_min_percent_freed: f64,
+    pub vacuum_freelist_ratio: f64,
+    /// First hour of the UTC window in which pending VACUUMs are allowed to run.
+    pub vacuum_window_start_hour: u32,
+    /// Last (exclusive) hour of the UTC window in which pending VACUUMs run.
+    pub vacuum_window_end_hour: u32,
+    /// Maximum hours a pending VACUUM may be deferred past the window before
+    /// it runs regardless (bounds the worst case).
+    pub vacuum_max_defer_hours: u64,
     pub cleanup_backoff_max_minutes: u64,
     pub cleanup_backoff_reset_count: u32,
     pub cleanup_chunk_size: u32,
@@ -122,8 +128,12 @@ impl Default for Settings {
             max_db_size_mb: 20 * 1024,
             db_retention_days: 3,
             cleanup_check_interval_minutes: 5,
-            vacuum_min_bytes_freed: 100 * 1024 * 1024,
-            vacuum_min_percent_freed: 10.0,
+            // Freelist pages (freed by DELETE but not returned to the OS)
+            // above 10% of the database trigger a proactive VACUUM.
+            vacuum_freelist_ratio: 0.10,
+            vacuum_window_start_hour: 3,
+            vacuum_window_end_hour: 5,
+            vacuum_max_defer_hours: 6,
             cleanup_backoff_max_minutes: 30,
             cleanup_backoff_reset_count: 3,
             cleanup_chunk_size: 1000,
@@ -219,12 +229,20 @@ impl Settings {
                 builder.set_override("cleanup_check_interval_minutes", cleanup_check_interval)?;
         }
 
-        if let Ok(vacuum_min_bytes) = std::env::var("VACUUM_MIN_BYTES_FREED") {
-            builder = builder.set_override("vacuum_min_bytes_freed", vacuum_min_bytes)?;
+        if let Ok(vacuum_freelist_ratio) = std::env::var("VACUUM_FREELIST_RATIO") {
+            builder = builder.set_override("vacuum_freelist_ratio", vacuum_freelist_ratio)?;
         }
 
-        if let Ok(vacuum_min_percent) = std::env::var("VACUUM_MIN_PERCENT_FREED") {
-            builder = builder.set_override("vacuum_min_percent_freed", vacuum_min_percent)?;
+        if let Ok(window_start) = std::env::var("VACUUM_WINDOW_START_HOUR") {
+            builder = builder.set_override("vacuum_window_start_hour", window_start)?;
+        }
+
+        if let Ok(window_end) = std::env::var("VACUUM_WINDOW_END_HOUR") {
+            builder = builder.set_override("vacuum_window_end_hour", window_end)?;
+        }
+
+        if let Ok(max_defer) = std::env::var("VACUUM_MAX_DEFER_HOURS") {
+            builder = builder.set_override("vacuum_max_defer_hours", max_defer)?;
         }
 
         if let Ok(backoff_max) = std::env::var("CLEANUP_BACKOFF_MAX_MINUTES") {
@@ -495,6 +513,20 @@ impl Settings {
             anyhow::bail!("max_db_size_mb must be greater than 0");
         }
 
+        if !(0.0..=1.0).contains(&self.vacuum_freelist_ratio) {
+            anyhow::bail!("vacuum_freelist_ratio must be between 0 and 1");
+        }
+
+        if self.vacuum_window_start_hour > 23 || self.vacuum_window_end_hour > 23 {
+            anyhow::bail!(
+                "vacuum_window_start_hour and vacuum_window_end_hour must be between 0 and 23"
+            );
+        }
+
+        if self.vacuum_max_defer_hours == 0 {
+            anyhow::bail!("vacuum_max_defer_hours must be greater than 0");
+        }
+
         if self.sqlite_cache_size_kib == 0 {
             anyhow::bail!("sqlite_cache_size_kib must be greater than 0");
         }
@@ -580,6 +612,10 @@ mod tests {
         assert_eq!(settings.jetstream_live_stability_observations, 3);
         assert!(settings.jetstream_recovery_deadlines_enabled);
         assert!(settings.jetstream_cursor_replay_enabled);
+        assert_eq!(settings.vacuum_freelist_ratio, 0.10);
+        assert_eq!(settings.vacuum_window_start_hour, 3);
+        assert_eq!(settings.vacuum_window_end_hour, 5);
+        assert_eq!(settings.vacuum_max_defer_hours, 6);
         assert_eq!(settings.batch_execution_timeout_secs, 60);
         assert_eq!(settings.pipeline_startup_grace_secs, 300);
         assert_eq!(settings.readiness_recovery_successes, 3);
@@ -717,6 +753,10 @@ mod tests {
             ("READINESS_RECOVERY_SUCCESSES", "5"),
             ("PIPELINE_PROGRESS_READINESS_ENABLED", "true"),
             ("PIPELINE_DEADLINES_ENABLED", "false"),
+            ("VACUUM_FREELIST_RATIO", "0.25"),
+            ("VACUUM_WINDOW_START_HOUR", "1"),
+            ("VACUUM_WINDOW_END_HOUR", "2"),
+            ("VACUUM_MAX_DEFER_HOURS", "12"),
             ("BLUESKY_MAX_RETRIES", "0"),
             ("BLUESKY_RETRY_BASE_DELAY_MS", "25"),
             ("BLUESKY_RETRY_MAX_DELAY_MS", "250"),
@@ -750,6 +790,10 @@ mod tests {
         assert_eq!(settings.readiness_recovery_successes, 5);
         assert!(settings.pipeline_progress_readiness_enabled);
         assert!(!settings.pipeline_deadlines_enabled);
+        assert_eq!(settings.vacuum_freelist_ratio, 0.25);
+        assert_eq!(settings.vacuum_window_start_hour, 1);
+        assert_eq!(settings.vacuum_window_end_hour, 2);
+        assert_eq!(settings.vacuum_max_defer_hours, 12);
         assert_eq!(settings.max_retries, 0);
         assert_eq!(settings.retry_base_delay, Duration::from_millis(25));
         assert_eq!(settings.retry_max_delay, Duration::from_millis(250));
