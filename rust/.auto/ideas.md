@@ -40,10 +40,15 @@
   structure, which ANY writer must emit) vs full profiles 192ns/msg — so the
   serde dispatch is NOT the cost; the field writes and the NEON scan are both
   already near-optimal. Metadata encode confirmed structural (~1.55GB/s).
-- **Per-message tape Vec reuse in parse**: `to_tape_with_buffers`/`from_str_*
-  with_buffers` always allocate a fresh `Vec<Node>`; `Tape::reset` can't feed a
-  subsequent parse and lifetimes block Deserializer reuse. The ~50k tape-realloc
-  churn per 10k-batch is dep-internal.
+- **Per-message tape Vec reuse in parse**: definitively blocked — `Deserializer::
+  from_slice_with_buffers` pre-sizes the tape with `with_capacity(previous
+  structural_indexes.len())` so churn is only ~1 alloc+free per message
+  (~0.2-0.3ms/batch, NOT the 0.7ms growth-churn originally estimated), but
+  EVERY deserialize path consumes the tape `Vec` (`Tape::deserialize(self)`, and
+  the borrowed `Value` from `as_value()` does not implement `Deserialize`), so
+  the allocation cannot be pooled. `into_tape()` returns the Vec after
+  deserialization, but refilling it still leaves no non-consuming deserialize
+  entry point.
 - **Single-record arena serialization in the sqlx store**: Vec growth realloc
   copies (~2x final size) cost as much as the 10k small allocs it would remove;
   no measurable win.
