@@ -335,7 +335,7 @@ impl<'de> Visitor<'de> for RecordDataVisitor {
         Ok(data)
     }
 
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
     where
         A: SeqAccess<'de>,
     {
@@ -383,7 +383,7 @@ impl<'de> Visitor<'de> for ReplyVisitor {
         Ok(ReplyView { parent, root })
     }
 
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
     where
         A: SeqAccess<'de>,
     {
@@ -431,7 +431,7 @@ impl<'de> Visitor<'de> for EmbedVisitor {
         Ok(EmbedView { uri })
     }
 
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
     where
         A: SeqAccess<'de>,
     {
@@ -475,7 +475,7 @@ impl<'de> Visitor<'de> for UriVisitor {
         Ok(UriView { uri })
     }
 
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
     where
         A: SeqAccess<'de>,
     {
@@ -502,7 +502,7 @@ impl<'de> Visitor<'de> for FacetsVisitor {
 
     lenient_scalars!();
 
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
     where
         A: MapAccess<'de>,
     {
@@ -575,7 +575,7 @@ impl<'de> Visitor<'de> for FacetVisitor {
         }))
     }
 
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
     where
         A: SeqAccess<'de>,
     {
@@ -625,7 +625,7 @@ impl<'de> Visitor<'de> for IndexVisitor {
         Ok(IndexView { start, end })
     }
 
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
     where
         A: SeqAccess<'de>,
     {
@@ -701,7 +701,7 @@ impl<'de> Visitor<'de> for LenU32Visitor {
         Ok(LenU32(None))
     }
 
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
     where
         A: SeqAccess<'de>,
     {
@@ -709,7 +709,7 @@ impl<'de> Visitor<'de> for LenU32Visitor {
         Ok(LenU32(None))
     }
 
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
     where
         A: MapAccess<'de>,
     {
@@ -736,7 +736,7 @@ impl<'de> Visitor<'de> for FeaturesVisitor {
 
     lenient_scalars!();
 
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
     where
         A: MapAccess<'de>,
     {
@@ -802,7 +802,7 @@ impl<'de> Visitor<'de> for FeatureVisitor {
         })
     }
 
-    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
     where
         A: SeqAccess<'de>,
     {
