@@ -188,6 +188,12 @@ impl PostCollectorState {
     }
 }
 
+/// Upper bound on how long a caller waits for the shared fetch queue to
+/// resolve its identifiers before failing. Guards against stranded ids when a
+/// concurrent caller fails on a duplicate submission and the ids are not
+/// requeued; the supervisor retries the batch instead of waiting forever.
+const MAX_CLAIM_WAIT: Duration = Duration::from_secs(30);
+
 struct PostBatchCollector {
     config: BatchConfig,
     http_client: Client,
@@ -202,6 +208,7 @@ struct PostBatchCollector {
     api_base_url: String,
     retry_policy: RequestRetryPolicy,
     containment_policy: ContainmentPolicy,
+    isolation_recurrence: Arc<AtomicU32>,
     auth_client: Option<Arc<BlueskyAuthClient>>,
     refresh_jwt: Arc<RwLock<Option<String>>>,
     expires_at: Arc<RwLock<Option<String>>>,
@@ -1213,6 +1220,7 @@ impl ProfileBatchCollector {
             }
         }
         let mut remaining: HashSet<String> = dids.iter().cloned().collect();
+        let started = Instant::now();
 
         while !remaining.is_empty() {
             let claim: Vec<String> = {
@@ -1231,6 +1239,14 @@ impl ProfileBatchCollector {
                 }
                 if remaining.is_empty() {
                     break;
+                }
+                if started.elapsed() >= MAX_CLAIM_WAIT {
+                    // Another caller failed on ids we also submitted and they
+                    // were not requeued; fail so the supervisor retries the
+                    // batch instead of waiting forever.
+                    return Err(TurboError::Internal(
+                        "fetch resolution timed out waiting for the shared queue".to_string(),
+                    ));
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 continue;
@@ -1253,12 +1269,16 @@ impl ProfileBatchCollector {
             let batch_results = match self.fetch_batch(&claim).await {
                 Ok(results) => results,
                 Err(error) => {
-                    // Requeue the still-unresolved identifiers (dedup) so
-                    // another caller or a retry can resolve them, then fail
-                    // like the original flow did for this caller.
+                    // Requeue only identifiers we did not submit ourselves:
+                    // another caller is still waiting on those. Our own ids
+                    // are left for the supervisor's batch retry (matching the
+                    // pre-concurrency behavior), which prevents a tight
+                    // re-fetch loop on persistently failing ids.
                     let mut state = self.state.lock().await;
                     for id in claim {
-                        if !state.isolation_cache.contains_key(&id) && !state.pending.contains(&id)
+                        if !dids.contains(&id)
+                            && !state.isolation_cache.contains_key(&id)
+                            && !state.pending.contains(&id)
                         {
                             state.pending.push(id);
                         }
@@ -1320,7 +1340,7 @@ impl PostBatchCollector {
             api_base_url,
             retry_policy,
             containment_policy,
-            isolation_recurrence: _,
+            isolation_recurrence,
             auth_client,
             refresh_jwt,
             expires_at,
@@ -1333,6 +1353,7 @@ impl PostBatchCollector {
             api_base_url,
             retry_policy,
             containment_policy,
+            isolation_recurrence,
             auth_client,
             refresh_jwt,
             expires_at,
@@ -1678,7 +1699,12 @@ impl PostBatchCollector {
                     })
                     .collect())
             }
-            Err(error) if transient_upstream_category(&error).is_some() && unresolved.len() > 1 => {
+            Err(error)
+                if transient_upstream_category(&error).is_some()
+                    && unresolved.len() > 1
+                    && self.isolation_recurrence.load(Ordering::Acquire)
+                        >= self.containment_policy.persistence_threshold =>
+            {
                 self.isolate_posts(unresolved, error).await
             }
             Err(error) => Err(error),
@@ -1796,6 +1822,7 @@ impl PostBatchCollector {
             }
         }
         let mut remaining: HashSet<String> = uris.iter().cloned().collect();
+        let started = Instant::now();
 
         while !remaining.is_empty() {
             let claim: Vec<String> = {
@@ -1814,6 +1841,14 @@ impl PostBatchCollector {
                 }
                 if remaining.is_empty() {
                     break;
+                }
+                if started.elapsed() >= MAX_CLAIM_WAIT {
+                    // Another caller failed on ids we also submitted and they
+                    // were not requeued; fail so the supervisor retries the
+                    // batch instead of waiting forever.
+                    return Err(TurboError::Internal(
+                        "fetch resolution timed out waiting for the shared queue".to_string(),
+                    ));
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 continue;
@@ -1836,12 +1871,15 @@ impl PostBatchCollector {
             let batch_results = match self.fetch_batch(&claim).await {
                 Ok(results) => results,
                 Err(error) => {
-                    // Requeue the still-unresolved identifiers (dedup) so
-                    // another caller or a retry can resolve them, then fail
-                    // like the original flow did for this caller.
+                    // Requeue only identifiers we did not submit ourselves:
+                    // another caller is still waiting on those. Our own ids
+                    // are left for the supervisor's batch retry (matching the
+                    // pre-concurrency behavior), which prevents a tight
+                    // re-fetch loop on persistently failing ids.
                     let mut state = self.state.lock().await;
                     for uri in claim {
-                        if !state.isolation_cache.contains_key(&uri)
+                        if !uris.contains(&uri)
+                            && !state.isolation_cache.contains_key(&uri)
                             && !state.pending.contains(&uri)
                         {
                             state.pending.push(uri);
@@ -2122,6 +2160,7 @@ mod tests {
             ..ContainmentPolicy::default()
         };
         let client = client_for_server(&server, 0, containment).await;
+        client.set_failure_recurrence(3);
 
         let outcomes = client.bulk_fetch_posts(&uris).await.unwrap();
         assert_eq!(outcomes.len(), uris.len());
@@ -2306,6 +2345,7 @@ mod tests {
             isolation_request_budget: 8,
         };
         let client = client_for_server(&server, 0, containment).await;
+        client.set_failure_recurrence(2);
         let uris = [
             "at://did:plc:a/app.bsky.feed.post/one".to_string(),
             "at://did:plc:b/app.bsky.feed.post/two".to_string(),
@@ -2411,6 +2451,28 @@ mod tests {
 
         let sessions = client.session_strings.read().await;
         assert_eq!(sessions.as_slice(), ["new_access_token"]);
+    }
+
+    #[tokio::test]
+    async fn transient_failure_without_recurrence_skips_isolation() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.feed.getPosts"))
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&server)
+            .await;
+        let client = client_for_server(&server, 0, ContainmentPolicy::default()).await;
+        let uris = [
+            "at://did:plc:a/app.bsky.feed.post/one".to_string(),
+            "at://did:plc:b/app.bsky.feed.post/two".to_string(),
+        ];
+        let outcomes = client.bulk_fetch_posts(&uris).await.unwrap();
+        assert_eq!(outcomes.len(), uris.len());
+        assert!(outcomes
+            .iter()
+            .all(|o| matches!(o, PostFetchOutcome::TemporarilyUnavailable(_))));
+        // No isolation bisection on a transient blip: exactly one request.
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
