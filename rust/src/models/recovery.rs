@@ -239,6 +239,7 @@ mod tests {
                 record: None,
                 cid: Some("bafy-test".to_string()),
             }),
+        raw_json: None,
         }
     }
 

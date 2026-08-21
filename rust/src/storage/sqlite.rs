@@ -269,7 +269,7 @@ impl SQLiteStore {
         // Serialize both JSON columns into one buffer (one allocation instead
         // of two), then bind the two non-overlapping UTF-8 slices.
         let mut buf = Vec::with_capacity(1024);
-        simd_json_to_writer(&mut buf, &record.message).unwrap();
+        record.message.write_json(&mut buf);
         let message_end = buf.len();
         simd_json_to_writer(&mut buf, &record.hydrated_metadata).unwrap();
         let combined = String::from_utf8(buf).expect("serialized JSON is UTF-8");
@@ -781,7 +781,7 @@ impl RecordStore for SQLiteStore {
             let mut serialized: Vec<(String, usize)> = Vec::with_capacity(chunk.len());
             for record in chunk {
                 let mut buf = Vec::with_capacity(1024);
-                simd_json_to_writer(&mut buf, &record.message).unwrap();
+                record.message.write_json(&mut buf);
                 let message_end = buf.len();
                 simd_json_to_writer(&mut buf, &record.hydrated_metadata).unwrap();
                 serialized.push((String::from_utf8(buf).expect("JSON is UTF-8"), message_end));
@@ -874,6 +874,7 @@ mod tests {
                     record: None,
                     cid: Some(format!("cid-{seq}")),
                 }),
+            raw_json: None,
             },
             Utc::now(),
         )

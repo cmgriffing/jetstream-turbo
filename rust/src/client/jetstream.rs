@@ -555,11 +555,18 @@ fn parse_message_owned_with_buffers(
     mut text: String,
     buffers: &mut simd_json::Buffers,
 ) -> TurboResult<JetstreamMessage> {
+    // Capture the original wire bytes before parsing: simd-json rewrites
+    // escaped strings in place, so the input is not preserved across the
+    // parse. The storage path writes this copy verbatim instead of
+    // re-encoding the parsed structure (envelope + record DOM).
+    let raw_json: String = text.clone();
+
     // Use simd-json for faster parsing (2-4x faster than serde_json)
     // simd-json requires mutable input and uses unsafe SIMD operations internally
     // The library handles safety internally through careful validation
-    let message: JetstreamMessage =
+    let mut message: JetstreamMessage =
         unsafe { simd_json::serde::from_str_with_buffers(&mut text, buffers)? };
+    message.raw_json = Some(raw_json);
 
     // Validate required fields
     if message.did.is_empty() {
@@ -601,6 +608,7 @@ mod tests {
             seq: source_seq,
             kind: crate::models::jetstream::MessageKind::Account,
             commit: None,
+        raw_json: None,
         };
         IngestionCheckpoint {
             ingress_ordinal: 42,

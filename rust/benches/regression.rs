@@ -87,6 +87,7 @@ fn create_test_message(i: usize) -> JetstreamMessage {
             }))),
             cid: Some(format!("bafyrei{i}")),
         }),
+    raw_json: None,
     }
 }
 

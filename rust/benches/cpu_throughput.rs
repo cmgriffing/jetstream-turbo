@@ -110,7 +110,7 @@ fn run_batch(
     let mut bytes = 0usize;
     for record in &enriched {
         let mut buf = Vec::with_capacity(1024);
-        simd_json::to_writer(&mut buf, &record.message).expect("serialize message");
+        record.message.write_json(&mut buf);
         let message_end = buf.len();
         simd_json::to_writer(&mut buf, &record.hydrated_metadata).expect("serialize metadata");
         bytes += buf.len();
