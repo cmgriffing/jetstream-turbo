@@ -35,21 +35,23 @@ Checks: `./.auto/checks.sh` — runs `cargo test --all-targets --all-features` (
 - CI benchmark regression thresholds vs main: Tier1 2%, Tier2 5%, Tier3 5%
 - Keep code simple; equal perf with less code = keep; ugly complexity for tiny gain = discard
 
-## Current State (as of last run: 993.2k msgs/sec median-of-3, direct runs ~1.02M; +112% vs 468k baseline)
+## Current State (FINAL: 1,028,780 msgs/sec median-of-3, +120% vs 468k baseline; stable band 1.00-1.05M with the 27-sample protocol)
 
-Phase costs per 10k batch (~9.9ms total):
-- **parse ~5.2ms**: simd-json tape build ~3.2ms (incl. per-message Tape Vec alloc — dep-internal) + envelope Strings ~0.6ms (did/rev/collection/rkey/cid; rev/cid feed SourceEventId) + RecordData walker ~0.15ms + raw capture clone ~0.3ms
-- **hydrate ~1.8ms**: extract ~0.03ms + dedup slot-assign ~0.25ms + RwLock bulk get ~0.05ms + hydrate_one loop ~0.5ms + async/misc
-- **encode ~1.9ms**: message raw write ~0.1ms + metadata ~1.86ms (profile serialize ~1.64ms at ~1.5GB/s — near structural floor)
-- **drop ~0.9ms**: RecordData + envelope Strings + raw (halved by DOM removal)
+Phase costs per 10k batch (~9.6ms total) — ALL measured structural within the no-dep-change/no-format-drift constraints:
+- **parse ~5.1ms**: simd-json tape work ~2.9ms + dep-internal tape `Vec<Node>` growth churn ~0.7ms (32 nodes/message, no public reuse API) + envelope Strings ~0.5-1ms (did/rev/collection/rkey/cid — all feed SourceEventId/extract_at_uri) + RecordData walker ~0.15ms + raw capture clone ~0.3ms
+- **hydrate ~1.5ms**: single-pass extract+dedup slots ~0.13ms + RwLock bulk get ~0.15ms + hydrate_one loop ~0.7ms (struct construction + hydration_time_ms diagnostic clock)
+- **encode ~1.9ms**: message raw write ~0.1ms + metadata ~1.86ms (12-field/13-key JSON structure + NEON escape scan — hand-rolled writer measured only 2% faster, structural)
+- **drop ~0.9ms**: dealloc-bound
 
-## What's Been Tried (session log; details in .auto/log.jsonl + .auto/ideas.md)
-- **[KEPT #16] Wire-faithful storage**: `JetstreamMessage.raw_json: Option<String>` captured at parse (1 clone before simd-json mutates input) + `write_json()` emitting original bytes at store time. Encode 4.4→2.0ms. Byte-faithful round-trip. +10-25%.
-- **[KEPT #17] moka → RwLock<HashMap> caches**: moka get was 160-560ns; lazy TTL + FIFO eviction preserve semantics. Hydrate 4.4→2.0-2.6ms; all cache benches 2-6x faster. +5.5%.
-- **[KEPT #18] Slot-indexed hydrate**: dedup assigns profile_slot per context; hydrate_one reads `profiles[slot]` — no per-message hash lookups. Hydrate 2.4→1.7ms; hydration benches best-yet. +3.6%.
-- **[KEEP #19] Record-DOM elimination**: `CommitData.record` is now `RecordData` (text/reply/embed/facets) extracted leniently from the parser's tape via deserialize_any visitors (Cow keys, draining IgnoredAny skips) instead of a full OwnedValue HashMap. Storage keeps writing raw wire bytes; redis blob splices write_json+metadata; fixtures build wire JSON and parse; hot-path bench inputs are real wire forms. Parse benches 2180→1633ns, record_view 31→2.3ns, serialize 1269→516ns, hydration batch 8.0→5.9µs. Throughput 895.6k→993k. +10.9%.
-- Earlier keeps: shared Buffers parse, hydrate single-pass, ahash maps, MessageContext did dedup, owned ws-loop parse, one-buffer store serialize.
-- Dead ends: native owned-DOM parse (1.7x slower), sqlx buffer reuse (borrows), raw-span capture via serde bridge (no API), Arc<str> raw_json (double copy), `&str` walker keys (break serde_json), non-draining visitors (cursor desync).
+## What's Been Tried (FINAL session log; details in .auto/log.jsonl + .auto/ideas.md)
+Session: 468k → 1,028,780 (+120%). Eight production-faithful wins, each committed and all 210 tests passing:
+1. #16 Wire-faithful storage: raw_json captured at parse (1 clone) + write_json() emits original wire bytes at store time (byte-faithful). Encode 4.4→2.0ms.
+2. #17 moka → RwLock<HashMap> caches (lazy TTL, FIFO eviction): hydrate 4.4→2.4ms; cache benches 2-6x faster.
+3. #18 Slot-indexed hydrate: profile_slot per context — zero per-message hash lookups.
+4. #19 Record-DOM elimination: CommitData.record → RecordData extracted leniently from the tape (Cow keys, draining IgnoredAny skips). Parse 2180→1600ns hot-path; hydration batch 8.0→5.9us.
+5. #20-25 (convergence): metadata writer rejected (measured), tape reuse rejected (dep-internal), rev/cid skip rejected (source_event_id dedup index), TIMED_RUNS 5→9 (27-sample stable measurement), is_in_scope pre-split (production ws-loop), warning cleanup.
 
-## What's Left (see .auto/ideas.md for full details)
-- All remaining phases are near their structural floors within the no-dependency-change / no-format-drift constraints (tape alloc is dep-internal; metadata profile write ~1.5GB/s; envelope strings feed SourceEventId).
+Dead ends (measured, do NOT retry — details in ideas.md): hand-rolled metadata writer (byte-loop AND NEON versions both no better than simd_json::to_writer), native owned-DOM parse (1.7x slower), sqlx buffer reuse (borrows), raw-span capture (no API), Arc<str> raw_json (double copy), &str walker keys (break serde_json), non-draining visitors (cursor desync), tape reuse (dep-internal), rev/cid skip (SourceEventId), raw-clone skip (dep mutation reliance), Instant removal (telemetry), arena serialization (wash).
+
+## What's Left
+- Nothing honest within the constraints. Every remaining cost has a concrete measurement showing why it is structural. If a constraint ever lifts: dep change (tape Vec reuse / allocator) or a storage-format change would open new wins (~5-10% each).
