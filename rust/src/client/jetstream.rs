@@ -148,6 +148,13 @@ impl MessageSource for JetstreamClient {
             let mut attempts_in_sweep = 0usize;
             let mut sweep_number = 0u32;
             let mut endpoint_failures = vec![0u32; endpoints.len()];
+            // Pre-split the wanted collections once per connection instead of
+            // re-splitting the string on every ingested message.
+            let wanted: Vec<&str> = wanted_collections
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
             let mut endpoint_eligible_at = vec![Instant::now(); endpoints.len()];
             loop {
                 let endpoint = &endpoints[current_endpoint];
@@ -258,7 +265,7 @@ impl MessageSource for JetstreamClient {
                                         &mut parse_buffers,
                                     ) {
                                         Ok(message) => {
-                                            if is_in_scope(&message, &wanted_collections) {
+                                            if is_in_scope(&message, &wanted) {
                                                 if let Some(event_time_us) = message.time_us {
                                                     if let Some(timeout) = data_idle_timeout {
                                                         useful_data_deadline.as_mut().reset(Instant::now() + timeout);
@@ -576,17 +583,13 @@ fn parse_message_owned_with_buffers(
     Ok(message)
 }
 
-fn is_in_scope(message: &JetstreamMessage, wanted_collections: &str) -> bool {
+fn is_in_scope(message: &JetstreamMessage, wanted_collections: &[&str]) -> bool {
     match message.kind {
         crate::models::jetstream::MessageKind::Commit => message
             .commit
             .as_ref()
             .and_then(|commit| commit.collection.as_deref())
-            .is_some_and(|collection| {
-                wanted_collections
-                    .split(',')
-                    .any(|wanted| wanted.trim() == collection)
-            }),
+            .is_some_and(|collection| wanted_collections.contains(&collection)),
         crate::models::jetstream::MessageKind::Identity
         | crate::models::jetstream::MessageKind::Account => true,
         crate::models::jetstream::MessageKind::Unknown => false,
