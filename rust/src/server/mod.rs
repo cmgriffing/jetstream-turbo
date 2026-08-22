@@ -882,6 +882,14 @@ fn append_fetch_kind_metrics(
         fetch.http_duration_ns_total as f64 / 1_000_000_000.0,
         fetch.http_duration_count
     ));
+    output.push_str(&format!(
+        "# HELP jetstream_turbo_bluesky_fetch_errors_total Fetch-chain requests exhausted by error class (rate_limited = 429, upstream = 5xx/timeout/transport).\n\
+         # TYPE jetstream_turbo_bluesky_fetch_errors_total counter\n\
+         jetstream_turbo_bluesky_fetch_errors_total{{kind=\"{kind}\",class=\"rate_limited\"}} {}\n\
+         jetstream_turbo_bluesky_fetch_errors_total{{kind=\"{kind}\",class=\"upstream\"}} {}\n",
+        fetch.errors_rate_limited,
+        fetch.errors_upstream
+    ));
 }
 
 fn append_gauge_metric(output: &mut String, name: &str, help: &str, value: String) {

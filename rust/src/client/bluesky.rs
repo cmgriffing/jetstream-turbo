@@ -94,6 +94,33 @@ pub struct FetchDiagnostics {
     pub http_duration_ns_total: AtomicU64,
     /// Number of HTTP chain samples.
     pub http_duration_count: AtomicU64,
+    /// Requests exhausted with a 429 rate-limit response.
+    pub errors_rate_limited: AtomicU64,
+    /// Requests exhausted with a 5xx / timeout / transport failure.
+    pub errors_upstream: AtomicU64,
+}
+
+/// Broad class of a fetch-chain failure, used to discriminate 429s from
+/// upstream 5xx/timeout failures in diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchErrorClass {
+    RateLimited,
+    Upstream,
+}
+
+fn classify_fetch_error(error: &TurboError) -> Option<FetchErrorClass> {
+    match error {
+        TurboError::RateLimitExceeded => Some(FetchErrorClass::RateLimited),
+        TurboError::BlueskyUpstream(upstream) => match upstream.category {
+            UpstreamFailureCategory::RateLimited => Some(FetchErrorClass::RateLimited),
+            UpstreamFailureCategory::ServerError
+            | UpstreamFailureCategory::RequestTimeout
+            | UpstreamFailureCategory::Transport => Some(FetchErrorClass::Upstream),
+            _ => None,
+        },
+        TurboError::HttpRequest(_) | TurboError::Timeout(_) => Some(FetchErrorClass::Upstream),
+        _ => None,
+    }
 }
 
 /// A point-in-time snapshot of the fetch counters for one collector kind.
@@ -106,6 +133,8 @@ pub struct BlueskyFetchKindDiagnostics {
     pub lock_duration_count: u64,
     pub http_duration_ns_total: u64,
     pub http_duration_count: u64,
+    pub errors_rate_limited: u64,
+    pub errors_upstream: u64,
 }
 
 /// Fetch-path diagnostics for both collector kinds, surfaced on /health and /metrics.
@@ -870,6 +899,19 @@ impl ProfileBatchCollector {
         self.fetch
             .http_duration_count
             .fetch_add(1, Ordering::Relaxed);
+        if let Err(error) = &result {
+            match classify_fetch_error(error) {
+                Some(FetchErrorClass::RateLimited) => {
+                    self.fetch
+                        .errors_rate_limited
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                Some(FetchErrorClass::Upstream) => {
+                    self.fetch.errors_upstream.fetch_add(1, Ordering::Relaxed);
+                }
+                None => {}
+            }
+        }
         result
     }
 
@@ -1327,6 +1369,8 @@ impl ProfileBatchCollector {
             lock_duration_count: self.fetch.lock_duration_count.load(Ordering::Relaxed),
             http_duration_ns_total: self.fetch.http_duration_ns_total.load(Ordering::Relaxed),
             http_duration_count: self.fetch.http_duration_count.load(Ordering::Relaxed),
+            errors_rate_limited: self.fetch.errors_rate_limited.load(Ordering::Relaxed),
+            errors_upstream: self.fetch.errors_upstream.load(Ordering::Relaxed),
         }
     }
 }
@@ -1473,6 +1517,19 @@ impl PostBatchCollector {
         self.fetch
             .http_duration_count
             .fetch_add(1, Ordering::Relaxed);
+        if let Err(error) = &result {
+            match classify_fetch_error(error) {
+                Some(FetchErrorClass::RateLimited) => {
+                    self.fetch
+                        .errors_rate_limited
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                Some(FetchErrorClass::Upstream) => {
+                    self.fetch.errors_upstream.fetch_add(1, Ordering::Relaxed);
+                }
+                None => {}
+            }
+        }
         result
     }
 
@@ -1929,6 +1986,8 @@ impl PostBatchCollector {
             lock_duration_count: self.fetch.lock_duration_count.load(Ordering::Relaxed),
             http_duration_ns_total: self.fetch.http_duration_ns_total.load(Ordering::Relaxed),
             http_duration_count: self.fetch.http_duration_count.load(Ordering::Relaxed),
+            errors_rate_limited: self.fetch.errors_rate_limited.load(Ordering::Relaxed),
+            errors_upstream: self.fetch.errors_upstream.load(Ordering::Relaxed),
         }
     }
 }
