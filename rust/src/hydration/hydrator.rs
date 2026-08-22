@@ -143,6 +143,7 @@ where
             })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn hydrate_one(
         &self,
         message: JetstreamMessage,

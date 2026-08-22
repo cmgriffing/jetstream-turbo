@@ -34,6 +34,7 @@ pub trait PostFetcher {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum PostFetchOutcome {
     Found(BlueskyPost),
     Missing,
