@@ -5,12 +5,13 @@ candidate_binary=${1:?usage: activate-candidate.sh /absolute/path/to/candidate/j
 deploy_path=${DEPLOY_PATH:-/opt/jetstream-turbo}
 service_name=${SERVICE_NAME:-jetstream-turbo}
 binary_name=${BINARY_NAME:-jetstream-turbo}
-readiness_url=${READINESS_URL:-http://127.0.0.1:8080/health}
+readiness_url=${READINESS_URL:-http://127.0.0.1:8080/ready}
 readiness_attempts=${READINESS_ATTEMPTS:-30}
 readiness_interval_secs=${READINESS_INTERVAL_SECS:-2}
 systemctl_bin=${SYSTEMCTL_BIN:-systemctl}
 journalctl_bin=${JOURNALCTL_BIN:-journalctl}
 curl_bin=${CURL_BIN:-curl}
+chown_bin=${CHOWN_BIN:-chown}
 run_as_service_user=${RUN_AS_SERVICE_USER:-1}
 
 current_link="$deploy_path/current"
@@ -57,6 +58,7 @@ if [[ ! -L "$current_link" && -x "$deploy_path/$binary_name" ]]; then
     mkdir -p "$legacy_release"
     cp "$deploy_path/$binary_name" "$legacy_release/$binary_name"
     chmod 0755 "$legacy_release/$binary_name"
+    "$chown_bin" -R "$service_name:$service_name" "$legacy_release"
     ln -sfn "$legacy_release" "$current_link"
 fi
 

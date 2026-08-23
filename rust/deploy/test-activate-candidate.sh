@@ -21,8 +21,9 @@ write_release_binary "$deploy_path/releases/candidate/jetstream-turbo"
 
 cp "$script_dir/test-fixtures/fake-systemctl.sh" "$fake_bin/systemctl"
 cp "$script_dir/test-fixtures/fake-curl.sh" "$fake_bin/curl"
+cp "$script_dir/test-fixtures/fake-chown.sh" "$fake_bin/chown"
 cp "$script_dir/test-fixtures/fake-journalctl.sh" "$fake_bin/journalctl"
-chmod 0755 "$fake_bin/systemctl" "$fake_bin/curl" "$fake_bin/journalctl"
+chmod 0755 "$fake_bin/systemctl" "$fake_bin/curl" "$fake_bin/chown" "$fake_bin/journalctl"
 
 run_candidate() {
     DEPLOY_PATH="$deploy_path" \
@@ -31,10 +32,12 @@ run_candidate() {
     SYSTEMCTL_BIN="$fake_bin/systemctl" \
     JOURNALCTL_BIN="$fake_bin/journalctl" \
     CURL_BIN="$fake_bin/curl" \
+    CHOWN_BIN="$fake_bin/chown" \
     READINESS_ATTEMPTS=2 \
     READINESS_INTERVAL_SECS=0 \
     FAKE_SYSTEMCTL_LOG="$fixture/systemctl.log" \
     FAKE_JOURNAL_LOG="$fixture/journal.log" \
+    FAKE_CHOWN_LOG="$fixture/chown.log" \
     FAKE_MAINTENANCE_FAIL_FILE="$fixture/maintenance-fails" \
     FAKE_READINESS_FAIL_FILE="$fixture/readiness-fails" \
     "$script_dir/activate-candidate.sh" "$deploy_path/releases/candidate/jetstream-turbo"
@@ -66,5 +69,13 @@ fi
 [[ $(grep -c '^restart jetstream-turbo$' "$fixture/systemctl.log") -eq 2 ]]
 grep -q '^status jetstream-turbo --no-pager$' "$fixture/systemctl.log"
 grep -q '^-u jetstream-turbo --no-pager -n 100$' "$fixture/journal.log"
+
+rm "$fixture/readiness-fails"
+rm "$deploy_path/current"
+cp "$script_dir/test-fixtures/fake-release.sh" "$deploy_path/jetstream-turbo"
+chmod 0755 "$deploy_path/jetstream-turbo"
+: >"$fixture/chown.log"
+run_candidate
+grep -Eq '^-R jetstream-turbo:jetstream-turbo .*/releases/legacy-[0-9]{14}$' "$fixture/chown.log"
 
 echo "candidate deployment simulation passed"

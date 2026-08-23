@@ -194,6 +194,40 @@ async fn partial_maintenance_state_is_safe_to_retry() {
 }
 
 #[tokio::test]
+async fn maintenance_does_not_rewrite_existing_records() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("legacy-hydration-quality.db");
+    let options = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(true);
+    let pool = SqlitePool::connect_with(options).await.unwrap();
+    create_records_table(&pool).await;
+    sqlx::query(
+        r#"
+        INSERT INTO records (
+            message, created_at, hydrated_at, hydration_quality
+        ) VALUES ('{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'legacy-value')
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    SQLiteStore::maintain_schema(&db_path, test_pragma_config(), Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    let options = SqliteConnectOptions::new().filename(&db_path);
+    let inspection_pool = SqlitePool::connect_with(options).await.unwrap();
+    let stored_quality: String = sqlx::query_scalar("SELECT hydration_quality FROM records")
+        .fetch_one(&inspection_pool)
+        .await
+        .unwrap();
+    assert_eq!(stored_quality, "legacy-value");
+}
+
+#[tokio::test]
 async fn maintenance_returns_typed_lock_timeout() {
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("locked.db");

@@ -88,8 +88,10 @@ jobs:
           key: ${{ secrets.VPS_TURBO_SSH_KEY }}
           script: |
             sudo mkdir -p ${{ env.DEPLOY_PATH }}/releases/${{ env.RELEASE_ID }}
+            sudo mkdir -p ${{ env.DEPLOY_PATH }}/logs
             sudo useradd -r -s /bin/false ${{ env.SERVICE_NAME }} 2>/dev/null || true
             sudo chown ${{ env.SERVICE_NAME }}:${{ env.SERVICE_NAME }} ${{ env.DEPLOY_PATH }}
+            sudo chown ${{ env.SERVICE_NAME }}:${{ env.SERVICE_NAME }} ${{ env.DEPLOY_PATH }}/logs
             sudo chown -R ${{ env.SERVICE_NAME }}:${{ env.SERVICE_NAME }} ${{ env.DEPLOY_PATH }}/releases
 
       - name: Prepare candidate staging directory
@@ -196,7 +198,7 @@ jobs:
               DEPLOY_PATH=${{ env.DEPLOY_PATH }} \
               SERVICE_NAME=${{ env.SERVICE_NAME }} \
               BINARY_NAME=${{ env.BINARY_NAME }} \
-              READINESS_URL=http://127.0.0.1:8080/health \
+              READINESS_URL=http://127.0.0.1:8080/ready \
               READINESS_ATTEMPTS=30 \
               READINESS_INTERVAL_SECS=2 \
               bash /tmp/activate-candidate.sh \

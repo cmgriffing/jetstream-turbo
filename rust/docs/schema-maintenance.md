@@ -13,7 +13,7 @@ Before this change, `SQLiteStore::new` performed all of the following synchronou
 | Inspect `PRAGMA table_info(records)` | Bounded metadata inspection | Serve and maintenance |
 | Add `source_event_id` when absent | Additive metadata-only compatibility change | Serve and maintenance |
 | Add `hydration_quality` when absent | Additive metadata-only compatibility change | Serve and maintenance |
-| Normalize every invalid `hydration_quality` value | Table-wide data maintenance | Maintenance only |
+| Normalize every invalid `hydration_quality` value | Table-wide data maintenance | Retired; unknown stored values are interpreted as `unknown` without rewriting records |
 | Create `idx_records_at_uri` | Table-wide index build | Maintenance only |
 | Create `idx_records_did` | Table-wide index build | Maintenance only |
 | Create `idx_records_time_us` | Table-wide index build | Maintenance only |
@@ -55,10 +55,10 @@ The Turbo deployment workflow uses these gates:
 2. Run the candidate's `schema-maintenance` command as the service user in `/opt/jetstream-turbo`.
 3. Abort without activation or restart if maintenance fails.
 4. Record the active release in `/opt/jetstream-turbo/previous`, point `current` at the candidate, and restart systemd.
-5. Poll `http://127.0.0.1:8080/health` for at most 30 attempts at two-second intervals.
+5. Poll `http://127.0.0.1:8080/ready` for at most 30 attempts at two-second intervals.
 6. On timeout or connection refusal, emit `systemctl status` and the latest 100 journal entries, restore `current` to the prior release, restart it, and fail the workflow even if rollback succeeds.
 
-Systemd executes `/opt/jetstream-turbo/current/jetstream-turbo`. A process being `active` is not sufficient for deployment success; the localhost health endpoint must respond successfully within the deadline.
+Systemd executes `/opt/jetstream-turbo/current/jetstream-turbo`. A process being `active` is not sufficient for deployment success; the localhost readiness endpoint must respond successfully within the deadline. File logs are written beneath `/opt/jetstream-turbo/logs`, outside immutable versioned release directories; if a file appender cannot be opened, the process continues with journal/stdout logging.
 
 ## Manual rollback
 
@@ -67,7 +67,7 @@ The activation script rolls back automatically after a readiness failure. For a 
 ```sh
 sudo ln -sfn "$(readlink /opt/jetstream-turbo/previous)" /opt/jetstream-turbo/current
 sudo systemctl restart jetstream-turbo
-curl --fail --silent --show-error http://127.0.0.1:8080/health
+curl --fail --silent --show-error http://127.0.0.1:8080/ready
 ```
 
 Required indexes are additive and remain in SQLite after rollback; prior releases ignore them. If rollback readiness fails, collect:

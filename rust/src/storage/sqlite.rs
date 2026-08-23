@@ -216,25 +216,6 @@ impl SQLiteStore {
             }
         };
 
-        let normalization_started = Instant::now();
-        info!(
-            operation = "normalize_hydration_quality",
-            lifecycle = "start",
-            "Schema maintenance started compatibility normalization"
-        );
-        sqlx::query("UPDATE records SET hydration_quality = 'unknown' WHERE hydration_quality IS NULL OR hydration_quality NOT IN ('unknown', 'complete', 'partial')")
-            .execute(&pool)
-            .await
-            .map_err(|source| {
-                maintenance_sql_error("normalize_hydration_quality", busy_timeout, source)
-            })?;
-        info!(
-            operation = "normalize_hydration_quality",
-            lifecycle = "completion",
-            elapsed_ms = normalization_started.elapsed().as_millis() as u64,
-            "Schema maintenance completed compatibility normalization"
-        );
-
         info!(
             created_indexes = report.created_indexes.len(),
             skipped_indexes = report.skipped_indexes.len(),

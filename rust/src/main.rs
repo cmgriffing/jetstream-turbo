@@ -383,6 +383,12 @@ fn init_tracing(log_level: &str) -> Result<Vec<WorkerGuard>> {
 
 fn create_file_log_writer(suffix: Option<&str>) -> Option<(NonBlocking, WorkerGuard, PathBuf)> {
     let log_path = default_log_path(suffix)?;
+    create_file_log_writer_at(&log_path)
+}
+
+fn create_file_log_writer_at(
+    log_path: &std::path::Path,
+) -> Option<(NonBlocking, WorkerGuard, PathBuf)> {
     let parent = log_path.parent()?;
     let file_name = log_path.file_name()?.to_str()?;
 
@@ -390,32 +396,35 @@ fn create_file_log_writer(suffix: Option<&str>) -> Option<(NonBlocking, WorkerGu
         return None;
     }
 
-    let appender = tracing_appender::rolling::never(parent, file_name);
+    let appender = tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::NEVER)
+        .filename_prefix(file_name)
+        .build(parent)
+        .ok()?;
     let (writer, guard) = tracing_appender::non_blocking(appender);
-    Some((writer, guard, log_path))
+    Some((writer, guard, log_path.to_path_buf()))
 }
 
 fn default_log_path(suffix: Option<&str>) -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?;
-    let executable_dir = executable.parent()?;
     let executable_name = executable.file_stem()?.to_str()?;
     let file_name = match suffix {
         Some(suffix) => format!("{executable_name}-{suffix}.log"),
         None => format!("{executable_name}.log"),
     };
-    Some(executable_dir.join(file_name))
+    Some(std::env::current_dir().ok()?.join("logs").join(file_name))
 }
 
 #[cfg(test)]
 mod logging_tests {
-    use super::default_log_path;
+    use super::{create_file_log_writer_at, default_log_path};
 
     #[test]
-    fn default_log_path_uses_executable_directory() {
+    fn default_log_path_uses_working_directory_logs_folder() {
         let log_path = default_log_path(None).expect("log path should resolve");
         assert_eq!(
-            log_path.extension().and_then(|ext| ext.to_str()),
-            Some("log")
+            log_path.parent().and_then(|parent| parent.file_name()),
+            Some(std::ffi::OsStr::new("logs"))
         );
     }
 
@@ -426,6 +435,17 @@ mod logging_tests {
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.contains("-batches.log")));
+    }
+
+    #[test]
+    fn file_log_initialization_returns_none_when_log_file_cannot_be_opened() {
+        let temp_dir = tempfile::tempdir().expect("temporary directory should be created");
+        let log_path = temp_dir.path().join("jetstream-turbo.log");
+        std::fs::create_dir(&log_path).expect("conflicting directory should be created");
+
+        let writer = create_file_log_writer_at(&log_path);
+
+        assert!(writer.is_none());
     }
 }
 
