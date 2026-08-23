@@ -35,6 +35,14 @@ pub enum TurboError {
     #[error("SQLite database error: {0}")]
     Database(#[source] Box<sqlx::Error>),
 
+    #[error(
+        "SQLite schema maintenance is required; missing indexes: {missing_indexes:?}; incompatible indexes: {incompatible_indexes:?}. Run `jetstream-turbo schema-maintenance` before starting the service"
+    )]
+    SchemaMaintenanceRequired {
+        missing_indexes: Vec<String>,
+        incompatible_indexes: Vec<String>,
+    },
+
     #[error("Redis operation failed: {0}")]
     RedisOperation(#[source] Box<not_redis::RedisError>),
 
@@ -131,6 +139,7 @@ impl TurboError {
             self,
             TurboError::Configuration(_)
                 | TurboError::MissingEnvVar(_)
+                | TurboError::SchemaMaintenanceRequired { .. }
                 | TurboError::PermissionDenied(_)
         )
     }

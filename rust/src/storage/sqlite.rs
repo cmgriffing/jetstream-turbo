@@ -3,6 +3,10 @@ use crate::models::{
     recovery::{IngestionCheckpoint, SourceCursor, SourceEventId},
     TurboError, TurboResult,
 };
+use crate::storage::schema::{
+    reconcile_required_indexes, verify_required_indexes, SchemaMaintenanceError,
+    SchemaMaintenanceReport, SchemaVerification,
+};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use simd_json::to_writer as simd_json_to_writer;
@@ -109,6 +113,33 @@ pub struct SQLiteStore {
 }
 
 impl SQLiteStore {
+    /// Performs the same bounded compatibility and index verification used by serve startup.
+    pub async fn verify_schema_ready<P: AsRef<Path>>(
+        db_path: P,
+        pragma_config: SQLitePragmaConfig,
+    ) -> TurboResult<()> {
+        let db_path_str = db_path.as_ref().to_string_lossy().to_string();
+        if db_path_str != ":memory:" {
+            if let Some(parent) = Path::new(&db_path_str).parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+        }
+        let pool = Self::connect_pool(&db_path_str, pragma_config, Duration::from_secs(5)).await?;
+        Self::initialize_bounded_schema(&pool).await?;
+        let verification = verify_required_indexes(&pool).await?;
+        pool.close().await;
+        match verification {
+            SchemaVerification::Ready => Ok(()),
+            SchemaVerification::MaintenanceRequired {
+                missing_indexes,
+                incompatible_indexes,
+            } => Err(TurboError::SchemaMaintenanceRequired {
+                missing_indexes,
+                incompatible_indexes,
+            }),
+        }
+    }
+
     pub async fn new<P: AsRef<Path>>(
         db_path: P,
         pragma_config: SQLitePragmaConfig,
@@ -124,18 +155,113 @@ impl SQLiteStore {
             }
         }
 
-        let mut connect_options = SqliteConnectOptions::new()
-            .filename(&db_path_str)
-            .create_if_missing(true);
+        let pool = Self::connect_pool(&db_path_str, pragma_config, Duration::from_secs(5)).await?;
 
-        // Skip WAL mode for in-memory databases
+        Self::initialize_bounded_schema(&pool).await?;
+        match verify_required_indexes(&pool).await? {
+            SchemaVerification::Ready => {}
+            SchemaVerification::MaintenanceRequired {
+                missing_indexes,
+                incompatible_indexes,
+            } => {
+                return Err(TurboError::SchemaMaintenanceRequired {
+                    missing_indexes,
+                    incompatible_indexes,
+                });
+            }
+        }
+
+        Ok(Self {
+            pool,
+            db_path: db_path_str,
+            vacuum_state: Mutex::new(VacuumState::default()),
+        })
+    }
+
+    /// Runs explicit, retry-safe schema maintenance against a database path.
+    pub async fn maintain_schema<P: AsRef<Path>>(
+        db_path: P,
+        pragma_config: SQLitePragmaConfig,
+        busy_timeout: Duration,
+    ) -> Result<SchemaMaintenanceReport, SchemaMaintenanceError> {
+        let db_path_str = db_path.as_ref().to_string_lossy().to_string();
         if db_path_str != ":memory:" {
+            if let Some(parent) = Path::new(&db_path_str).parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|source| SchemaMaintenanceError::Preparation(Box::new(source)))?;
+            }
+        }
+
+        let command_started = Instant::now();
+        let pool = Self::connect_pool(&db_path_str, pragma_config, busy_timeout)
+            .await
+            .map_err(|source| maintenance_sql_error("database_connection", busy_timeout, source))?;
+        Self::initialize_bounded_schema(&pool)
+            .await
+            .map_err(|source| {
+                maintenance_sql_error("bounded_schema_setup", busy_timeout, source)
+            })?;
+
+        let report = reconcile_required_indexes(&pool, busy_timeout).await;
+        let report = match report {
+            Ok(report) => report,
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    outcome = "failure",
+                    "Schema maintenance command failed"
+                );
+                return Err(error);
+            }
+        };
+
+        let normalization_started = Instant::now();
+        info!(
+            operation = "normalize_hydration_quality",
+            lifecycle = "start",
+            "Schema maintenance started compatibility normalization"
+        );
+        sqlx::query("UPDATE records SET hydration_quality = 'unknown' WHERE hydration_quality IS NULL OR hydration_quality NOT IN ('unknown', 'complete', 'partial')")
+            .execute(&pool)
+            .await
+            .map_err(|source| {
+                maintenance_sql_error("normalize_hydration_quality", busy_timeout, source)
+            })?;
+        info!(
+            operation = "normalize_hydration_quality",
+            lifecycle = "completion",
+            elapsed_ms = normalization_started.elapsed().as_millis() as u64,
+            "Schema maintenance completed compatibility normalization"
+        );
+
+        info!(
+            created_indexes = report.created_indexes.len(),
+            skipped_indexes = report.skipped_indexes.len(),
+            elapsed_ms = command_started.elapsed().as_millis() as u64,
+            outcome = "success",
+            "Schema maintenance command completed"
+        );
+        Ok(report)
+    }
+
+    async fn connect_pool(
+        db_path: &str,
+        pragma_config: SQLitePragmaConfig,
+        busy_timeout: Duration,
+    ) -> Result<SqlitePool, sqlx::Error> {
+        let mut connect_options = SqliteConnectOptions::new()
+            .filename(db_path)
+            .create_if_missing(true)
+            .busy_timeout(busy_timeout);
+
+        if db_path != ":memory:" {
             connect_options = connect_options.journal_mode(SqliteJournalMode::Wal);
         }
 
-        let pool = SqlitePoolOptions::new()
+        SqlitePoolOptions::new()
             .after_connect({
-                let db_path = db_path_str.clone();
+                let db_path = db_path.to_string();
                 move |conn, _meta| {
                     let db_path = db_path.clone();
                     Box::pin(async move {
@@ -145,19 +271,10 @@ impl SQLiteStore {
                 }
             })
             .connect_with(connect_options)
-            .await?;
-
-        // Initialize schema
-        Self::initialize_schema(&pool).await?;
-
-        Ok(Self {
-            pool,
-            db_path: db_path_str,
-            vacuum_state: Mutex::new(VacuumState::default()),
-        })
+            .await
     }
 
-    async fn initialize_schema(pool: &SqlitePool) -> TurboResult<()> {
+    async fn initialize_bounded_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS records (
@@ -179,10 +296,6 @@ impl SQLiteStore {
                     CHECK(hydration_quality IN ('unknown', 'complete', 'partial'))
             );
             
-            CREATE INDEX IF NOT EXISTS idx_records_at_uri ON records(at_uri);
-            CREATE INDEX IF NOT EXISTS idx_records_did ON records(did);
-            CREATE INDEX IF NOT EXISTS idx_records_time_us ON records(time_us);
-            CREATE INDEX IF NOT EXISTS idx_records_created_at ON records(created_at);
             CREATE TABLE IF NOT EXISTS ingestion_checkpoint (
                 singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
                 ingress_ordinal INTEGER NOT NULL,
@@ -219,21 +332,7 @@ impl SQLiteStore {
             .execute(pool)
             .await?;
         }
-        sqlx::query("UPDATE records SET hydration_quality = 'unknown' WHERE hydration_quality IS NULL OR hydration_quality NOT IN ('unknown', 'complete', 'partial')")
-            .execute(pool)
-            .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_records_hydration_quality ON records(hydration_quality)",
-        )
-        .execute(pool)
-        .await?;
-        sqlx::query(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_records_source_event_id ON records(source_event_id) WHERE source_event_id IS NOT NULL",
-        )
-        .execute(pool)
-        .await?;
-
-        trace!("SQLite schema initialized");
+        trace!("Bounded SQLite schema compatibility checks completed");
         Ok(())
     }
 
@@ -885,6 +984,29 @@ impl SQLiteStore {
     }
 }
 
+fn maintenance_sql_error(
+    operation: &str,
+    busy_timeout: Duration,
+    source: sqlx::Error,
+) -> SchemaMaintenanceError {
+    let is_lock_contention = match &source {
+        sqlx::Error::Database(database_error) => {
+            matches!(database_error.code().as_deref(), Some("5" | "6"))
+                || database_error.message().contains("database is locked")
+        }
+        _ => false,
+    };
+    if is_lock_contention {
+        SchemaMaintenanceError::LockTimeout {
+            index: operation.to_string(),
+            timeout: busy_timeout,
+            source: Box::new(source),
+        }
+    } else {
+        SchemaMaintenanceError::Preparation(Box::new(source))
+    }
+}
+
 impl RecordStore for SQLiteStore {
     async fn completed_source_event_ids(
         &self,
@@ -1006,17 +1128,23 @@ mod tests {
     async fn create_test_db() -> SQLiteStore {
         let temp_dir = std::env::temp_dir();
         let db_path = temp_dir.join(format!("test_sqlite_{}.db", uuid::Uuid::new_v4()));
-        let db_path_str = db_path.to_string_lossy().to_string();
-        SQLiteStore::new(
-            &db_path_str,
-            SQLitePragmaConfig {
-                cache_size_kib: 64 * 1024,
-                mmap_size_mb: 256,
-                journal_size_limit_mb: 512,
-            },
-        )
-        .await
-        .unwrap()
+        let pragma_config = test_pragma_config();
+        maintain_test_db(&db_path, pragma_config).await;
+        SQLiteStore::new(&db_path, pragma_config).await.unwrap()
+    }
+
+    fn test_pragma_config() -> SQLitePragmaConfig {
+        SQLitePragmaConfig {
+            cache_size_kib: 64 * 1024,
+            mmap_size_mb: 256,
+            journal_size_limit_mb: 512,
+        }
+    }
+
+    async fn maintain_test_db(path: &Path, pragma_config: SQLitePragmaConfig) {
+        SQLiteStore::maintain_schema(path, pragma_config, std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
     }
 
     fn test_checkpoint(ordinal: u64, time_us: u64) -> IngestionCheckpoint {
@@ -1076,16 +1204,9 @@ mod tests {
             .unwrap();
         pool.close().await;
 
-        let store = SQLiteStore::new(
-            &db_path,
-            SQLitePragmaConfig {
-                cache_size_kib: 64 * 1024,
-                mmap_size_mb: 256,
-                journal_size_limit_mb: 512,
-            },
-        )
-        .await
-        .unwrap();
+        let pragma_config = test_pragma_config();
+        maintain_test_db(&db_path, pragma_config).await;
+        let store = SQLiteStore::new(&db_path, pragma_config).await.unwrap();
 
         assert_eq!(store.load_ingestion_checkpoint().await.unwrap(), None);
     }
@@ -1137,16 +1258,9 @@ mod tests {
         .unwrap();
         pool.close().await;
 
-        let store = SQLiteStore::new(
-            &db_path,
-            SQLitePragmaConfig {
-                cache_size_kib: 64 * 1024,
-                mmap_size_mb: 256,
-                journal_size_limit_mb: 512,
-            },
-        )
-        .await
-        .unwrap();
+        let pragma_config = test_pragma_config();
+        maintain_test_db(&db_path, pragma_config).await;
+        let store = SQLiteStore::new(&db_path, pragma_config).await.unwrap();
         let columns = sqlx::query("PRAGMA table_info(records)")
             .fetch_all(&store.pool)
             .await
@@ -1251,6 +1365,7 @@ mod tests {
             journal_size_limit_mb: 512,
         };
         let checkpoint = test_checkpoint(7, 7_000);
+        maintain_test_db(&db_path, pragma_config).await;
         let store = SQLiteStore::new(&db_path, pragma_config).await.unwrap();
         store
             .advance_ingestion_checkpoint(&checkpoint)

@@ -230,6 +230,13 @@ fn bench_sqlite_operations(c: &mut Criterion) {
         let db_path = temp_dir.path().join("test.db");
 
         let store = rt.block_on(async {
+            SQLiteStore::maintain_schema(
+                &db_path,
+                benchmark_sqlite_pragmas(),
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
             SQLiteStore::new(&db_path, benchmark_sqlite_pragmas())
                 .await
                 .unwrap()
@@ -266,6 +273,13 @@ fn bench_sqlite_operations(c: &mut Criterion) {
         let db_path = temp_dir.path().join("test.db");
 
         let store = rt.block_on(async {
+            SQLiteStore::maintain_schema(
+                &db_path,
+                benchmark_sqlite_pragmas(),
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
             SQLiteStore::new(&db_path, benchmark_sqlite_pragmas())
                 .await
                 .unwrap()

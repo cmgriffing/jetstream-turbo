@@ -942,18 +942,16 @@ mod tests {
     #[tokio::test]
     async fn backpressure_disconnect_reconnects_from_durable_checkpoint() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(
-            SQLiteStore::new(
-                temp_dir.path().join("recovery.db"),
-                crate::storage::SQLitePragmaConfig {
-                    cache_size_kib: 1024,
-                    mmap_size_mb: 1,
-                    journal_size_limit_mb: 1,
-                },
-            )
+        let db_path = temp_dir.path().join("recovery.db");
+        let pragma_config = crate::storage::SQLitePragmaConfig {
+            cache_size_kib: 1024,
+            mmap_size_mb: 1,
+            journal_size_limit_mb: 1,
+        };
+        SQLiteStore::maintain_schema(&db_path, pragma_config, Duration::from_secs(1))
             .await
-            .unwrap(),
-        );
+            .unwrap();
+        let store = Arc::new(SQLiteStore::new(&db_path, pragma_config).await.unwrap());
         store
             .advance_ingestion_checkpoint(&IngestionCheckpoint {
                 ingress_ordinal: 7,

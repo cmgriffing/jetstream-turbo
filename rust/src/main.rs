@@ -1,7 +1,8 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use jetstream_turbo_rs::config::Settings;
 use jetstream_turbo_rs::server::create_server;
+use jetstream_turbo_rs::storage::{SQLitePragmaConfig, SQLiteStore};
 use jetstream_turbo_rs::telemetry::ErrorReporter;
 use jetstream_turbo_rs::turbocharger::ProductionTurboCharger as TurboCharger;
 use std::any::Any;
@@ -37,6 +38,9 @@ For more information, see README.md
 "#
 )]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Shard modulo for distributed processing (0 = single instance)
     #[arg(short, long, default_value_t = 0)]
     modulo: u32,
@@ -50,6 +54,16 @@ struct Args {
     log_level: Option<String>,
 }
 
+#[derive(Subcommand, Debug, Clone, Copy, PartialEq, Eq)]
+enum Command {
+    /// Reconcile required SQLite indexes without starting the service.
+    SchemaMaintenance {
+        /// Override the configured SQLite lock wait bound.
+        #[arg(long)]
+        busy_timeout_secs: Option<u64>,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Install rustls crypto provider
@@ -57,10 +71,15 @@ async fn main() -> Result<()> {
         .install_default()
         .map_err(|e| anyhow::anyhow!("Failed to install rustls crypto provider: {e:?}"))?;
 
-    let args = Args::parse();
+    let Args {
+        command,
+        modulo,
+        shard,
+        log_level,
+    } = Args::parse();
 
     // Default to warn in release mode, info in debug mode
-    let log_level = args.log_level.unwrap_or_else(|| {
+    let log_level = log_level.unwrap_or_else(|| {
         if cfg!(debug_assertions) {
             "info".to_string()
         } else {
@@ -71,8 +90,40 @@ async fn main() -> Result<()> {
     // Initialize tracing
     let _log_guards = init_tracing(&log_level)?;
 
-    // Load configuration
+    if let Some(Command::SchemaMaintenance { busy_timeout_secs }) = command {
+        let settings = Settings::from_env_for_schema_maintenance()?;
+        let busy_timeout = Duration::from_secs(
+            busy_timeout_secs.unwrap_or(settings.sqlite_schema_maintenance_busy_timeout_secs),
+        );
+        tracing::info!(
+            database_path = %settings.database_path().display(),
+            busy_timeout_secs = busy_timeout.as_secs(),
+            "Starting offline schema maintenance"
+        );
+        SQLiteStore::maintain_schema(
+            settings.database_path(),
+            SQLitePragmaConfig {
+                cache_size_kib: settings.sqlite_cache_size_kib,
+                mmap_size_mb: settings.sqlite_mmap_size_mb,
+                journal_size_limit_mb: settings.sqlite_journal_size_limit_mb,
+            },
+            busy_timeout,
+        )
+        .await?;
+        return Ok(());
+    }
+
     let settings = Settings::from_env()?;
+
+    SQLiteStore::verify_schema_ready(
+        settings.database_path(),
+        SQLitePragmaConfig {
+            cache_size_kib: settings.sqlite_cache_size_kib,
+            mmap_size_mb: settings.sqlite_mmap_size_mb,
+            journal_size_limit_mb: settings.sqlite_journal_size_limit_mb,
+        },
+    )
+    .await?;
 
     // Initialize error reporter
     let error_reporter = ErrorReporter::new(
@@ -83,20 +134,11 @@ async fn main() -> Result<()> {
     install_panic_hook(error_reporter.clone());
 
     tracing::info!("Starting jetstream-turbo v{}", env!("CARGO_PKG_VERSION"));
-    tracing::info!(
-        "Configuration loaded: modulo={}, shard={}",
-        args.modulo,
-        args.shard
-    );
+    tracing::info!("Configuration loaded: modulo={}, shard={}", modulo, shard);
 
     // Create turbocharger
-    let turbocharger = TurboCharger::new(
-        settings.clone(),
-        args.modulo,
-        args.shard,
-        error_reporter.clone(),
-    )
-    .await?;
+    let turbocharger =
+        TurboCharger::new(settings.clone(), modulo, shard, error_reporter.clone()).await?;
     let turbocharger = std::sync::Arc::new(turbocharger);
 
     // Start background session refresh task
@@ -389,7 +431,8 @@ mod logging_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_task_exit, panic_payload_to_string, ErrorReporter};
+    use super::{handle_task_exit, panic_payload_to_string, Args, Command, ErrorReporter};
+    use clap::Parser;
     use std::any::Any;
 
     #[test]
@@ -423,5 +466,23 @@ mod tests {
 
         let task_name = handle_task_exit("turbocharger", join_result, &reporter);
         assert_eq!(task_name, "turbocharger");
+    }
+
+    #[test]
+    fn schema_maintenance_subcommand_parses_without_serve_arguments() {
+        let args = Args::try_parse_from([
+            "jetstream-turbo",
+            "schema-maintenance",
+            "--busy-timeout-secs",
+            "7",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            args.command,
+            Some(Command::SchemaMaintenance {
+                busy_timeout_secs: Some(7)
+            })
+        );
     }
 }

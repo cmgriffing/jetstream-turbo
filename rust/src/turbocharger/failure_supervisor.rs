@@ -304,6 +304,7 @@ fn error_category(error: &TurboError) -> &'static str {
         TurboError::BlueskyUpstream(_) => "bluesky_upstream",
         TurboError::Configuration(_) | TurboError::MissingEnvVar(_) => "configuration",
         TurboError::Database(_) => "database",
+        TurboError::SchemaMaintenanceRequired { .. } => "schema_maintenance",
         TurboError::RedisOperation(_) => "publication",
         TurboError::JsonSerialization(_) | TurboError::JsonDeserialization(_) => "serialization",
         TurboError::CacheOperation(_) => "cache",

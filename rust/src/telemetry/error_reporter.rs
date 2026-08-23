@@ -222,6 +222,7 @@ impl ErrorReporter {
             TurboError::Configuration(_) => "Configuration",
             TurboError::MissingEnvVar(_) => "MissingEnvVar",
             TurboError::Database(_) => "Database",
+            TurboError::SchemaMaintenanceRequired { .. } => "SchemaMaintenanceRequired",
             TurboError::RedisOperation(_) => "RedisOperation",
             TurboError::JsonSerialization(_) => "JsonSerialization",
             TurboError::JsonDeserialization(_) => "JsonDeserialization",

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -45,6 +46,7 @@ pub struct Settings {
     pub sqlite_cache_size_kib: u32,
     pub sqlite_mmap_size_mb: u64,
     pub sqlite_journal_size_limit_mb: u64,
+    pub sqlite_schema_maintenance_busy_timeout_secs: u64,
 
     // HTTP Server Configuration
     pub http_port: u16,
@@ -141,6 +143,7 @@ impl Default for Settings {
             sqlite_cache_size_kib: 64 * 1024,
             sqlite_mmap_size_mb: 256,
             sqlite_journal_size_limit_mb: 512,
+            sqlite_schema_maintenance_busy_timeout_secs: 30,
             http_port: 8080,
             channel_capacity: default_channel_capacity(),
             monitor_broadcast_capacity: default_monitor_broadcast_capacity(),
@@ -187,6 +190,23 @@ impl Default for Settings {
 
 impl Settings {
     pub fn from_env() -> Result<Self> {
+        let settings = Self::load_from_env()?;
+        settings.validate()?;
+        Ok(settings)
+    }
+
+    /// Loads only the settings needed for offline SQLite schema maintenance.
+    pub fn from_env_for_schema_maintenance() -> Result<Self> {
+        let settings = Self::load_from_env()?;
+        settings.validate_schema_maintenance()?;
+        Ok(settings)
+    }
+
+    pub fn database_path(&self) -> PathBuf {
+        PathBuf::from(&self.db_dir).join("jetstream.db")
+    }
+
+    fn load_from_env() -> Result<Self> {
         dotenvy::dotenv().ok();
 
         let mut builder = config::Config::builder()
@@ -272,6 +292,9 @@ impl Settings {
         if let Ok(sqlite_journal_size_limit_mb) = std::env::var("SQLITE_JOURNAL_SIZE_LIMIT_MB") {
             builder = builder
                 .set_override("sqlite_journal_size_limit_mb", sqlite_journal_size_limit_mb)?;
+        }
+        if let Ok(value) = std::env::var("SQLITE_SCHEMA_MAINTENANCE_BUSY_TIMEOUT_SECS") {
+            builder = builder.set_override("sqlite_schema_maintenance_busy_timeout_secs", value)?;
         }
 
         // Resource knobs with explicit env names for operability in .env files.
@@ -389,10 +412,26 @@ impl Settings {
         settings.posthog_api_key = normalize_optional_setting(settings.posthog_api_key);
         settings.posthog_host = normalize_optional_setting(settings.posthog_host);
 
-        // Validate required settings
-        settings.validate()?;
-
         Ok(settings)
+    }
+
+    fn validate_schema_maintenance(&self) -> Result<()> {
+        if self.db_dir.trim().is_empty() {
+            anyhow::bail!("db_dir must not be empty");
+        }
+        if self.sqlite_cache_size_kib == 0 {
+            anyhow::bail!("sqlite_cache_size_kib must be greater than 0");
+        }
+        if self.sqlite_mmap_size_mb == 0 {
+            anyhow::bail!("sqlite_mmap_size_mb must be greater than 0");
+        }
+        if self.sqlite_journal_size_limit_mb == 0 {
+            anyhow::bail!("sqlite_journal_size_limit_mb must be greater than 0");
+        }
+        if self.sqlite_schema_maintenance_busy_timeout_secs == 0 {
+            anyhow::bail!("sqlite_schema_maintenance_busy_timeout_secs must be greater than 0");
+        }
+        Ok(())
     }
 
     fn validate(&self) -> Result<()> {
@@ -537,6 +576,10 @@ impl Settings {
 
         if self.sqlite_journal_size_limit_mb == 0 {
             anyhow::bail!("sqlite_journal_size_limit_mb must be greater than 0");
+        }
+
+        if self.sqlite_schema_maintenance_busy_timeout_secs == 0 {
+            anyhow::bail!("sqlite_schema_maintenance_busy_timeout_secs must be greater than 0");
         }
 
         Ok(())

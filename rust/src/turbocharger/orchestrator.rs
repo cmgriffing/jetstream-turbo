@@ -1545,6 +1545,16 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    async fn maintained_sqlite_store(
+        path: &std::path::Path,
+        pragma_config: SQLitePragmaConfig,
+    ) -> SQLiteStore {
+        SQLiteStore::maintain_schema(path, pragma_config, Duration::from_secs(1))
+            .await
+            .unwrap();
+        SQLiteStore::new(path, pragma_config).await.unwrap()
+    }
+
     struct CancellationFlag(Arc<AtomicBool>);
     impl Drop for CancellationFlag {
         fn drop(&mut self) {
@@ -1721,16 +1731,16 @@ mod tests {
         .is_none());
 
         let temp_dir = tempfile::tempdir().unwrap();
-        let sqlite = SQLiteStore::new(
-            temp_dir.path().join("cursorless-checkpoint.db"),
+        let db_path = temp_dir.path().join("cursorless-checkpoint.db");
+        let sqlite = maintained_sqlite_store(
+            &db_path,
             SQLitePragmaConfig {
                 cache_size_kib: 1024,
                 mmap_size_mb: 1,
                 journal_size_limit_mb: 1,
             },
         )
-        .await
-        .unwrap();
+        .await;
         assert_eq!(sqlite.load_ingestion_checkpoint().await.unwrap(), None);
 
         let accepted = ProductionTurboCharger::accept_ingress_event(
@@ -1876,16 +1886,16 @@ mod tests {
         );
 
         let temp_dir = tempfile::tempdir().unwrap();
-        let sqlite = SQLiteStore::new(
-            temp_dir.path().join("optional-hydration-checkpoint.db"),
+        let db_path = temp_dir.path().join("optional-hydration-checkpoint.db");
+        let sqlite = maintained_sqlite_store(
+            &db_path,
             SQLitePragmaConfig {
                 cache_size_kib: 1024,
                 mmap_size_mb: 1,
                 journal_size_limit_mb: 1,
             },
         )
-        .await
-        .unwrap();
+        .await;
         let frontier = Mutex::new(CompletionFrontier::new(None));
         let checkpoint = persist_batch_completion(&frontier, &sqlite, completion)
             .await
@@ -1929,16 +1939,16 @@ mod tests {
     #[tokio::test]
     async fn replayed_failure_increases_delay_and_keeps_checkpoint_blocked() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let store = SQLiteStore::new(
-            temp_dir.path().join("replay-failure.db"),
+        let db_path = temp_dir.path().join("replay-failure.db");
+        let store = maintained_sqlite_store(
+            &db_path,
             SQLitePragmaConfig {
                 cache_size_kib: 1024,
                 mmap_size_mb: 1,
                 journal_size_limit_mb: 1,
             },
         )
-        .await
-        .unwrap();
+        .await;
         let frontier = Mutex::new(CompletionFrontier::new(None));
         let supervisor = FailureSupervisor::new(containment_policy());
 
@@ -1968,16 +1978,16 @@ mod tests {
     #[tokio::test]
     async fn replay_recovery_advances_checkpoint_and_resets_containment() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let store = SQLiteStore::new(
-            temp_dir.path().join("replay-recovery.db"),
+        let db_path = temp_dir.path().join("replay-recovery.db");
+        let store = maintained_sqlite_store(
+            &db_path,
             SQLitePragmaConfig {
                 cache_size_kib: 1024,
                 mmap_size_mb: 1,
                 journal_size_limit_mb: 1,
             },
         )
-        .await
-        .unwrap();
+        .await;
         let frontier = Mutex::new(CompletionFrontier::new(None));
         let supervisor = FailureSupervisor::new(containment_policy());
         let failed_range = test_ingress_range(1, 2);
@@ -2012,7 +2022,7 @@ mod tests {
             mmap_size_mb: 1,
             journal_size_limit_mb: 1,
         };
-        let failed_store = SQLiteStore::new(&db_path, pragma).await.unwrap();
+        let failed_store = maintained_sqlite_store(&db_path, pragma).await;
         failed_store.close().await.unwrap();
         let frontier = Mutex::new(CompletionFrontier::new(None));
 
@@ -2079,16 +2089,16 @@ mod tests {
     #[tokio::test]
     async fn later_batch_does_not_persist_past_unfinished_earlier_batch() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let store = SQLiteStore::new(
-            temp_dir.path().join("checkpoint.db"),
+        let db_path = temp_dir.path().join("checkpoint.db");
+        let store = maintained_sqlite_store(
+            &db_path,
             SQLitePragmaConfig {
                 cache_size_kib: 1024,
                 mmap_size_mb: 1,
                 journal_size_limit_mb: 1,
             },
         )
-        .await
-        .unwrap();
+        .await;
         let frontier = Mutex::new(CompletionFrontier::new(None));
 
         persist_batch_completion(

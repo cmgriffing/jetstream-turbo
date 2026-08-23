@@ -8,7 +8,7 @@ Type=simple
 User=jetstream-turbo
 Group=jetstream-turbo
 WorkingDirectory=/opt/jetstream-turbo
-ExecStart=/opt/jetstream-turbo/jetstream-turbo
+ExecStart=/opt/jetstream-turbo/current/jetstream-turbo
 Restart=always
 RestartSec=10
 
