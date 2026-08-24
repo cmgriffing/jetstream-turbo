@@ -153,9 +153,10 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
         };
 
         // Authenticate directly with Bluesky
-        let auth_client = Arc::new(BlueskyAuthClient::new(
+        let auth_client = Arc::new(BlueskyAuthClient::with_api_url(
             settings.bluesky_handle.clone(),
             settings.bluesky_app_password.clone(),
+            settings.bluesky_api_url.clone(),
         )?);
 
         let auth_response = auth_client.authenticate().await?;

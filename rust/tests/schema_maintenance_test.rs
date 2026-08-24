@@ -5,7 +5,11 @@ use jetstream_turbo_rs::storage::{
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
+use std::process::Stdio;
 use std::time::{Duration, Instant};
+use tokio::process::Command;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const LARGE_FIXTURE_ROWS: usize = 100_000;
 const VERIFICATION_BUDGET: Duration = Duration::from_secs(1);
@@ -143,7 +147,7 @@ async fn large_unmaintained_database_fails_promptly_without_creating_indexes() {
 }
 
 #[tokio::test]
-async fn maintained_large_database_reaches_listener_step_within_startup_budget() {
+async fn maintained_large_database_opens_store_within_startup_budget() {
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("large-maintained.db");
     let pool = create_large_unmaintained_fixture(&db_path).await;
@@ -168,6 +172,83 @@ async fn maintained_large_database_reaches_listener_step_within_startup_budget()
     assert!(startup_elapsed < STARTUP_BUDGET);
     drop(listener);
     store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn production_binary_passes_readiness_before_scheduled_cleanup() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("jetstream.db");
+    let pool = create_large_unmaintained_fixture(&db_path).await;
+    pool.close().await;
+    SQLiteStore::maintain_schema(&db_path, test_pragma_config(), Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    let auth_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/com.atproto.server.createSession"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "accessJwt": "test-access-token",
+            "refreshJwt": "test-refresh-token",
+            "handle": "test.bsky.social",
+            "did": "did:plc:test"
+        })))
+        .mount(&auth_server)
+        .await;
+
+    let port_probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_port = port_probe.local_addr().unwrap().port();
+    drop(port_probe);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_jetstream-turbo"))
+        .current_dir(temp_dir.path())
+        .env("BLUESKY_HANDLE", "test.bsky.social")
+        .env("BLUESKY_APP_PASSWORD", "test-password")
+        .env("STREAM_NAME", "test-stream")
+        .env("JETSTREAM_HOSTS", r#"["ws://127.0.0.1:9"]"#)
+        .env("MAX_DB_SIZE_MB", "1")
+        .env("CLEANUP_CHUNK_SIZE", "1")
+        .env("CLEANUP_CHUNK_DELAY_MS", "1000")
+        .env("CLEANUP_CHECK_INTERVAL_MINUTES", "60")
+        .env("TURBO__BLUESKY_API_URL", auth_server.uri())
+        .env("TURBO__DB_DIR", temp_dir.path())
+        .env("TURBO__HTTP_PORT", http_port.to_string())
+        .env("RUST_LOG", "warn")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(100))
+        .build()
+        .unwrap();
+    let deadline = Instant::now() + STARTUP_BUDGET;
+    let mut listener_available = false;
+    while Instant::now() < deadline {
+        if client
+            .get(format!("http://127.0.0.1:{http_port}/ready"))
+            .send()
+            .await
+            .is_ok_and(|response| response.status().is_success())
+        {
+            listener_available = true;
+            break;
+        }
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let _ = child.start_kill();
+    let output = child.wait_with_output().await.unwrap();
+    assert!(
+        listener_available,
+        "production binary did not become ready within {STARTUP_BUDGET:?}; status={:?}; stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[tokio::test]

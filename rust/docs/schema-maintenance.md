@@ -4,7 +4,7 @@ Jetstream Turbo keeps table-wide SQLite work out of normal service startup. Requ
 
 ## Startup work inventory
 
-Before this change, `SQLiteStore::new` performed all of the following synchronously before the HTTP listener could bind:
+Before this change, service startup performed all of the following synchronously before the HTTP listener could bind:
 
 | Operation | Classification | Current execution mode |
 | --- | --- | --- |
@@ -14,6 +14,7 @@ Before this change, `SQLiteStore::new` performed all of the following synchronou
 | Add `source_event_id` when absent | Additive metadata-only compatibility change | Serve and maintenance |
 | Add `hydration_quality` when absent | Additive metadata-only compatibility change | Serve and maintenance |
 | Normalize every invalid `hydration_quality` value | Table-wide data maintenance | Retired; unknown stored values are interpreted as `unknown` without rewriting records |
+| Check database size and delete old records while over budget | Potentially table-wide data maintenance | Scheduled cleanup task after the configured startup delay |
 | Create `idx_records_at_uri` | Table-wide index build | Maintenance only |
 | Create `idx_records_did` | Table-wide index build | Maintenance only |
 | Create `idx_records_time_us` | Table-wide index build | Maintenance only |
@@ -21,7 +22,7 @@ Before this change, `SQLiteStore::new` performed all of the following synchronou
 | Create `idx_records_hydration_quality` | Table-wide index build | Maintenance only |
 | Create unique partial `idx_records_source_event_id` | Table-wide index build | Maintenance only |
 
-Serve mode now performs a read-only `sqlite_schema` inspection after bounded compatibility setup. Missing or incompatible indexes cause an actionable `SchemaMaintenanceRequired` error before authentication, ingestion, cleanup, or HTTP serving begins. Verification and creation share the declarative `REQUIRED_INDEXES` manifest.
+Serve mode now performs a read-only `sqlite_schema` inspection after bounded compatibility setup. Missing or incompatible indexes cause an actionable `SchemaMaintenanceRequired` error before authentication, ingestion, cleanup, or HTTP serving begins. Verification and creation share the declarative `REQUIRED_INDEXES` manifest. Size-based record cleanup is never awaited before listener startup; the existing scheduled cleanup task performs it after `CLEANUP_CHECK_INTERVAL_MINUTES`.
 
 ## Run maintenance
 
@@ -56,7 +57,7 @@ The Turbo deployment workflow uses these gates:
 3. Abort without activation or restart if maintenance fails.
 4. Record the active release in `/opt/jetstream-turbo/previous`, point `current` at the candidate, and restart systemd.
 5. Poll `http://127.0.0.1:8080/ready` for at most 30 attempts at two-second intervals.
-6. On timeout or connection refusal, emit `systemctl status` and the latest 100 journal entries, restore `current` to the prior release, restart it, and fail the workflow even if rollback succeeds.
+6. On timeout or connection refusal, emit `systemctl status` and up to 100 journal entries from the current activation window, restore `current` to the prior release, restart it, and fail the workflow even if rollback succeeds.
 
 Systemd executes `/opt/jetstream-turbo/current/jetstream-turbo`. A process being `active` is not sufficient for deployment success; the localhost readiness endpoint must respond successfully within the deadline. File logs are written beneath `/opt/jetstream-turbo/logs`, outside immutable versioned release directories; if a file appender cannot be opened, the process continues with journal/stdout logging.
 

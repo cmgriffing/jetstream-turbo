@@ -68,7 +68,7 @@ fi
 [[ $(readlink "$deploy_path/current") == "$deploy_path/releases/old" ]]
 [[ $(grep -c '^restart jetstream-turbo$' "$fixture/systemctl.log") -eq 2 ]]
 grep -q '^status jetstream-turbo --no-pager$' "$fixture/systemctl.log"
-grep -q '^-u jetstream-turbo --no-pager -n 100$' "$fixture/journal.log"
+grep -Eq '^-u jetstream-turbo --since [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z --no-pager -n 100$' "$fixture/journal.log"
 
 rm "$fixture/readiness-fails"
 rm "$deploy_path/current"

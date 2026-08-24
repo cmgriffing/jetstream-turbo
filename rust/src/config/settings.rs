@@ -8,6 +8,7 @@ pub struct Settings {
     // Bluesky Authentication
     pub bluesky_handle: String,
     pub bluesky_app_password: String,
+    pub bluesky_api_url: String,
 
     // General Configuration
     pub stream_name: String,
@@ -117,6 +118,7 @@ impl Default for Settings {
         Self {
             bluesky_handle: String::new(),
             bluesky_app_password: String::new(),
+            bluesky_api_url: "https://bsky.social/xrpc".to_string(),
             stream_name: String::new(),
             jetstream_hosts: default_jetstream_hosts(),
             wanted_collections: default_wanted_collections(),
@@ -224,6 +226,10 @@ impl Settings {
 
         if let Ok(password) = std::env::var("BLUESKY_APP_PASSWORD") {
             builder = builder.set_override("bluesky_app_password", password)?;
+        }
+
+        if let Ok(api_url) = std::env::var("BLUESKY_API_URL") {
+            builder = builder.set_override("bluesky_api_url", api_url)?;
         }
 
         if let Ok(collections) = std::env::var("WANTED_COLLECTIONS") {
@@ -463,6 +469,10 @@ impl Settings {
                 3. Copy .env.example to .env\n\
                 4. Set BLUESKY_APP_PASSWORD in .env"
             );
+        }
+
+        if self.bluesky_api_url.trim().is_empty() {
+            anyhow::bail!("BLUESKY_API_URL must not be empty");
         }
 
         if self.batch_size == 0 {

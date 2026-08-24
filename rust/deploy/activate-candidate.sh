@@ -13,6 +13,7 @@ journalctl_bin=${JOURNALCTL_BIN:-journalctl}
 curl_bin=${CURL_BIN:-curl}
 chown_bin=${CHOWN_BIN:-chown}
 run_as_service_user=${RUN_AS_SERVICE_USER:-1}
+activation_started_at=""
 
 current_link="$deploy_path/current"
 previous_link="$deploy_path/previous"
@@ -47,7 +48,7 @@ poll_readiness() {
 
 emit_diagnostics() {
     "$systemctl_bin" status "$service_name" --no-pager || true
-    "$journalctl_bin" -u "$service_name" --no-pager -n 100 || true
+    "$journalctl_bin" -u "$service_name" --since "$activation_started_at" --no-pager -n 100 || true
 }
 
 mkdir -p "$deploy_path/releases"
@@ -72,6 +73,7 @@ if [[ -L "$current_link" ]]; then
 fi
 
 ln -sfn "$candidate_release" "$current_link"
+activation_started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 "$systemctl_bin" enable "$service_name"
 "$systemctl_bin" restart "$service_name"
 
