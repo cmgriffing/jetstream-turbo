@@ -9,6 +9,7 @@ use crate::storage::{EventPublisher, RecordStore};
 use futures::Stream;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// Mock implementation of `MessageSource` that yields a fixed set of messages.
@@ -41,7 +42,7 @@ impl MessageSource for MockMessageSource {
 /// Mock implementation of `ProfileFetcher` that returns configurable profiles.
 pub struct MockProfileFetcher {
     /// Profiles to return, keyed by DID.
-    profiles: Mutex<std::collections::HashMap<String, BlueskyProfile>>,
+    profiles: Mutex<std::collections::HashMap<String, Arc<BlueskyProfile>>>,
     pub call_count: AtomicUsize,
     pub requested_dids: Mutex<Vec<Vec<String>>>,
 }
@@ -63,7 +64,7 @@ impl MockProfileFetcher {
 
     pub async fn add_profile(&self, profile: BlueskyProfile) {
         let did = profile.did.to_string();
-        self.profiles.lock().await.insert(did, profile);
+        self.profiles.lock().await.insert(did, Arc::new(profile));
     }
 }
 
@@ -71,7 +72,7 @@ impl ProfileFetcher for MockProfileFetcher {
     async fn bulk_fetch_profiles(
         &self,
         dids: &[String],
-    ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
+    ) -> TurboResult<Vec<Option<Arc<BlueskyProfile>>>> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         self.requested_dids.lock().await.push(dids.to_vec());
         let mut profiles = self.profiles.lock().await;
@@ -85,7 +86,7 @@ impl ProfileFetcher for MockProfileFetcher {
 
 /// Mock implementation of `PostFetcher` that returns configurable posts.
 pub struct MockPostFetcher {
-    posts: Mutex<std::collections::HashMap<String, BlueskyPost>>,
+    posts: Mutex<std::collections::HashMap<String, Arc<BlueskyPost>>>,
     outcomes: Mutex<std::collections::HashMap<String, PostFetchOutcome>>,
     pub call_count: AtomicUsize,
     pub requested_uris: Mutex<Vec<Vec<String>>>,
@@ -109,7 +110,7 @@ impl MockPostFetcher {
 
     pub async fn add_post(&self, post: BlueskyPost) {
         let uri = post.uri.clone();
-        self.posts.lock().await.insert(uri, post);
+        self.posts.lock().await.insert(uri, Arc::new(post));
     }
 
     pub async fn add_outcome(&self, uri: String, outcome: PostFetchOutcome) {

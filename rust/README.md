@@ -599,6 +599,10 @@ Pipeline diagnostics are always present at `/api/v1/health`; that endpoint remai
 | `BLUESKY_ISOLATION_REQUEST_BUDGET` | `8` | Maximum split probes in one recovery cycle. Must be positive. |
 | `BLUESKY_NEGATIVE_POST_CACHE_TTL_MS` | `300000` | Time to suppress retries for a temporarily unavailable referenced post. Must be positive. |
 | `BLUESKY_NEGATIVE_POST_CACHE_CAPACITY` | `20000` | Maximum temporary post failures retained in memory; deterministic LRU eviction bounds outage growth. Must be positive. |
+| `BLUESKY_PROFILE_COORDINATION_KEY_CAPACITY` | `150` | Hard ceiling for active distinct profile identifiers. Must be at least one profile upstream batch. |
+| `BLUESKY_PROFILE_COORDINATION_WAITER_CAPACITY` | `600` | Hard ceiling for active profile waiters. Must serve at least one profile upstream batch. |
+| `BLUESKY_POST_COORDINATION_KEY_CAPACITY` | `150` | Hard ceiling for active distinct post identifiers. Must be at least one post upstream batch. |
+| `BLUESKY_POST_COORDINATION_WAITER_CAPACITY` | `600` | Hard ceiling for active post waiters. Must serve at least one post upstream batch. |
 
 Transport errors, HTTP 408/429/5xx, and bounded authentication recovery share one request attempt counter. A request can therefore issue at most `BLUESKY_MAX_RETRIES + 1` HTTP calls. Permanent non-authentication 4xx responses and malformed successful bodies fail immediately. Valid `Retry-After` HTTP-date values are intentionally unsupported; only delta-seconds are accepted.
 

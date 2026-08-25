@@ -53,10 +53,9 @@ where
             .await?;
 
         if let Some(profile) = profiles.into_iter().next().flatten() {
-            let profile_arc = Arc::new(profile);
             self.cache
-                .set_user_profile(did.to_string(), Arc::clone(&profile_arc));
-            Ok(Some(profile_arc))
+                .set_user_profile(did.to_string(), Arc::clone(&profile));
+            Ok(Some(profile))
         } else {
             Ok(None)
         }
@@ -65,7 +64,7 @@ where
     /// Ensure a single post is in cache.
     pub async fn resolve_post(&self, uri: &str) -> TurboResult<PostFetchOutcome> {
         if let Some(post) = self.cache.get_post(uri) {
-            return Ok(PostFetchOutcome::Found((*post).clone()));
+            return Ok(PostFetchOutcome::Found(post));
         }
         if let Some(failure) = self.cache.get_unavailable_post(uri) {
             return Ok(PostFetchOutcome::TemporarilyUnavailable(failure));
@@ -85,7 +84,7 @@ where
         let outcome = posts.into_iter().next().expect("length checked");
         match &outcome {
             PostFetchOutcome::Found(post) => {
-                self.cache.set_post(uri.to_string(), Arc::new(post.clone()));
+                self.cache.set_post(uri.to_string(), Arc::clone(post));
             }
             PostFetchOutcome::Missing => {
                 self.cache.complete_post_resolution(uri, "missing");
@@ -129,10 +128,9 @@ where
         let mut resolved = 0;
         for ((did, index), fetched) in uncached.iter().zip(uncached_indexes).zip(fetched) {
             if let Some(profile) = fetched {
-                let profile_arc = Arc::new(profile);
                 self.cache
-                    .set_user_profile(did.clone(), Arc::clone(&profile_arc));
-                profiles[index] = Some(profile_arc);
+                    .set_user_profile(did.clone(), Arc::clone(&profile));
+                profiles[index] = Some(profile);
                 resolved += 1;
             }
         }
@@ -155,7 +153,7 @@ where
         let mut uncached_indexes = Vec::new();
         for (index, uri) in uris.iter().enumerate() {
             if let Some(post) = self.cache.get_post(uri.as_ref()) {
-                outcomes[index] = Some(PostFetchOutcome::Found((*post).clone()));
+                outcomes[index] = Some(PostFetchOutcome::Found(post));
             } else if let Some(failure) = self.cache.get_unavailable_post(uri.as_ref()) {
                 outcomes[index] = Some(PostFetchOutcome::TemporarilyUnavailable(failure));
             } else {
@@ -181,7 +179,7 @@ where
             self.cache.record_post_outcome(&outcome);
             match &outcome {
                 PostFetchOutcome::Found(post) => {
-                    self.cache.set_post(uri.clone(), Arc::new(post.clone()));
+                    self.cache.set_post(uri.clone(), Arc::clone(post));
                     metrics::counter!("optional_hydration_post_outcomes_total", "outcome" => "found")
                         .increment(1);
                 }

@@ -1,3 +1,4 @@
+use crate::client::coordination::{BoundedCoordinator, CoordinationLimits, CoordinationSnapshot};
 use crate::client::resilience::{
     bounded_exponential_jitter, retry_after_delta, sanitize_diagnostic_summary,
     stable_identifier_fingerprint, transient_category, BlueskyOperation, ContainmentPolicy,
@@ -11,19 +12,19 @@ use crate::models::{
 use crate::utils::serde_utils::string_utils::is_valid_at_uri;
 use governor::{Quota, RateLimiter};
 use reqwest::{Client, StatusCode};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tracing::{error, info, instrument, warn};
 
 pub trait ProfileFetcher {
     fn bulk_fetch_profiles(
         &self,
         dids: &[String],
-    ) -> impl std::future::Future<Output = TurboResult<Vec<Option<BlueskyProfile>>>> + Send;
+    ) -> impl std::future::Future<Output = TurboResult<Vec<Option<Arc<BlueskyProfile>>>>> + Send;
 }
 
 pub trait PostFetcher {
@@ -34,14 +35,18 @@ pub trait PostFetcher {
 }
 
 #[derive(Debug, Clone)]
-#[allow(clippy::large_enum_variant)]
 pub enum PostFetchOutcome {
-    Found(BlueskyPost),
+    Found(Arc<BlueskyPost>),
     Missing,
     TemporarilyUnavailable(crate::client::HydrationFailure),
 }
 
 const REQUESTS_PER_SECOND_MS: u64 = 1000 / 10;
+
+pub const DEFAULT_PROFILE_COORDINATION_KEY_CAPACITY: usize = 150;
+pub const DEFAULT_PROFILE_COORDINATION_WAITER_CAPACITY: usize = 600;
+pub const DEFAULT_POST_COORDINATION_KEY_CAPACITY: usize = 150;
+pub const DEFAULT_POST_COORDINATION_WAITER_CAPACITY: usize = 600;
 
 pub struct BlueskyClient {
     session_strings: Arc<RwLock<Vec<String>>>,
@@ -77,6 +82,55 @@ struct BatchCollectorDeps {
     auth_client: Option<Arc<BlueskyAuthClient>>,
     refresh_jwt: Arc<RwLock<Option<String>>>,
     expires_at: Arc<RwLock<Option<String>>>,
+}
+
+#[derive(Debug, Clone)]
+enum SharedFetchError {
+    Upstream(UpstreamHttpError),
+    RateLimited,
+    InvalidApiResponse(String),
+    PermissionDenied(String),
+    ExpiredToken(String),
+    Internal(String),
+}
+
+impl SharedFetchError {
+    fn from_error(error: &TurboError) -> Self {
+        match error {
+            TurboError::BlueskyUpstream(error) => Self::Upstream(error.clone()),
+            TurboError::RateLimitExceeded => Self::RateLimited,
+            TurboError::InvalidApiResponse(message) => Self::InvalidApiResponse(message.clone()),
+            TurboError::PermissionDenied(message) => Self::PermissionDenied(message.clone()),
+            TurboError::ExpiredToken(message) => Self::ExpiredToken(message.clone()),
+            error => Self::Internal(error.to_string()),
+        }
+    }
+
+    fn into_error(self) -> TurboError {
+        match self {
+            Self::Upstream(error) => error.into(),
+            Self::RateLimited => TurboError::RateLimitExceeded,
+            Self::InvalidApiResponse(message) => TurboError::InvalidApiResponse(message),
+            Self::PermissionDenied(message) => TurboError::PermissionDenied(message),
+            Self::ExpiredToken(message) => TurboError::ExpiredToken(message),
+            Self::Internal(message) => TurboError::Internal(message),
+        }
+    }
+
+    fn claimant_cancelled(operation: BlueskyOperation) -> Self {
+        Self::Upstream(UpstreamHttpError {
+            operation,
+            status: None,
+            category: UpstreamFailureCategory::Transport,
+            diagnostic_summary: Some("coordination claimant cancelled".to_string()),
+            attempts: 0,
+            retry_limit: 0,
+            request_cardinality: 0,
+            transient: true,
+            request_fingerprint: "claimant-cancelled".to_string(),
+            isolation: None,
+        })
+    }
 }
 
 /// Monotonic fetch-path counters for one collector kind. Rates (requests/sec,
@@ -146,31 +200,28 @@ pub struct BlueskyFetchDiagnostics {
     pub posts: BlueskyFetchKindDiagnostics,
 }
 
-/// Shared collector state guarded by a short lock. The lock is held only for
-/// queue/claim and cache sections; network I/O happens outside it so
-/// concurrent pipeline calls fetch in parallel instead of serializing behind
-/// a single global write lock.
-struct ProfileCollectorState {
-    pending: Vec<String>,
-    last_flush: Instant,
-    isolation_cache: HashMap<String, Option<BlueskyProfile>>,
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct BlueskyCoordinationDiagnostics {
+    pub profiles: CoordinationSnapshot,
+    pub posts: CoordinationSnapshot,
 }
 
-impl ProfileCollectorState {
-    /// Claim one request worth of identifiers: a full batch if one is
-    /// available, otherwise a partial flush once the wait window has elapsed
-    /// since the previous claim.
-    fn claim_next(&mut self, batch_size: usize, wait_ms: u64) -> Vec<String> {
-        if self.pending.len() >= batch_size {
-            self.last_flush = Instant::now();
-            return self.pending.drain(..batch_size).collect();
-        }
-        if !self.pending.is_empty() && self.last_flush.elapsed() >= Duration::from_millis(wait_ms) {
-            self.last_flush = Instant::now();
-            return std::mem::take(&mut self.pending);
-        }
-        Vec::new()
-    }
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default)]
+struct CollectorOwnershipSnapshot {
+    pending_keys: usize,
+    in_flight_keys: usize,
+    waiters: usize,
+    retained_identifier_bytes: usize,
+    completed_result_owners: usize,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default)]
+struct BlueskyCollectorOwnershipSnapshot {
+    profiles: CollectorOwnershipSnapshot,
+    posts: CollectorOwnershipSnapshot,
 }
 
 struct ProfileBatchCollector {
@@ -191,38 +242,11 @@ struct ProfileBatchCollector {
     auth_client: Option<Arc<BlueskyAuthClient>>,
     refresh_jwt: Arc<RwLock<Option<String>>>,
     expires_at: Arc<RwLock<Option<String>>>,
-    state: Mutex<ProfileCollectorState>,
+    coordination: Arc<BoundedCoordinator<Option<Arc<BlueskyProfile>>, SharedFetchError>>,
     batches_total: AtomicU64,
     batches_partial: AtomicU64,
     fetch: FetchDiagnostics,
 }
-
-/// Shared post collector state guarded by a short lock; see ProfileCollectorState.
-struct PostCollectorState {
-    pending: Vec<String>,
-    last_flush: Instant,
-    isolation_cache: HashMap<String, Option<BlueskyPost>>,
-}
-
-impl PostCollectorState {
-    fn claim_next(&mut self, batch_size: usize, wait_ms: u64) -> Vec<String> {
-        if self.pending.len() >= batch_size {
-            self.last_flush = Instant::now();
-            return self.pending.drain(..batch_size).collect();
-        }
-        if !self.pending.is_empty() && self.last_flush.elapsed() >= Duration::from_millis(wait_ms) {
-            self.last_flush = Instant::now();
-            return std::mem::take(&mut self.pending);
-        }
-        Vec::new()
-    }
-}
-
-/// Upper bound on how long a caller waits for the shared fetch queue to
-/// resolve its identifiers before failing. Guards against stranded ids when a
-/// concurrent caller fails on a duplicate submission and the ids are not
-/// requeued; the supervisor retries the batch instead of waiting forever.
-const MAX_CLAIM_WAIT: Duration = Duration::from_secs(30);
 
 struct PostBatchCollector {
     config: BatchConfig,
@@ -242,7 +266,7 @@ struct PostBatchCollector {
     auth_client: Option<Arc<BlueskyAuthClient>>,
     refresh_jwt: Arc<RwLock<Option<String>>>,
     expires_at: Arc<RwLock<Option<String>>>,
-    state: Mutex<PostCollectorState>,
+    coordination: Arc<BoundedCoordinator<Option<Arc<BlueskyPost>>, SharedFetchError>>,
     batches_total: AtomicU64,
     batches_partial: AtomicU64,
     fetch: FetchDiagnostics,
@@ -417,6 +441,37 @@ impl BlueskyClient {
         retry_policy: RequestRetryPolicy,
         containment_policy: ContainmentPolicy,
     ) -> TurboResult<Self> {
+        Self::new_with_policies_and_coordination(
+            session_strings,
+            auth_client,
+            profile_batch_size,
+            post_batch_size,
+            profile_batch_wait_ms,
+            post_batch_wait_ms,
+            retry_policy,
+            containment_policy,
+            DEFAULT_PROFILE_COORDINATION_KEY_CAPACITY.max(profile_batch_size),
+            DEFAULT_PROFILE_COORDINATION_WAITER_CAPACITY.max(profile_batch_size),
+            DEFAULT_POST_COORDINATION_KEY_CAPACITY.max(post_batch_size),
+            DEFAULT_POST_COORDINATION_WAITER_CAPACITY.max(post_batch_size),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_policies_and_coordination(
+        session_strings: Vec<String>,
+        auth_client: Option<Arc<BlueskyAuthClient>>,
+        profile_batch_size: usize,
+        post_batch_size: usize,
+        profile_batch_wait_ms: u64,
+        post_batch_wait_ms: u64,
+        retry_policy: RequestRetryPolicy,
+        containment_policy: ContainmentPolicy,
+        profile_key_capacity: usize,
+        profile_waiter_capacity: usize,
+        post_key_capacity: usize,
+        post_waiter_capacity: usize,
+    ) -> TurboResult<Self> {
         let quota = Quota::with_period(Duration::from_millis(REQUESTS_PER_SECOND_MS))
             .expect("Valid quota")
             .allow_burst(NonZeroU32::new(1).unwrap());
@@ -457,7 +512,11 @@ impl BlueskyClient {
                 wait_ms: profile_batch_wait_ms,
             },
             collector_deps.clone(),
-        )));
+            CoordinationLimits {
+                key_capacity: profile_key_capacity,
+                waiter_capacity: profile_waiter_capacity,
+            },
+        )?));
 
         let post_batch_collector = Arc::new(RwLock::new(PostBatchCollector::new(
             BatchConfig {
@@ -465,7 +524,11 @@ impl BlueskyClient {
                 wait_ms: post_batch_wait_ms,
             },
             collector_deps,
-        )));
+            CoordinationLimits {
+                key_capacity: post_key_capacity,
+                waiter_capacity: post_waiter_capacity,
+            },
+        )?));
 
         Ok(Self {
             session_strings,
@@ -483,6 +546,24 @@ impl BlueskyClient {
         BlueskyFetchDiagnostics {
             profiles: self.profile_batch_collector.read().await.fetch_snapshot(),
             posts: self.post_batch_collector.read().await.fetch_snapshot(),
+        }
+    }
+
+    /// Point-in-time bounded coordination state with no identifier values.
+    pub async fn coordination_diagnostics(&self) -> BlueskyCoordinationDiagnostics {
+        BlueskyCoordinationDiagnostics {
+            profiles: self
+                .profile_batch_collector
+                .read()
+                .await
+                .coordination
+                .snapshot(),
+            posts: self
+                .post_batch_collector
+                .read()
+                .await
+                .coordination
+                .snapshot(),
         }
     }
 
@@ -585,6 +666,27 @@ impl BlueskyClient {
         self.profile_batch_collector.write().await.api_base_url = api_base_url.clone();
         self.post_batch_collector.write().await.api_base_url = api_base_url;
     }
+
+    #[cfg(test)]
+    async fn collector_ownership_snapshot(&self) -> BlueskyCollectorOwnershipSnapshot {
+        let coordination = self.coordination_diagnostics().await;
+        let profiles = CollectorOwnershipSnapshot {
+            pending_keys: coordination.profiles.pending_keys,
+            in_flight_keys: coordination.profiles.in_flight_keys,
+            waiters: coordination.profiles.waiters,
+            retained_identifier_bytes: coordination.profiles.retained_identifier_bytes,
+            completed_result_owners: coordination.profiles.completed_result_owners,
+        };
+        let posts = CollectorOwnershipSnapshot {
+            pending_keys: coordination.posts.pending_keys,
+            in_flight_keys: coordination.posts.in_flight_keys,
+            waiters: coordination.posts.waiters,
+            retained_identifier_bytes: coordination.posts.retained_identifier_bytes,
+            completed_result_owners: coordination.posts.completed_result_owners,
+        };
+
+        BlueskyCollectorOwnershipSnapshot { profiles, posts }
+    }
 }
 
 impl ProfileFetcher for BlueskyClient {
@@ -592,7 +694,7 @@ impl ProfileFetcher for BlueskyClient {
     async fn bulk_fetch_profiles(
         &self,
         dids: &[String],
-    ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
+    ) -> TurboResult<Vec<Option<Arc<BlueskyProfile>>>> {
         tracing::Span::current().record("count", dids.len());
 
         if dids.is_empty() {
@@ -667,37 +769,19 @@ impl PostFetcher for BlueskyClient {
             .lock_duration_count
             .fetch_add(1, Ordering::Relaxed);
 
-        match fetch_result {
-            Ok(posts) => Ok(posts
-                .into_iter()
-                .map(|post| {
-                    post.map(PostFetchOutcome::Found)
-                        .unwrap_or(PostFetchOutcome::Missing)
-                })
-                .collect()),
-            Err(error) => {
-                let Some(failure) = optional_post_failure(&error, &valid_uris) else {
-                    return Err(error);
-                };
-                let mut outcomes = Vec::with_capacity(valid_uris.len());
-                let state = collector.state.lock().await;
-                for uri in &valid_uris {
-                    let outcome = state
-                        .isolation_cache
-                        .get(uri)
-                        .cloned()
-                        .map(|post| {
-                            post.map(PostFetchOutcome::Found)
-                                .unwrap_or(PostFetchOutcome::Missing)
-                        })
-                        .unwrap_or_else(|| {
-                            PostFetchOutcome::TemporarilyUnavailable(failure.clone())
-                        });
-                    outcomes.push(outcome);
+        fetch_result
+            .into_iter()
+            .map(|result| match result {
+                Ok(Some(post)) => Ok(PostFetchOutcome::Found(post)),
+                Ok(None) => Ok(PostFetchOutcome::Missing),
+                Err(error) => {
+                    let error = error.into_error();
+                    optional_post_failure(&error, &valid_uris)
+                        .map(PostFetchOutcome::TemporarilyUnavailable)
+                        .ok_or(error)
                 }
-                Ok(outcomes)
-            }
-        }
+            })
+            .collect()
     }
 }
 
@@ -787,7 +871,11 @@ fn optional_post_failure(
 }
 
 impl ProfileBatchCollector {
-    fn new(config: BatchConfig, deps: BatchCollectorDeps) -> Self {
+    fn new(
+        config: BatchConfig,
+        deps: BatchCollectorDeps,
+        limits: CoordinationLimits,
+    ) -> TurboResult<Self> {
         let BatchCollectorDeps {
             http_client,
             session_strings,
@@ -800,7 +888,14 @@ impl ProfileBatchCollector {
             refresh_jwt,
             expires_at,
         } = deps;
-        Self {
+        let coordination = BoundedCoordinator::new(
+            limits,
+            config.batch_size,
+            Duration::from_millis(config.wait_ms),
+            SharedFetchError::claimant_cancelled(BlueskyOperation::Profiles),
+        )
+        .map_err(|error| TurboError::Internal(error.to_string()))?;
+        Ok(Self {
             config,
             http_client,
             session_strings,
@@ -812,15 +907,11 @@ impl ProfileBatchCollector {
             auth_client,
             refresh_jwt,
             expires_at,
-            state: Mutex::new(ProfileCollectorState {
-                pending: Vec::new(),
-                last_flush: Instant::now(),
-                isolation_cache: HashMap::new(),
-            }),
+            coordination,
             batches_total: AtomicU64::new(0),
             batches_partial: AtomicU64::new(0),
             fetch: FetchDiagnostics::default(),
-        }
+        })
     }
 
     async fn get_session_string(&self) -> TurboResult<String> {
@@ -890,7 +981,7 @@ impl ProfileBatchCollector {
     async fn fetch_batch_with_retry(
         &self,
         dids: &[String],
-    ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
+    ) -> TurboResult<Vec<Option<Arc<BlueskyProfile>>>> {
         let start = Instant::now();
         let result = self.fetch_batch_with_retry_inner(dids).await;
         let elapsed_ns = start.elapsed().as_nanos() as u64;
@@ -920,7 +1011,7 @@ impl ProfileBatchCollector {
     async fn fetch_batch_with_retry_inner(
         &self,
         dids: &[String],
-    ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
+    ) -> TurboResult<Vec<Option<Arc<BlueskyProfile>>>> {
         let url = format!("{}/app.bsky.actor.getProfiles", self.api_base_url);
         let mut session_string = self.get_session_string().await?;
         let mut attempts = 0u32;
@@ -956,7 +1047,7 @@ impl ProfileBatchCollector {
                         let mut result = vec![None; dids.len()];
                         for (i, profile) in profiles_response.profiles.into_iter().enumerate() {
                             if i < result.len() {
-                                result[i] = Some(profile.into());
+                                result[i] = Some(Arc::new(profile.into()));
                             }
                         }
                         return Ok(result);
@@ -1096,56 +1187,27 @@ impl ProfileBatchCollector {
         }
     }
 
-    async fn fetch_batch(&self, dids: &[String]) -> TurboResult<Vec<Option<BlueskyProfile>>> {
+    async fn fetch_claim(
+        &self,
+        dids: &[String],
+    ) -> Vec<Result<Option<Arc<BlueskyProfile>>, SharedFetchError>> {
         self.fetch
             .items_total
             .fetch_add(dids.len() as u64, Ordering::Relaxed);
-        // Resolve cache hits under a short lock; the fetch runs unlocked so
-        // concurrent callers overlap their network I/O.
-        let (unresolved, hits): (Vec<String>, HashMap<String, Option<BlueskyProfile>>) = {
-            let state = self.state.lock().await;
-            let mut unresolved = Vec::new();
-            let mut hits = HashMap::new();
-            for did in dids {
-                if let Some(profile) = state.isolation_cache.get(did) {
-                    hits.insert(did.clone(), profile.clone());
-                } else {
-                    unresolved.push(did.clone());
-                }
-            }
-            (unresolved, hits)
-        };
-        if unresolved.is_empty() {
-            return Ok(dids
-                .iter()
-                .map(|did| hits.get(did).cloned().unwrap_or(None))
-                .collect());
-        }
-
-        match self.fetch_batch_with_retry(&unresolved).await {
-            Ok(fetched) => {
-                let by_identifier = unresolved
-                    .into_iter()
-                    .zip(fetched)
-                    .collect::<HashMap<_, _>>();
-                Ok(dids
-                    .iter()
-                    .map(|did| {
-                        hits.get(did)
-                            .cloned()
-                            .unwrap_or_else(|| by_identifier.get(did).cloned().unwrap_or(None))
-                    })
-                    .collect())
-            }
+        match self.fetch_batch_with_retry(dids).await {
+            Ok(fetched) => fetched.into_iter().map(Ok).collect(),
             Err(error)
                 if transient_upstream_category(&error).is_some()
-                    && unresolved.len() > 1
+                    && dids.len() > 1
                     && self.isolation_recurrence.load(Ordering::Acquire)
                         >= self.containment_policy.persistence_threshold =>
             {
-                self.isolate_profiles(unresolved, error).await
+                self.isolate_profiles(dids.to_vec(), error).await
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                let error = SharedFetchError::from_error(&error);
+                vec![Err(error); dids.len()]
+            }
         }
     }
 
@@ -1153,7 +1215,7 @@ impl ProfileBatchCollector {
         &self,
         mut identifiers: Vec<String>,
         root_error: TurboError,
-    ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
+    ) -> Vec<Result<Option<Arc<BlueskyProfile>>, SharedFetchError>> {
         let requested = identifiers.clone();
         identifiers.sort_unstable();
         let mut remaining_budget = self.containment_policy.isolation_request_budget;
@@ -1165,6 +1227,7 @@ impl ProfileBatchCollector {
         let mut failures = VecDeque::new();
         let mut first_categories = Vec::new();
         let mut last_error = root_error;
+        let mut resolved = HashMap::new();
 
         info!(
             operation = BlueskyOperation::Profiles.as_str(),
@@ -1175,21 +1238,29 @@ impl ProfileBatchCollector {
 
         for half in first_halves {
             if remaining_budget == 0 {
-                return Err(with_isolation_outcome(
+                let error = with_isolation_outcome(
                     last_error,
                     crate::client::IsolationOutcome::BudgetExhausted,
-                ));
+                );
+                let error = SharedFetchError::from_error(&error);
+                return requested
+                    .into_iter()
+                    .map(|identifier| {
+                        resolved
+                            .remove(&identifier)
+                            .unwrap_or_else(|| Err(error.clone()))
+                    })
+                    .collect();
             }
             remaining_budget -= 1;
             match self.fetch_batch_with_retry(&half).await {
                 Ok(results) => {
-                    let mut state = self.state.lock().await;
-                    state.isolation_cache.extend(half.into_iter().zip(results));
+                    resolved.extend(half.into_iter().zip(results.into_iter().map(Ok)));
                 }
                 Err(error) => {
                     first_categories.push(transient_upstream_category(&error));
-                    last_error = error;
-                    failures.push_back(half);
+                    last_error = SharedFetchError::from_error(&error).into_error();
+                    failures.push_back((half, error));
                 }
             }
         }
@@ -1198,155 +1269,130 @@ impl ProfileBatchCollector {
             && first_categories[0].is_some()
             && first_categories[0] == first_categories[1]
         {
-            return Err(with_isolation_outcome(
+            let error = with_isolation_outcome(
                 last_error,
                 crate::client::IsolationOutcome::BroadOutage {
                     category: first_categories[0].expect("category checked"),
                 },
-            ));
+            );
+            let error = SharedFetchError::from_error(&error);
+            return requested
+                .into_iter()
+                .map(|identifier| {
+                    resolved
+                        .remove(&identifier)
+                        .unwrap_or_else(|| Err(error.clone()))
+                })
+                .collect();
         }
 
-        while let Some(failing) = failures.pop_front() {
+        while let Some((failing, failure_error)) = failures.pop_front() {
             if failing.len() == 1 {
-                return Err(with_isolation_outcome(
-                    last_error,
+                let error = with_isolation_outcome(
+                    failure_error,
                     crate::client::IsolationOutcome::SingletonPoison {
                         request_fingerprint: stable_identifier_fingerprint(&failing),
                     },
-                ));
+                );
+                resolved.insert(
+                    failing[0].clone(),
+                    Err(SharedFetchError::from_error(&error)),
+                );
+                continue;
             }
             let midpoint = failing.len() / 2;
             for subset in [failing[..midpoint].to_vec(), failing[midpoint..].to_vec()] {
                 if remaining_budget == 0 {
-                    return Err(with_isolation_outcome(
+                    let error = with_isolation_outcome(
                         last_error,
                         crate::client::IsolationOutcome::BudgetExhausted,
-                    ));
+                    );
+                    let error = SharedFetchError::from_error(&error);
+                    return requested
+                        .into_iter()
+                        .map(|identifier| {
+                            resolved
+                                .remove(&identifier)
+                                .unwrap_or_else(|| Err(error.clone()))
+                        })
+                        .collect();
                 }
                 remaining_budget -= 1;
                 match self.fetch_batch_with_retry(&subset).await {
                     Ok(results) => {
-                        let mut state = self.state.lock().await;
-                        state
-                            .isolation_cache
-                            .extend(subset.into_iter().zip(results));
+                        resolved.extend(subset.into_iter().zip(results.into_iter().map(Ok)));
                     }
                     Err(error) => {
-                        last_error = error;
-                        failures.push_back(subset);
+                        last_error = SharedFetchError::from_error(&error).into_error();
+                        failures.push_back((subset, error));
                     }
                 }
             }
         }
 
-        let state = self.state.lock().await;
-        Ok(requested
-            .iter()
-            .map(|did| state.isolation_cache.get(did).cloned().unwrap_or(None))
-            .collect())
+        let fallback = SharedFetchError::from_error(&last_error);
+        requested
+            .into_iter()
+            .map(|identifier| {
+                resolved
+                    .remove(&identifier)
+                    .unwrap_or_else(|| Err(fallback.clone()))
+            })
+            .collect()
     }
 
     pub async fn add_and_fetch(
         &self,
         dids: Vec<String>,
-    ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
-        // Enqueue our identifiers once; any concurrent caller may claim and
-        // resolve them, so delivery happens through the shared cache. Skip ids
-        // already queued or resolved: a failed claim's ids are requeued and a
-        // retry re-submits the same set.
-        {
-            let mut state = self.state.lock().await;
-            for did in &dids {
-                if !state.pending.contains(did) && !state.isolation_cache.contains_key(did) {
-                    state.pending.push(did.clone());
-                }
+    ) -> TurboResult<Vec<Option<Arc<BlueskyProfile>>>> {
+        let mut profiles = Vec::with_capacity(dids.len());
+        for chunk in dids.chunks(self.config.batch_size) {
+            let registrations = self
+                .coordination
+                .register(chunk)
+                .await
+                .map_err(|error| TurboError::Internal(error.to_string()))?;
+
+            while self.coordination.snapshot().pending_keys > 0 {
+                let Some(claim) = self.coordination.claim() else {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    continue;
+                };
+                let identifiers = claim
+                    .identifiers()
+                    .iter()
+                    .map(|identifier| identifier.to_string())
+                    .collect::<Vec<_>>();
+                self.record_claim(&identifiers, "Profile");
+                let outcomes = self.fetch_claim(&identifiers).await;
+                claim.finalize(outcomes);
+            }
+
+            for registration in registrations {
+                profiles.push(
+                    registration
+                        .receive()
+                        .await
+                        .map_err(SharedFetchError::into_error)?,
+                );
             }
         }
-        let mut remaining: HashSet<String> = dids.iter().cloned().collect();
-        let started = Instant::now();
+        Ok(profiles)
+    }
 
-        while !remaining.is_empty() {
-            let claim: Vec<String> = {
-                let mut state = self.state.lock().await;
-                state.claim_next(self.config.batch_size, self.config.wait_ms)
-            };
-
-            if claim.is_empty() {
-                // Nothing fetchable yet: the queue is still filling or the
-                // partial-flush window has not elapsed. Another caller may
-                // have resolved some of our ids meanwhile; re-check the
-                // shared cache, then yield briefly.
-                {
-                    let state = self.state.lock().await;
-                    remaining.retain(|id| !state.isolation_cache.contains_key(id));
-                }
-                if remaining.is_empty() {
-                    break;
-                }
-                if started.elapsed() >= MAX_CLAIM_WAIT {
-                    // Another caller failed on ids we also submitted and they
-                    // were not requeued; fail so the supervisor retries the
-                    // batch instead of waiting forever.
-                    return Err(TurboError::Internal(
-                        "fetch resolution timed out waiting for the shared queue".to_string(),
-                    ));
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                continue;
-            }
-
-            // Request accounting.
-            self.batches_total.fetch_add(1, Ordering::Relaxed);
-            let batch_len = claim.len();
-            if batch_len < self.config.batch_size {
-                self.batches_partial.fetch_add(1, Ordering::Relaxed);
-            }
-            let pct = (batch_len as f64 / self.config.batch_size as f64) * 100.0;
-            info!(
-                "Profile batch capacity: {}/{} ({:.0}%)",
-                batch_len, self.config.batch_size, pct
-            );
-
-            // Network I/O happens without holding the collector lock so
-            // concurrent pipeline calls overlap their fetches.
-            let batch_results = match self.fetch_batch(&claim).await {
-                Ok(results) => results,
-                Err(error) => {
-                    // Requeue only identifiers we did not submit ourselves:
-                    // another caller is still waiting on those. Our own ids
-                    // are left for the supervisor's batch retry (matching the
-                    // pre-concurrency behavior), which prevents a tight
-                    // re-fetch loop on persistently failing ids.
-                    let mut state = self.state.lock().await;
-                    for id in claim {
-                        if !dids.contains(&id)
-                            && !state.isolation_cache.contains_key(&id)
-                            && !state.pending.contains(&id)
-                        {
-                            state.pending.push(id);
-                        }
-                    }
-                    return Err(error);
-                }
-            };
-
-            // Merge into the shared cache so every caller resolves the ids it
-            // submitted.
-            {
-                let mut state = self.state.lock().await;
-                for (id, profile) in claim.into_iter().zip(batch_results) {
-                    state.isolation_cache.insert(id.clone(), profile.clone());
-                    remaining.remove(&id);
-                }
-            }
+    fn record_claim(&self, identifiers: &[String], kind: &'static str) {
+        self.batches_total.fetch_add(1, Ordering::Relaxed);
+        if identifiers.len() < self.config.batch_size {
+            self.batches_partial.fetch_add(1, Ordering::Relaxed);
         }
-
-        // Deliver results in the caller's original order from the shared cache.
-        let state = self.state.lock().await;
-        Ok(dids
-            .into_iter()
-            .map(|did| state.isolation_cache.get(&did).cloned().unwrap_or(None))
-            .collect())
+        let pct = (identifiers.len() as f64 / self.config.batch_size as f64) * 100.0;
+        info!(
+            "{} batch capacity: {}/{} ({:.0}%)",
+            kind,
+            identifiers.len(),
+            self.config.batch_size,
+            pct
+        );
     }
 
     pub fn log_partial_percentage(&self) {
@@ -1377,7 +1423,11 @@ impl ProfileBatchCollector {
 }
 
 impl PostBatchCollector {
-    fn new(config: BatchConfig, deps: BatchCollectorDeps) -> Self {
+    fn new(
+        config: BatchConfig,
+        deps: BatchCollectorDeps,
+        limits: CoordinationLimits,
+    ) -> TurboResult<Self> {
         let BatchCollectorDeps {
             http_client,
             session_strings,
@@ -1390,7 +1440,14 @@ impl PostBatchCollector {
             refresh_jwt,
             expires_at,
         } = deps;
-        Self {
+        let coordination = BoundedCoordinator::new(
+            limits,
+            config.batch_size,
+            Duration::from_millis(config.wait_ms),
+            SharedFetchError::claimant_cancelled(BlueskyOperation::Posts),
+        )
+        .map_err(|error| TurboError::Internal(error.to_string()))?;
+        Ok(Self {
             config,
             http_client,
             session_strings,
@@ -1402,15 +1459,11 @@ impl PostBatchCollector {
             auth_client,
             refresh_jwt,
             expires_at,
-            state: Mutex::new(PostCollectorState {
-                pending: Vec::new(),
-                last_flush: Instant::now(),
-                isolation_cache: HashMap::new(),
-            }),
+            coordination,
             batches_total: AtomicU64::new(0),
             batches_partial: AtomicU64::new(0),
             fetch: FetchDiagnostics::default(),
-        }
+        })
     }
 
     async fn get_session_string(&self) -> TurboResult<String> {
@@ -1478,8 +1531,8 @@ impl PostBatchCollector {
     fn convert_bulk_post_response(
         &self,
         response: crate::models::bluesky::GetPostsResponse,
-    ) -> BlueskyPost {
-        BlueskyPost {
+    ) -> Arc<BlueskyPost> {
+        Arc::new(BlueskyPost {
             uri: response.uri,
             cid: response.cid,
             author: response.author.into(),
@@ -1500,7 +1553,7 @@ impl PostBatchCollector {
             like_count: response.like_count,
             repost_count: response.repost_count,
             reply_count: response.reply_count,
-        }
+        })
     }
 
     /// Times the full HTTP chain (incl. retries and isolation bisection) for
@@ -1508,7 +1561,7 @@ impl PostBatchCollector {
     async fn fetch_batch_with_retry(
         &self,
         uris: &[String],
-    ) -> TurboResult<Vec<Option<BlueskyPost>>> {
+    ) -> TurboResult<Vec<Option<Arc<BlueskyPost>>>> {
         let start = Instant::now();
         let result = self.fetch_batch_with_retry_inner(uris).await;
         let elapsed_ns = start.elapsed().as_nanos() as u64;
@@ -1538,7 +1591,7 @@ impl PostBatchCollector {
     async fn fetch_batch_with_retry_inner(
         &self,
         uris: &[String],
-    ) -> TurboResult<Vec<Option<BlueskyPost>>> {
+    ) -> TurboResult<Vec<Option<Arc<BlueskyPost>>>> {
         let url = format!("{}/app.bsky.feed.getPosts", self.api_base_url);
         let mut session_string = self.get_session_string().await?;
         let mut attempts = 0u32;
@@ -1716,56 +1769,27 @@ impl PostBatchCollector {
         }
     }
 
-    async fn fetch_batch(&self, uris: &[String]) -> TurboResult<Vec<Option<BlueskyPost>>> {
+    async fn fetch_claim(
+        &self,
+        uris: &[String],
+    ) -> Vec<Result<Option<Arc<BlueskyPost>>, SharedFetchError>> {
         self.fetch
             .items_total
             .fetch_add(uris.len() as u64, Ordering::Relaxed);
-        // Resolve cache hits under a short lock; the fetch runs unlocked so
-        // concurrent callers overlap their network I/O.
-        let (unresolved, hits): (Vec<String>, HashMap<String, Option<BlueskyPost>>) = {
-            let state = self.state.lock().await;
-            let mut unresolved = Vec::new();
-            let mut hits = HashMap::new();
-            for uri in uris {
-                if let Some(post) = state.isolation_cache.get(uri) {
-                    hits.insert(uri.clone(), post.clone());
-                } else {
-                    unresolved.push(uri.clone());
-                }
-            }
-            (unresolved, hits)
-        };
-        if unresolved.is_empty() {
-            return Ok(uris
-                .iter()
-                .map(|uri| hits.get(uri).cloned().unwrap_or(None))
-                .collect());
-        }
-
-        match self.fetch_batch_with_retry(&unresolved).await {
-            Ok(fetched) => {
-                let by_identifier = unresolved
-                    .into_iter()
-                    .zip(fetched)
-                    .collect::<HashMap<_, _>>();
-                Ok(uris
-                    .iter()
-                    .map(|uri| {
-                        hits.get(uri)
-                            .cloned()
-                            .unwrap_or_else(|| by_identifier.get(uri).cloned().unwrap_or(None))
-                    })
-                    .collect())
-            }
+        match self.fetch_batch_with_retry(uris).await {
+            Ok(fetched) => fetched.into_iter().map(Ok).collect(),
             Err(error)
                 if transient_upstream_category(&error).is_some()
-                    && unresolved.len() > 1
+                    && uris.len() > 1
                     && self.isolation_recurrence.load(Ordering::Acquire)
                         >= self.containment_policy.persistence_threshold =>
             {
-                self.isolate_posts(unresolved, error).await
+                self.isolate_posts(uris.to_vec(), error).await
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                let error = SharedFetchError::from_error(&error);
+                vec![Err(error); uris.len()]
+            }
         }
     }
 
@@ -1773,7 +1797,7 @@ impl PostBatchCollector {
         &self,
         mut identifiers: Vec<String>,
         root_error: TurboError,
-    ) -> TurboResult<Vec<Option<BlueskyPost>>> {
+    ) -> Vec<Result<Option<Arc<BlueskyPost>>, SharedFetchError>> {
         let requested = identifiers.clone();
         identifiers.sort_unstable();
         let mut remaining_budget = self.containment_policy.isolation_request_budget;
@@ -1785,6 +1809,7 @@ impl PostBatchCollector {
         let mut failures = VecDeque::new();
         let mut first_categories = Vec::new();
         let mut last_error = root_error;
+        let mut resolved = HashMap::new();
 
         info!(
             operation = BlueskyOperation::Posts.as_str(),
@@ -1795,21 +1820,29 @@ impl PostBatchCollector {
 
         for half in first_halves {
             if remaining_budget == 0 {
-                return Err(with_isolation_outcome(
+                let error = with_isolation_outcome(
                     last_error,
                     crate::client::IsolationOutcome::BudgetExhausted,
-                ));
+                );
+                let error = SharedFetchError::from_error(&error);
+                return requested
+                    .into_iter()
+                    .map(|identifier| {
+                        resolved
+                            .remove(&identifier)
+                            .unwrap_or_else(|| Err(error.clone()))
+                    })
+                    .collect();
             }
             remaining_budget -= 1;
             match self.fetch_batch_with_retry(&half).await {
                 Ok(results) => {
-                    let mut state = self.state.lock().await;
-                    state.isolation_cache.extend(half.into_iter().zip(results));
+                    resolved.extend(half.into_iter().zip(results.into_iter().map(Ok)));
                 }
                 Err(error) => {
                     first_categories.push(transient_upstream_category(&error));
-                    last_error = error;
-                    failures.push_back(half);
+                    last_error = SharedFetchError::from_error(&error).into_error();
+                    failures.push_back((half, error));
                 }
             }
         }
@@ -1818,152 +1851,129 @@ impl PostBatchCollector {
             && first_categories[0].is_some()
             && first_categories[0] == first_categories[1]
         {
-            return Err(with_isolation_outcome(
+            let error = with_isolation_outcome(
                 last_error,
                 crate::client::IsolationOutcome::BroadOutage {
                     category: first_categories[0].expect("category checked"),
                 },
-            ));
+            );
+            let error = SharedFetchError::from_error(&error);
+            return requested
+                .into_iter()
+                .map(|identifier| {
+                    resolved
+                        .remove(&identifier)
+                        .unwrap_or_else(|| Err(error.clone()))
+                })
+                .collect();
         }
 
-        while let Some(failing) = failures.pop_front() {
+        while let Some((failing, failure_error)) = failures.pop_front() {
             if failing.len() == 1 {
-                return Err(with_isolation_outcome(
-                    last_error,
+                let error = with_isolation_outcome(
+                    failure_error,
                     crate::client::IsolationOutcome::SingletonPoison {
                         request_fingerprint: stable_identifier_fingerprint(&failing),
                     },
-                ));
+                );
+                resolved.insert(
+                    failing[0].clone(),
+                    Err(SharedFetchError::from_error(&error)),
+                );
+                continue;
             }
             let midpoint = failing.len() / 2;
             for subset in [failing[..midpoint].to_vec(), failing[midpoint..].to_vec()] {
                 if remaining_budget == 0 {
-                    return Err(with_isolation_outcome(
+                    let error = with_isolation_outcome(
                         last_error,
                         crate::client::IsolationOutcome::BudgetExhausted,
-                    ));
+                    );
+                    let error = SharedFetchError::from_error(&error);
+                    return requested
+                        .into_iter()
+                        .map(|identifier| {
+                            resolved
+                                .remove(&identifier)
+                                .unwrap_or_else(|| Err(error.clone()))
+                        })
+                        .collect();
                 }
                 remaining_budget -= 1;
                 match self.fetch_batch_with_retry(&subset).await {
                     Ok(results) => {
-                        let mut state = self.state.lock().await;
-                        state
-                            .isolation_cache
-                            .extend(subset.into_iter().zip(results));
+                        resolved.extend(subset.into_iter().zip(results.into_iter().map(Ok)));
                     }
                     Err(error) => {
-                        last_error = error;
-                        failures.push_back(subset);
+                        last_error = SharedFetchError::from_error(&error).into_error();
+                        failures.push_back((subset, error));
                     }
                 }
             }
         }
 
-        let state = self.state.lock().await;
-        Ok(requested
-            .iter()
-            .map(|uri| state.isolation_cache.get(uri).cloned().unwrap_or(None))
-            .collect())
+        let fallback = SharedFetchError::from_error(&last_error);
+        requested
+            .into_iter()
+            .map(|identifier| {
+                resolved
+                    .remove(&identifier)
+                    .unwrap_or_else(|| Err(fallback.clone()))
+            })
+            .collect()
     }
 
-    pub async fn add_and_fetch(&self, uris: Vec<String>) -> TurboResult<Vec<Option<BlueskyPost>>> {
-        // Enqueue our ids once; any concurrent caller may claim and
-        // resolve them, so delivery happens through the shared cache. Skip ids
-        // already queued or resolved: a failed claim's ids are requeued and a
-        // retry re-submits the same set.
-        {
-            let mut state = self.state.lock().await;
-            for uri in &uris {
-                if !state.pending.contains(uri) && !state.isolation_cache.contains_key(uri) {
-                    state.pending.push(uri.clone());
-                }
-            }
-        }
-        let mut remaining: HashSet<String> = uris.iter().cloned().collect();
-        let started = Instant::now();
-
-        while !remaining.is_empty() {
-            let claim: Vec<String> = {
-                let mut state = self.state.lock().await;
-                state.claim_next(self.config.batch_size, self.config.wait_ms)
-            };
-
-            if claim.is_empty() {
-                // Nothing fetchable yet: the queue is still filling or the
-                // partial-flush window has not elapsed. Another caller may
-                // have resolved some of our ids meanwhile; re-check the
-                // shared cache, then yield briefly.
-                {
-                    let state = self.state.lock().await;
-                    remaining.retain(|uri| !state.isolation_cache.contains_key(uri));
-                }
-                if remaining.is_empty() {
-                    break;
-                }
-                if started.elapsed() >= MAX_CLAIM_WAIT {
-                    // Another caller failed on ids we also submitted and they
-                    // were not requeued; fail so the supervisor retries the
-                    // batch instead of waiting forever.
-                    return Err(TurboError::Internal(
-                        "fetch resolution timed out waiting for the shared queue".to_string(),
-                    ));
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                continue;
-            }
-
-            // Request accounting.
-            self.batches_total.fetch_add(1, Ordering::Relaxed);
-            let batch_len = claim.len();
-            if batch_len < self.config.batch_size {
-                self.batches_partial.fetch_add(1, Ordering::Relaxed);
-            }
-            let pct = (batch_len as f64 / self.config.batch_size as f64) * 100.0;
-            info!(
-                "Post batch capacity: {}/{} ({:.0}%)",
-                batch_len, self.config.batch_size, pct
-            );
-
-            // Network I/O happens without holding the collector lock so
-            // concurrent pipeline calls overlap their fetches.
-            let batch_results = match self.fetch_batch(&claim).await {
-                Ok(results) => results,
+    pub async fn add_and_fetch(
+        &self,
+        uris: Vec<String>,
+    ) -> Vec<Result<Option<Arc<BlueskyPost>>, SharedFetchError>> {
+        let mut posts = Vec::with_capacity(uris.len());
+        for chunk in uris.chunks(self.config.batch_size) {
+            let registrations = match self.coordination.register(chunk).await {
+                Ok(registrations) => registrations,
                 Err(error) => {
-                    // Requeue only identifiers we did not submit ourselves:
-                    // another caller is still waiting on those. Our own ids
-                    // are left for the supervisor's batch retry (matching the
-                    // pre-concurrency behavior), which prevents a tight
-                    // re-fetch loop on persistently failing ids.
-                    let mut state = self.state.lock().await;
-                    for uri in claim {
-                        if !uris.contains(&uri)
-                            && !state.isolation_cache.contains_key(&uri)
-                            && !state.pending.contains(&uri)
-                        {
-                            state.pending.push(uri);
-                        }
-                    }
-                    return Err(error);
+                    posts.extend(
+                        (0..chunk.len())
+                            .map(|_| Err(SharedFetchError::Internal(error.to_string()))),
+                    );
+                    continue;
                 }
             };
 
-            // Merge into the shared cache so every caller resolves the ids it
-            // submitted.
-            {
-                let mut state = self.state.lock().await;
-                for (uri, post) in claim.into_iter().zip(batch_results) {
-                    state.isolation_cache.insert(uri.clone(), post.clone());
-                    remaining.remove(&uri);
-                }
+            while self.coordination.snapshot().pending_keys > 0 {
+                let Some(claim) = self.coordination.claim() else {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    continue;
+                };
+                let identifiers = claim
+                    .identifiers()
+                    .iter()
+                    .map(|identifier| identifier.to_string())
+                    .collect::<Vec<_>>();
+                self.record_claim(&identifiers);
+                let outcomes = self.fetch_claim(&identifiers).await;
+                claim.finalize(outcomes);
+            }
+
+            for registration in registrations {
+                posts.push(registration.receive().await);
             }
         }
+        posts
+    }
 
-        // Deliver results in the caller's original order from the shared cache.
-        let state = self.state.lock().await;
-        Ok(uris
-            .into_iter()
-            .map(|uri| state.isolation_cache.get(&uri).cloned().unwrap_or(None))
-            .collect())
+    fn record_claim(&self, identifiers: &[String]) {
+        self.batches_total.fetch_add(1, Ordering::Relaxed);
+        if identifiers.len() < self.config.batch_size {
+            self.batches_partial.fetch_add(1, Ordering::Relaxed);
+        }
+        let pct = (identifiers.len() as f64 / self.config.batch_size as f64) * 100.0;
+        info!(
+            "Post batch capacity: {}/{} ({:.0}%)",
+            identifiers.len(),
+            self.config.batch_size,
+            pct
+        );
     }
 
     pub fn log_partial_percentage(&self) {
@@ -1996,6 +2006,8 @@ impl PostBatchCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hydration::{CacheMissResolver, TurboCache};
+    use std::sync::Mutex as StdMutex;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
@@ -2016,6 +2028,21 @@ mod tests {
     #[derive(Clone)]
     struct PoisonResponder {
         mode: PoisonMode,
+    }
+
+    #[derive(Clone)]
+    struct DelayedEchoResponder {
+        delay: Duration,
+    }
+
+    impl Respond for DelayedEchoResponder {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            PoisonResponder {
+                mode: PoisonMode::One("never-match".to_string()),
+            }
+            .respond(request)
+            .set_delay(self.delay)
+        }
     }
 
     impl Respond for PoisonResponder {
@@ -2092,6 +2119,31 @@ mod tests {
         .unwrap();
         client.profile_batch_collector.write().await.api_base_url = server.uri();
         client.post_batch_collector.write().await.api_base_url = server.uri();
+        client
+    }
+
+    async fn bounded_client_for_server(
+        server: &MockServer,
+        batch_size: usize,
+        key_capacity: usize,
+        waiter_capacity: usize,
+    ) -> BlueskyClient {
+        let client = BlueskyClient::new_with_policies_and_coordination(
+            vec!["test-session".to_string()],
+            None,
+            batch_size,
+            batch_size,
+            0,
+            0,
+            fast_policy(0),
+            ContainmentPolicy::default(),
+            key_capacity,
+            waiter_capacity,
+            key_capacity,
+            waiter_capacity,
+        )
+        .unwrap();
+        client.set_api_base_url_for_test(server.uri()).await;
         client
     }
 
@@ -2280,7 +2332,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn profile_isolation_identifies_singleton_and_reuses_successful_half() {
+    async fn profile_isolation_keeps_successful_subset_request_scoped() {
         let server = MockServer::start().await;
         let good = "did:plc:good".to_string();
         let bad = "did:plc:poison".to_string();
@@ -2316,10 +2368,18 @@ mod tests {
             .await
             .is_err());
         let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), requests_before + 1);
+        assert_eq!(requests.len(), requests_before + 3);
         let last_query = requests.last().unwrap().url.query().unwrap_or_default();
         assert!(last_query.contains("did%3Aplc%3Apoison"));
         assert!(!last_query.contains("did%3Aplc%3Agood"));
+        assert_eq!(
+            client
+                .coordination_diagnostics()
+                .await
+                .profiles
+                .completed_result_owners,
+            0
+        );
     }
 
     #[tokio::test]
@@ -2565,5 +2625,398 @@ mod tests {
             elapsed < Duration::from_millis(1200),
             "concurrent fetches took {elapsed:?}; expected overlap"
         );
+    }
+
+    #[tokio::test]
+    async fn collector_ownership_settles_after_cache_capacity_and_ttl_churn() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.actor.getProfiles"))
+            .respond_with(PoisonResponder {
+                mode: PoisonMode::One("never-a-profile".to_string()),
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.feed.getPosts"))
+            .respond_with(PoisonResponder {
+                mode: PoisonMode::One("never-a-post".to_string()),
+            })
+            .mount(&server)
+            .await;
+
+        let client = Arc::new(client_for_server(&server, 0, ContainmentPolicy::default()).await);
+        let start = Instant::now();
+        let now = Arc::new(StdMutex::new(start));
+        let cache_clock = Arc::clone(&now);
+        let cache = TurboCache::new_with_clock(
+            2,
+            2,
+            2,
+            Duration::from_secs(300),
+            Arc::new(move || *cache_clock.lock().expect("cache clock poisoned")),
+        );
+        let resolver = CacheMissResolver::new(cache, Arc::clone(&client), Arc::clone(&client));
+        let mut rss_samples = Vec::new();
+
+        const CHURN_WAVES: usize = 8;
+        for wave in 0..CHURN_WAVES {
+            let profiles = (0..3)
+                .map(|index| format!("did:plc:wave{wave}-profile{index}"))
+                .collect::<Vec<_>>();
+            let posts = (0..3)
+                .map(|index| format!("at://did:plc:wave{wave}/app.bsky.feed.post/post{index}"))
+                .collect::<Vec<_>>();
+
+            resolver.resolve_profiles(&profiles).await.unwrap();
+            resolver.resolve_posts(&posts).await.unwrap();
+            let settled_wave = client.coordination_diagnostics().await;
+            assert_eq!(settled_wave.profiles.pending_keys, 0);
+            assert_eq!(settled_wave.profiles.in_flight_keys, 0);
+            assert_eq!(settled_wave.profiles.waiters, 0);
+            assert_eq!(settled_wave.profiles.retained_identifier_bytes, 0);
+            assert!(settled_wave.profiles.key_high_watermark <= settled_wave.profiles.key_capacity);
+            assert!(
+                settled_wave.profiles.waiter_high_watermark
+                    <= settled_wave.profiles.waiter_capacity
+            );
+            assert_eq!(settled_wave.posts.pending_keys, 0);
+            assert_eq!(settled_wave.posts.in_flight_keys, 0);
+            assert_eq!(settled_wave.posts.waiters, 0);
+            assert_eq!(settled_wave.posts.retained_identifier_bytes, 0);
+            assert!(settled_wave.posts.key_high_watermark <= settled_wave.posts.key_capacity);
+            assert!(settled_wave.posts.waiter_high_watermark <= settled_wave.posts.waiter_capacity);
+            rss_samples.push(
+                crate::turbocharger::diagnostics::collect_process_memory_diagnostics().rss_bytes,
+            );
+            *now.lock().expect("cache clock poisoned") += Duration::from_secs(301);
+        }
+
+        eprintln!(
+            "hydration_churn_diagnostics={}",
+            serde_json::json!({
+                "rss_bytes_by_wave": rss_samples,
+                "profile_cache_capacity": 2,
+                "post_cache_capacity": 2,
+                "waves": CHURN_WAVES,
+                "unique_identifiers_per_kind_per_wave": 3,
+            })
+        );
+
+        let snapshot = client.collector_ownership_snapshot().await;
+        assert_eq!(snapshot.profiles.pending_keys, 0);
+        assert_eq!(snapshot.profiles.in_flight_keys, 0);
+        assert_eq!(snapshot.profiles.waiters, 0);
+        assert_eq!(snapshot.profiles.retained_identifier_bytes, 0);
+        assert_eq!(snapshot.profiles.completed_result_owners, 0);
+        assert_eq!(snapshot.posts.pending_keys, 0);
+        assert_eq!(snapshot.posts.in_flight_keys, 0);
+        assert_eq!(snapshot.posts.waiters, 0);
+        assert_eq!(snapshot.posts.retained_identifier_bytes, 0);
+        assert_eq!(snapshot.posts.completed_result_owners, 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_load_reaches_configured_key_and_waiter_bounds_then_settles() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(DelayedEchoResponder {
+                delay: Duration::from_millis(100),
+            })
+            .mount(&server)
+            .await;
+        let client = Arc::new(bounded_client_for_server(&server, 2, 4, 8).await);
+
+        let profile_groups = [
+            vec![
+                "did:plc:profile-a".to_string(),
+                "did:plc:profile-b".to_string(),
+            ],
+            vec![
+                "did:plc:profile-c".to_string(),
+                "did:plc:profile-d".to_string(),
+            ],
+        ];
+        let mut profile_tasks = Vec::new();
+        for group in profile_groups {
+            for _ in 0..2 {
+                let client = Arc::clone(&client);
+                let identifiers = group.clone();
+                profile_tasks.push(tokio::spawn(async move {
+                    client.bulk_fetch_profiles(&identifiers).await
+                }));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let active_profiles = client.coordination_diagnostics().await.profiles;
+        for task in profile_tasks {
+            task.await.unwrap().unwrap();
+        }
+
+        let post_groups = [
+            vec![
+                "at://did:plc:a/app.bsky.feed.post/one".to_string(),
+                "at://did:plc:b/app.bsky.feed.post/two".to_string(),
+            ],
+            vec![
+                "at://did:plc:c/app.bsky.feed.post/three".to_string(),
+                "at://did:plc:d/app.bsky.feed.post/four".to_string(),
+            ],
+        ];
+        let mut post_tasks = Vec::new();
+        for group in post_groups {
+            for _ in 0..2 {
+                let client = Arc::clone(&client);
+                let identifiers = group.clone();
+                post_tasks.push(tokio::spawn(async move {
+                    client.bulk_fetch_posts(&identifiers).await
+                }));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let active_posts = client.coordination_diagnostics().await.posts;
+        for task in post_tasks {
+            task.await.unwrap().unwrap();
+        }
+
+        let settled = client.coordination_diagnostics().await;
+        let requests = server.received_requests().await.unwrap();
+        let profile_requests = requests
+            .iter()
+            .filter(|request| request.url.path().ends_with("getProfiles"))
+            .count();
+        let post_requests = requests
+            .iter()
+            .filter(|request| request.url.path().ends_with("getPosts"))
+            .count();
+        assert_eq!(active_profiles.key_high_watermark, 4);
+        assert_eq!(active_profiles.waiter_high_watermark, 8);
+        assert_eq!(active_posts.key_high_watermark, 4);
+        assert_eq!(active_posts.waiter_high_watermark, 8);
+        assert_eq!(settled.profiles.pending_keys, 0);
+        assert_eq!(settled.profiles.in_flight_keys, 0);
+        assert_eq!(settled.profiles.waiters, 0);
+        assert_eq!(settled.posts.pending_keys, 0);
+        assert_eq!(settled.posts.in_flight_keys, 0);
+        assert_eq!(settled.posts.waiters, 0);
+        assert_eq!(profile_requests, 2);
+        assert_eq!(post_requests, 2);
+    }
+
+    #[tokio::test]
+    async fn faulted_waves_release_all_coordination_state() {
+        let transient_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.feed.getPosts"))
+            .respond_with(ResponseTemplate::new(502))
+            .mount(&transient_server)
+            .await;
+        let transient_client =
+            client_for_server(&transient_server, 0, ContainmentPolicy::default()).await;
+        let transient_uri = "at://did:plc:a/app.bsky.feed.post/transient".to_string();
+        transient_client
+            .bulk_fetch_posts(&[transient_uri])
+            .await
+            .unwrap();
+
+        let permanent_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.actor.getProfiles"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&permanent_server)
+            .await;
+        let permanent_client =
+            client_for_server(&permanent_server, 0, ContainmentPolicy::default()).await;
+        assert!(permanent_client
+            .bulk_fetch_profiles(&["did:plc:permanent".to_string()])
+            .await
+            .is_err());
+
+        let missing_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.feed.getPosts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "posts": []
+            })))
+            .mount(&missing_server)
+            .await;
+        let missing_client =
+            client_for_server(&missing_server, 0, ContainmentPolicy::default()).await;
+        let missing_uri = "at://did:plc:b/app.bsky.feed.post/missing".to_string();
+        assert!(matches!(
+            missing_client
+                .bulk_fetch_posts(&[missing_uri])
+                .await
+                .unwrap()[0],
+            PostFetchOutcome::Missing
+        ));
+
+        let isolation_server = MockServer::start().await;
+        let poison_uri = "at://did:plc:d/app.bsky.feed.post/poison".to_string();
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.feed.getPosts"))
+            .respond_with(PoisonResponder {
+                mode: PoisonMode::One(poison_uri.clone()),
+            })
+            .mount(&isolation_server)
+            .await;
+        let isolation_client = client_for_server(
+            &isolation_server,
+            0,
+            ContainmentPolicy {
+                persistence_threshold: 1,
+                isolation_request_budget: 4,
+                ..ContainmentPolicy::default()
+            },
+        )
+        .await;
+        isolation_client.set_failure_recurrence(1);
+        isolation_client
+            .bulk_fetch_posts(&[
+                "at://did:plc:c/app.bsky.feed.post/good".to_string(),
+                poison_uri,
+            ])
+            .await
+            .unwrap();
+
+        for snapshot in [
+            transient_client.coordination_diagnostics().await,
+            permanent_client.coordination_diagnostics().await,
+            missing_client.coordination_diagnostics().await,
+            isolation_client.coordination_diagnostics().await,
+        ] {
+            assert_eq!(snapshot.profiles.pending_keys, 0);
+            assert_eq!(snapshot.profiles.in_flight_keys, 0);
+            assert_eq!(snapshot.profiles.waiters, 0);
+            assert_eq!(snapshot.profiles.retained_identifier_bytes, 0);
+            assert_eq!(snapshot.posts.pending_keys, 0);
+            assert_eq!(snapshot.posts.in_flight_keys, 0);
+            assert_eq!(snapshot.posts.waiters, 0);
+            assert_eq!(snapshot.posts.retained_identifier_bytes, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn claimant_and_waiter_task_abort_release_every_registration() {
+        let claimant_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.actor.getProfiles"))
+            .respond_with(DelayedEchoResponder {
+                delay: Duration::from_millis(200),
+            })
+            .mount(&claimant_server)
+            .await;
+        let claimant_client =
+            Arc::new(client_for_server(&claimant_server, 0, ContainmentPolicy::default()).await);
+        let claimant_task = {
+            let client = Arc::clone(&claimant_client);
+            tokio::spawn(async move {
+                client
+                    .bulk_fetch_profiles(&["did:plc:claimant-abort".to_string()])
+                    .await
+            })
+        };
+        for _ in 0..50 {
+            if claimant_client
+                .coordination_diagnostics()
+                .await
+                .profiles
+                .in_flight_keys
+                == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let claimant_peer = {
+            let client = Arc::clone(&claimant_client);
+            tokio::spawn(async move {
+                client
+                    .bulk_fetch_profiles(&["did:plc:claimant-abort".to_string()])
+                    .await
+            })
+        };
+        for _ in 0..50 {
+            if claimant_client
+                .coordination_diagnostics()
+                .await
+                .profiles
+                .waiters
+                == 2
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        claimant_task.abort();
+        assert!(claimant_task.await.unwrap_err().is_cancelled());
+        let peer_error = claimant_peer.await.unwrap().unwrap_err();
+        assert!(peer_error.is_retryable());
+        let claimant_settled = claimant_client.coordination_diagnostics().await.profiles;
+        assert_eq!(claimant_settled.in_flight_keys, 0);
+        assert_eq!(claimant_settled.waiters, 0);
+        assert_eq!(claimant_settled.retained_identifier_bytes, 0);
+        assert!(claimant_settled.cancellations_total >= 1);
+
+        let waiter_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.actor.getProfiles"))
+            .respond_with(DelayedEchoResponder {
+                delay: Duration::from_millis(150),
+            })
+            .mount(&waiter_server)
+            .await;
+        let waiter_client =
+            Arc::new(client_for_server(&waiter_server, 0, ContainmentPolicy::default()).await);
+        let first = {
+            let client = Arc::clone(&waiter_client);
+            tokio::spawn(async move {
+                client
+                    .bulk_fetch_profiles(&["did:plc:waiter-abort".to_string()])
+                    .await
+            })
+        };
+        for _ in 0..50 {
+            if waiter_client
+                .coordination_diagnostics()
+                .await
+                .profiles
+                .in_flight_keys
+                == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let cancelled_waiter = {
+            let client = Arc::clone(&waiter_client);
+            tokio::spawn(async move {
+                client
+                    .bulk_fetch_profiles(&["did:plc:waiter-abort".to_string()])
+                    .await
+            })
+        };
+        for _ in 0..50 {
+            if waiter_client
+                .coordination_diagnostics()
+                .await
+                .profiles
+                .waiters
+                == 2
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        cancelled_waiter.abort();
+        assert!(cancelled_waiter.await.unwrap_err().is_cancelled());
+        first.await.unwrap().unwrap();
+
+        let waiter_settled = waiter_client.coordination_diagnostics().await.profiles;
+        assert_eq!(waiter_settled.pending_keys, 0);
+        assert_eq!(waiter_settled.in_flight_keys, 0);
+        assert_eq!(waiter_settled.waiters, 0);
+        assert_eq!(waiter_settled.retained_identifier_bytes, 0);
+        assert!(waiter_settled.cancellations_total >= 1);
     }
 }

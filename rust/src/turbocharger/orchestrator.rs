@@ -170,7 +170,7 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             persistence_threshold: settings.recovery_persistence_threshold,
             isolation_request_budget: settings.isolation_request_budget,
         };
-        let bluesky_client = Arc::new(BlueskyClient::new_with_policies(
+        let bluesky_client = Arc::new(BlueskyClient::new_with_policies_and_coordination(
             vec![auth_response.access_jwt.clone()],
             Some(auth_client.clone()),
             settings.profile_batch_size,
@@ -183,6 +183,10 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
                 max_delay: settings.retry_max_delay,
             },
             containment_policy,
+            settings.profile_coordination_key_capacity,
+            settings.profile_coordination_waiter_capacity,
+            settings.post_coordination_key_capacity,
+            settings.post_coordination_waiter_capacity,
         )?);
         bluesky_client
             .refresh_sessions(
@@ -1158,6 +1162,7 @@ where
 
         let process_memory = self.diagnostics_collector.capture_memory();
         let bluesky_fetch = self.bluesky_client.fetch_diagnostics().await;
+        let bluesky_coordination = self.bluesky_client.coordination_diagnostics().await;
 
         DiagnosticsCollector::assemble_health(
             process_memory,
@@ -1166,7 +1171,7 @@ where
             not_redis_state,
             pipeline_progress,
             self.failure_supervisor.snapshot(),
-            bluesky_fetch,
+            (bluesky_fetch, bluesky_coordination),
         )
     }
 
@@ -1571,7 +1576,7 @@ mod tests {
         async fn bulk_fetch_profiles(
             &self,
             _dids: &[String],
-        ) -> TurboResult<Vec<Option<BlueskyProfile>>> {
+        ) -> TurboResult<Vec<Option<Arc<BlueskyProfile>>>> {
             let _cancel = CancellationFlag(Arc::clone(&self.cancelled));
             self.started.notify_one();
             std::future::pending().await

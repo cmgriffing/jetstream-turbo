@@ -810,6 +810,7 @@ fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> Strin
             .to_string(),
     );
     append_bluesky_fetch_metrics(&mut output, &diagnostics.bluesky_fetch);
+    append_bluesky_coordination_metrics(&mut output, &diagnostics.bluesky_coordination);
 
     output.push_str("# HELP jetstream_turbo_reconnects_total Upstream reconnects grouped by initiating reason.\n");
     output.push_str("# TYPE jetstream_turbo_reconnects_total counter\n");
@@ -890,6 +891,119 @@ fn append_fetch_kind_metrics(
         fetch.errors_rate_limited,
         fetch.errors_upstream
     ));
+}
+
+type CoordinationMetricDefinition = (
+    &'static str,
+    &'static str,
+    &'static str,
+    fn(&crate::client::CoordinationSnapshot) -> u64,
+);
+
+fn append_bluesky_coordination_metrics(
+    output: &mut String,
+    coordination: &crate::client::BlueskyCoordinationDiagnostics,
+) {
+    let kinds = [
+        ("profiles", &coordination.profiles),
+        ("posts", &coordination.posts),
+    ];
+    let metrics: [CoordinationMetricDefinition; 13] = [
+        (
+            "pending_keys",
+            "Identifiers awaiting a Bluesky coordination claim.",
+            "gauge",
+            |snapshot: &crate::client::CoordinationSnapshot| snapshot.pending_keys as u64,
+        ),
+        (
+            "in_flight_keys",
+            "Identifiers currently owned by a Bluesky coordination claimant.",
+            "gauge",
+            |snapshot: &crate::client::CoordinationSnapshot| snapshot.in_flight_keys as u64,
+        ),
+        (
+            "waiters",
+            "Current registered Bluesky coordination waiters.",
+            "gauge",
+            |snapshot: &crate::client::CoordinationSnapshot| snapshot.waiters as u64,
+        ),
+        (
+            "retained_identifier_bytes",
+            "Current identifier bytes retained by Bluesky coordination.",
+            "gauge",
+            |snapshot: &crate::client::CoordinationSnapshot| {
+                snapshot.retained_identifier_bytes as u64
+            },
+        ),
+        (
+            "key_capacity",
+            "Configured hard ceiling for distinct Bluesky coordination keys.",
+            "gauge",
+            |snapshot: &crate::client::CoordinationSnapshot| snapshot.key_capacity as u64,
+        ),
+        (
+            "waiter_capacity",
+            "Configured hard ceiling for Bluesky coordination waiters.",
+            "gauge",
+            |snapshot: &crate::client::CoordinationSnapshot| snapshot.waiter_capacity as u64,
+        ),
+        (
+            "key_high_watermark",
+            "Maximum observed active Bluesky coordination keys.",
+            "gauge",
+            |snapshot: &crate::client::CoordinationSnapshot| snapshot.key_high_watermark as u64,
+        ),
+        (
+            "waiter_high_watermark",
+            "Maximum observed Bluesky coordination waiters.",
+            "gauge",
+            |snapshot: &crate::client::CoordinationSnapshot| snapshot.waiter_high_watermark as u64,
+        ),
+        (
+            "retained_identifier_bytes_high_watermark",
+            "Maximum observed identifier bytes retained by Bluesky coordination.",
+            "gauge",
+            |snapshot: &crate::client::CoordinationSnapshot| {
+                snapshot.retained_identifier_bytes_high_watermark as u64
+            },
+        ),
+        (
+            "coalesced_waiters_total",
+            "Waiters joined to already-active Bluesky coordination keys.",
+            "counter",
+            |snapshot: &crate::client::CoordinationSnapshot| snapshot.coalesced_waiters_total,
+        ),
+        (
+            "completions_total",
+            "Terminal Bluesky coordination key completions.",
+            "counter",
+            |snapshot: &crate::client::CoordinationSnapshot| snapshot.completions_total,
+        ),
+        (
+            "cancellations_total",
+            "Bluesky coordination claimant and waiter cancellations.",
+            "counter",
+            |snapshot: &crate::client::CoordinationSnapshot| snapshot.cancellations_total,
+        ),
+        (
+            "failed_finalizations_total",
+            "Bluesky coordination finalizations that found inconsistent state.",
+            "counter",
+            |snapshot: &crate::client::CoordinationSnapshot| snapshot.failed_finalizations_total,
+        ),
+    ];
+    for (name, help, metric_type, value) in metrics {
+        let metric_name = format!("jetstream_turbo_bluesky_coordination_{name}");
+        output.push_str(&format!(
+            "# HELP {metric_name} {help}\n# TYPE {metric_name} {metric_type}\n"
+        ));
+        for (kind, snapshot) in kinds {
+            output.push_str(&format!(
+                "{metric_name}{{kind=\"{kind}\"}} {}\n",
+                value(snapshot)
+            ));
+        }
+    }
 }
 
 fn append_gauge_metric(output: &mut String, name: &str, help: &str, value: String) {
@@ -1068,6 +1182,32 @@ mod tests {
             }),
             failure_containment: Default::default(),
             bluesky_fetch: Default::default(),
+            bluesky_coordination: crate::client::BlueskyCoordinationDiagnostics {
+                profiles: crate::client::CoordinationSnapshot {
+                    key_capacity: 150,
+                    waiter_capacity: 600,
+                    key_high_watermark: 12,
+                    waiter_high_watermark: 20,
+                    retained_identifier_bytes_high_watermark: 512,
+                    coalesced_waiters_total: 8,
+                    completions_total: 40,
+                    cancellations_total: 2,
+                    failed_finalizations_total: 0,
+                    ..Default::default()
+                },
+                posts: crate::client::CoordinationSnapshot {
+                    key_capacity: 150,
+                    waiter_capacity: 600,
+                    key_high_watermark: 14,
+                    waiter_high_watermark: 24,
+                    retained_identifier_bytes_high_watermark: 768,
+                    coalesced_waiters_total: 10,
+                    completions_total: 50,
+                    cancellations_total: 3,
+                    failed_finalizations_total: 0,
+                    ..Default::default()
+                },
+            },
         }
     }
 
@@ -1178,6 +1318,14 @@ mod tests {
         assert!(json["data"]["diagnostics"]["not_redis_state"]["stream_name"].is_string());
         assert_eq!(json["data"]["readiness"]["state"], "healthy");
         assert!(json["data"]["diagnostics"]["pipeline_progress"]["ingress_messages"].is_number());
+        assert_eq!(
+            json["data"]["diagnostics"]["bluesky_coordination"]["profiles"]["key_capacity"],
+            150
+        );
+        assert_eq!(
+            json["data"]["diagnostics"]["bluesky_coordination"]["posts"]["completed_result_owners"],
+            0
+        );
     }
 
     #[test]
@@ -1209,6 +1357,14 @@ mod tests {
         assert!(output.contains("jetstream_turbo_not_redis_stream_length 7"));
         assert!(output.contains("jetstream_turbo_pipeline_ingress_messages_total 1"));
         assert!(output.contains("jetstream_turbo_pipeline_maximum_batches 6"));
+        assert!(output
+            .contains("jetstream_turbo_bluesky_coordination_key_capacity{kind=\"profiles\"} 150"));
+        assert!(output.contains(
+            "jetstream_turbo_bluesky_coordination_waiter_high_watermark{kind=\"posts\"} 24"
+        ));
+        assert!(output.contains(
+            "jetstream_turbo_bluesky_coordination_completions_total{kind=\"profiles\"} 40"
+        ));
         assert!(output.contains("jetstream_turbo_running_permit_holders 0"));
         assert!(output.contains("jetstream_turbo_queued_batches 0"));
         assert!(output.contains("jetstream_turbo_committed_source_velocity NaN"));
@@ -1223,7 +1379,37 @@ mod tests {
         assert!(!output.contains("at://"));
         assert!(!output.to_ascii_lowercase().contains("authorization"));
         assert!(!output.contains("request_fingerprint="));
+        assert!(!output.contains("did:plc:"));
         assert!(!output.contains("fingerprint=\""));
+    }
+
+    #[test]
+    fn settled_coordination_metrics_are_zero_and_use_only_bounded_kind_labels() {
+        let output = prometheus_metrics_from_diagnostics(&sample_diagnostics());
+        assert!(output
+            .contains("jetstream_turbo_bluesky_coordination_pending_keys{kind=\"profiles\"} 0"));
+        assert!(output
+            .contains("jetstream_turbo_bluesky_coordination_in_flight_keys{kind=\"posts\"} 0"));
+        assert!(
+            output.contains("jetstream_turbo_bluesky_coordination_waiters{kind=\"profiles\"} 0")
+        );
+        assert!(output.contains(
+            "jetstream_turbo_bluesky_coordination_retained_identifier_bytes{kind=\"posts\"} 0"
+        ));
+
+        for line in output.lines().filter(|line| {
+            line.starts_with("jetstream_turbo_bluesky_coordination_") && !line.starts_with('#')
+        }) {
+            assert!(
+                line.contains("{kind=\"profiles\"}") || line.contains("{kind=\"posts\"}"),
+                "unexpected coordination label set: {line}"
+            );
+            assert_eq!(
+                line.matches('=').count(),
+                1,
+                "unbounded label found: {line}"
+            );
+        }
     }
 
     #[test]

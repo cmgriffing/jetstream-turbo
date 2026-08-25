@@ -1,3 +1,7 @@
+use crate::client::{
+    DEFAULT_POST_COORDINATION_KEY_CAPACITY, DEFAULT_POST_COORDINATION_WAITER_CAPACITY,
+    DEFAULT_PROFILE_COORDINATION_KEY_CAPACITY, DEFAULT_PROFILE_COORDINATION_WAITER_CAPACITY,
+};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -80,6 +84,10 @@ pub struct Settings {
     pub post_batch_size: usize,
     pub profile_batch_wait_ms: u64,
     pub post_batch_wait_ms: u64,
+    pub profile_coordination_key_capacity: usize,
+    pub profile_coordination_waiter_capacity: usize,
+    pub post_coordination_key_capacity: usize,
+    pub post_coordination_waiter_capacity: usize,
     pub max_concurrent_requests: usize,
     pub cache_size_users: usize,
     pub cache_size_posts: usize,
@@ -168,6 +176,10 @@ impl Default for Settings {
             post_batch_size: 25,
             profile_batch_wait_ms: 150,
             post_batch_wait_ms: 300,
+            profile_coordination_key_capacity: DEFAULT_PROFILE_COORDINATION_KEY_CAPACITY,
+            profile_coordination_waiter_capacity: DEFAULT_PROFILE_COORDINATION_WAITER_CAPACITY,
+            post_coordination_key_capacity: DEFAULT_POST_COORDINATION_KEY_CAPACITY,
+            post_coordination_waiter_capacity: DEFAULT_POST_COORDINATION_WAITER_CAPACITY,
             max_concurrent_requests: 6,
             cache_size_users: 50_000,
             cache_size_posts: 40_000,
@@ -380,6 +392,18 @@ impl Settings {
         if let Ok(value) = std::env::var("BLUESKY_NEGATIVE_POST_CACHE_CAPACITY") {
             builder = builder.set_override("negative_post_cache_capacity", value)?;
         }
+        if let Ok(value) = std::env::var("BLUESKY_PROFILE_COORDINATION_KEY_CAPACITY") {
+            builder = builder.set_override("profile_coordination_key_capacity", value)?;
+        }
+        if let Ok(value) = std::env::var("BLUESKY_PROFILE_COORDINATION_WAITER_CAPACITY") {
+            builder = builder.set_override("profile_coordination_waiter_capacity", value)?;
+        }
+        if let Ok(value) = std::env::var("BLUESKY_POST_COORDINATION_KEY_CAPACITY") {
+            builder = builder.set_override("post_coordination_key_capacity", value)?;
+        }
+        if let Ok(value) = std::env::var("BLUESKY_POST_COORDINATION_WAITER_CAPACITY") {
+            builder = builder.set_override("post_coordination_waiter_capacity", value)?;
+        }
 
         if let Ok(trim_maxlen) = std::env::var("TRIM_MAXLEN") {
             builder = builder.set_override("trim_maxlen", trim_maxlen)?;
@@ -551,6 +575,30 @@ impl Settings {
         if self.cache_size_users == 0 || self.cache_size_posts == 0 {
             anyhow::bail!("cache_size_users and cache_size_posts must be greater than 0");
         }
+        if self.profile_coordination_key_capacity < self.profile_batch_size {
+            anyhow::bail!(
+                "BLUESKY_PROFILE_COORDINATION_KEY_CAPACITY must be at least profile_batch_size ({})",
+                self.profile_batch_size
+            );
+        }
+        if self.post_coordination_key_capacity < self.post_batch_size {
+            anyhow::bail!(
+                "BLUESKY_POST_COORDINATION_KEY_CAPACITY must be at least post_batch_size ({})",
+                self.post_batch_size
+            );
+        }
+        if self.profile_coordination_waiter_capacity < self.profile_batch_size {
+            anyhow::bail!(
+                "BLUESKY_PROFILE_COORDINATION_WAITER_CAPACITY must be at least profile_batch_size ({})",
+                self.profile_batch_size
+            );
+        }
+        if self.post_coordination_waiter_capacity < self.post_batch_size {
+            anyhow::bail!(
+                "BLUESKY_POST_COORDINATION_WAITER_CAPACITY must be at least post_batch_size ({})",
+                self.post_batch_size
+            );
+        }
         if self.negative_post_cache_capacity == 0 {
             anyhow::bail!("BLUESKY_NEGATIVE_POST_CACHE_CAPACITY must be greater than 0");
         }
@@ -676,6 +724,10 @@ mod tests {
         assert!(!settings.pipeline_deadlines_enabled);
         assert_eq!(settings.cache_size_users, 50_000);
         assert_eq!(settings.cache_size_posts, 40_000);
+        assert_eq!(settings.profile_coordination_key_capacity, 150);
+        assert_eq!(settings.profile_coordination_waiter_capacity, 600);
+        assert_eq!(settings.post_coordination_key_capacity, 150);
+        assert_eq!(settings.post_coordination_waiter_capacity, 600);
         assert_eq!(settings.negative_post_cache_capacity, 20_000);
         assert_eq!(settings.negative_post_cache_ttl, Duration::from_secs(300));
         assert_eq!(settings.sqlite_cache_size_kib, 64 * 1024);
@@ -778,6 +830,18 @@ mod tests {
         settings.isolation_request_budget = 0;
         assert!(settings.validate().is_err());
         settings.isolation_request_budget = 1;
+        settings.profile_coordination_key_capacity = 0;
+        assert!(settings.validate().is_err());
+        settings.profile_coordination_key_capacity = settings.profile_batch_size;
+        settings.post_coordination_key_capacity = settings.post_batch_size - 1;
+        assert!(settings.validate().is_err());
+        settings.post_coordination_key_capacity = settings.post_batch_size;
+        settings.profile_coordination_waiter_capacity = settings.profile_batch_size - 1;
+        assert!(settings.validate().is_err());
+        settings.profile_coordination_waiter_capacity = settings.profile_batch_size;
+        settings.post_coordination_waiter_capacity = settings.post_batch_size - 1;
+        assert!(settings.validate().is_err());
+        settings.post_coordination_waiter_capacity = settings.post_batch_size;
         settings.negative_post_cache_capacity = 0;
         assert!(settings.validate().is_err());
         settings.negative_post_cache_capacity = 1;
@@ -819,6 +883,10 @@ mod tests {
             ("BLUESKY_ISOLATION_REQUEST_BUDGET", "6"),
             ("BLUESKY_NEGATIVE_POST_CACHE_CAPACITY", "1234"),
             ("BLUESKY_NEGATIVE_POST_CACHE_TTL_MS", "45000"),
+            ("BLUESKY_PROFILE_COORDINATION_KEY_CAPACITY", "101"),
+            ("BLUESKY_PROFILE_COORDINATION_WAITER_CAPACITY", "401"),
+            ("BLUESKY_POST_COORDINATION_KEY_CAPACITY", "102"),
+            ("BLUESKY_POST_COORDINATION_WAITER_CAPACITY", "402"),
         ];
         for (key, value) in values {
             std::env::set_var(key, value);
@@ -856,5 +924,9 @@ mod tests {
         assert_eq!(settings.isolation_request_budget, 6);
         assert_eq!(settings.negative_post_cache_capacity, 1234);
         assert_eq!(settings.negative_post_cache_ttl, Duration::from_secs(45));
+        assert_eq!(settings.profile_coordination_key_capacity, 101);
+        assert_eq!(settings.profile_coordination_waiter_capacity, 401);
+        assert_eq!(settings.post_coordination_key_capacity, 102);
+        assert_eq!(settings.post_coordination_waiter_capacity, 402);
     }
 }
