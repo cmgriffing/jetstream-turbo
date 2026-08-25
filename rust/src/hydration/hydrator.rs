@@ -15,6 +15,14 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::info;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HydrationExecutionMode {
+    #[default]
+    Sequential,
+    Parallel,
+}
+
 struct MessageContext {
     message: JetstreamMessage,
     is_post: bool,
@@ -112,12 +120,14 @@ fn slot_for(
 
 pub struct Hydrator<P, Po> {
     resolver: CacheMissResolver<P, Po>,
+    execution_mode: HydrationExecutionMode,
 }
 
 impl<P, Po> Clone for Hydrator<P, Po> {
     fn clone(&self) -> Self {
         Self {
             resolver: self.resolver.clone(),
+            execution_mode: self.execution_mode,
         }
     }
 }
@@ -128,8 +138,23 @@ where
     Po: PostFetcher + Send + Sync + 'static,
 {
     pub fn new(cache: TurboCache, profile_fetcher: Arc<P>, post_fetcher: Arc<Po>) -> Self {
+        Self::new_with_mode(
+            cache,
+            profile_fetcher,
+            post_fetcher,
+            HydrationExecutionMode::Sequential,
+        )
+    }
+
+    pub fn new_with_mode(
+        cache: TurboCache,
+        profile_fetcher: Arc<P>,
+        post_fetcher: Arc<Po>,
+        execution_mode: HydrationExecutionMode,
+    ) -> Self {
         Self {
             resolver: CacheMissResolver::new(cache, profile_fetcher, post_fetcher),
+            execution_mode,
         }
     }
 
@@ -279,8 +304,22 @@ where
 
         let cache_check_start = Instant::now();
         // Aligned with `dids` (slot order); `Option::None` = profile does not exist.
-        let profiles = self.resolver.resolve_profiles(&dids).await?;
-        let post_outcomes = self.resolver.resolve_posts(&uris).await?;
+        let (profiles, post_outcomes) = match self.execution_mode {
+            HydrationExecutionMode::Sequential => {
+                let profiles = self.resolver.resolve_profiles(&dids).await?;
+                let posts = self.resolver.resolve_posts(&uris).await?;
+                (profiles, posts)
+            }
+            HydrationExecutionMode::Parallel => {
+                // These futures share the existing batch deadline imposed by the
+                // orchestrator. They do not spawn tasks, so dropping this future
+                // cancels both branches and releases coordinator guards normally.
+                tokio::try_join!(
+                    self.resolver.resolve_profiles(&dids),
+                    self.resolver.resolve_posts(&uris)
+                )?
+            }
+        };
         if post_outcomes.len() != uris.len() {
             return Err(crate::models::TurboError::InvalidApiResponse(format!(
                 "post outcome cardinality mismatch: requested {}, received {}",

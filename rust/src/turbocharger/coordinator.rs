@@ -5,6 +5,7 @@ use crate::models::{
 use chrono::Utc;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::trace;
 
@@ -55,6 +56,16 @@ pub struct CompletionFrontier {
     next_ordinal: u64,
     durable_checkpoint_ordinal: Option<u64>,
     pending: BTreeMap<u64, IngressRange>,
+    gap_started_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct CompletionFrontierSnapshot {
+    pub pending_range_count: usize,
+    pub next_required_ordinal: u64,
+    pub furthest_completed_ordinal: Option<u64>,
+    pub durable_checkpoint_ordinal: Option<u64>,
+    pub unresolved_gap_age_seconds: Option<u64>,
 }
 
 impl CompletionFrontier {
@@ -65,6 +76,7 @@ impl CompletionFrontier {
                 .unwrap_or(1),
             durable_checkpoint_ordinal: checkpoint.map(|checkpoint| checkpoint.ingress_ordinal),
             pending: BTreeMap::new(),
+            gap_started_at: None,
         }
     }
 
@@ -72,6 +84,14 @@ impl CompletionFrontier {
     pub fn record_completed(
         &mut self,
         range: IngressRange,
+    ) -> TurboResult<Option<IngestionCheckpoint>> {
+        self.record_completed_at(range, Instant::now())
+    }
+
+    fn record_completed_at(
+        &mut self,
+        range: IngressRange,
+        now: Instant,
     ) -> TurboResult<Option<IngestionCheckpoint>> {
         if !range.is_valid() {
             return Err(TurboError::InvalidMessage(format!(
@@ -91,6 +111,15 @@ impl CompletionFrontier {
                 }
             })
             .or_insert(range);
+
+        if self
+            .pending
+            .keys()
+            .next()
+            .is_some_and(|first| *first > self.next_ordinal)
+        {
+            self.gap_started_at.get_or_insert(now);
+        }
 
         let mut advanced = None;
         loop {
@@ -117,6 +146,15 @@ impl CompletionFrontier {
             });
             self.pending
                 .retain(|_, pending| pending.end_ordinal >= self.next_ordinal);
+        }
+
+        if advanced.is_some() {
+            self.gap_started_at = self
+                .pending
+                .keys()
+                .next()
+                .is_some_and(|first| *first > self.next_ordinal)
+                .then_some(now);
         }
 
         Ok(advanced)
@@ -147,6 +185,22 @@ impl CompletionFrontier {
 
     pub fn durable_checkpoint_ordinal(&self) -> Option<u64> {
         self.durable_checkpoint_ordinal
+    }
+
+    pub fn snapshot(&self) -> CompletionFrontierSnapshot {
+        self.snapshot_at(Instant::now())
+    }
+
+    fn snapshot_at(&self, now: Instant) -> CompletionFrontierSnapshot {
+        CompletionFrontierSnapshot {
+            pending_range_count: self.pending.len(),
+            next_required_ordinal: self.next_ordinal,
+            furthest_completed_ordinal: self.pending.values().map(|range| range.end_ordinal).max(),
+            durable_checkpoint_ordinal: self.durable_checkpoint_ordinal,
+            unresolved_gap_age_seconds: self
+                .gap_started_at
+                .map(|started| now.saturating_duration_since(started).as_secs()),
+        }
     }
 }
 
@@ -252,5 +306,24 @@ mod tests {
 
         assert_eq!(frontier.pending_range_count(), 1);
         assert_eq!(frontier.record_completed(range(5, 6)).unwrap(), None);
+    }
+
+    #[test]
+    fn completion_frontier_gap_age_resets_after_contiguous_advancement() {
+        let started = Instant::now();
+        let mut frontier = CompletionFrontier::new(None);
+        frontier.record_completed_at(range(3, 4), started).unwrap();
+        let waiting = frontier.snapshot_at(started + std::time::Duration::from_secs(9));
+        assert_eq!(waiting.next_required_ordinal, 1);
+        assert_eq!(waiting.furthest_completed_ordinal, Some(4));
+        assert_eq!(waiting.unresolved_gap_age_seconds, Some(9));
+
+        frontier
+            .record_completed_at(range(1, 2), started + std::time::Duration::from_secs(10))
+            .unwrap();
+        let advanced = frontier.snapshot_at(started + std::time::Duration::from_secs(11));
+        assert_eq!(advanced.durable_checkpoint_ordinal, Some(4));
+        assert_eq!(advanced.pending_range_count, 0);
+        assert_eq!(advanced.unresolved_gap_age_seconds, None);
     }
 }

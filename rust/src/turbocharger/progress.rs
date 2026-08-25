@@ -4,14 +4,30 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PipelineStage {
     Ingress,
+    DuplicateDetection,
     Hydration,
     Storage,
     Publication,
     Broadcast,
+    CheckpointPersistence,
+    EndToEnd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineStageOutcome { Success, Error, Timeout, Cancellation }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StageTimingSnapshot {
+    pub stage: PipelineStage,
+    pub outcome: PipelineStageOutcome,
+    pub count: u64,
+    pub duration_milliseconds_total: u64,
+    pub duration_milliseconds_max: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -27,6 +43,7 @@ pub enum PipelineReadinessState {
 #[serde(rename_all = "snake_case")]
 pub enum CatchUpEtaState {
     Unavailable,
+    Unstable,
     NonConverging,
     Converging,
 }
@@ -64,6 +81,7 @@ pub struct PipelineProgressSnapshot {
     pub last_committed_event_time_us: Option<u64>,
     pub received_lag_us: Option<u64>,
     pub committed_lag_us: Option<u64>,
+    pub received_source_velocity: Option<f64>,
     pub committed_source_velocity: Option<f64>,
     pub net_convergence_rate: Option<f64>,
     pub catch_up_eta_state: CatchUpEtaState,
@@ -93,6 +111,7 @@ pub struct PipelineProgressSnapshot {
     pub queued_batches: usize,
     pub maximum_permits: usize,
     pub batch_completion_throughput_per_second: f64,
+    pub record_completion_throughput_per_second: f64,
     pub broadcast_receivers: usize,
     pub successful_broadcasts: u64,
     pub last_valid_ingress_unix_ms: Option<u64>,
@@ -103,6 +122,7 @@ pub struct PipelineProgressSnapshot {
     pub completion_age_seconds: Option<u64>,
     pub oldest_active_batch_age_seconds: Option<u64>,
     pub active_batches: Vec<ActiveBatchSnapshot>,
+    pub stage_timings: Vec<StageTimingSnapshot>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -123,7 +143,15 @@ struct TimedEvent {
 struct ActiveBatch {
     stage: PipelineStage,
     started_at: Instant,
+    stage_started_at: Instant,
     running: bool,
+}
+
+#[derive(Debug, Default)]
+struct StageTimingAggregate {
+    count: u64,
+    duration_milliseconds_total: u64,
+    duration_milliseconds_max: u64,
 }
 
 #[derive(Debug)]
@@ -142,6 +170,7 @@ struct ProgressState {
     received_lag_us: Option<u64>,
     committed_lag_us: Option<u64>,
     committed_samples: VecDeque<(Instant, u64)>,
+    received_samples: VecDeque<(Instant, u64)>,
     live_stability_observations: u32,
     endpoint_attempts: HashMap<String, u64>,
     endpoint_failures: HashMap<String, u64>,
@@ -173,6 +202,8 @@ struct ProgressState {
     next_batch_id: u64,
     active_batches: HashMap<u64, ActiveBatch>,
     batch_completion_samples: VecDeque<Instant>,
+    record_completion_samples: VecDeque<(Instant, u64)>,
+    stage_timings: HashMap<(PipelineStage, PipelineStageOutcome), StageTimingAggregate>,
     was_stale: bool,
     recovery_observations: u32,
     last_reported_state: Option<(PipelineReadinessState, Option<PipelineStage>)>,
@@ -205,6 +236,7 @@ impl PipelineProgress {
                 received_lag_us: None,
                 committed_lag_us: None,
                 committed_samples: VecDeque::new(),
+                received_samples: VecDeque::new(),
                 live_stability_observations: 0,
                 endpoint_attempts: HashMap::new(),
                 endpoint_failures: HashMap::new(),
@@ -236,6 +268,8 @@ impl PipelineProgress {
                 next_batch_id: 1,
                 active_batches: HashMap::new(),
                 batch_completion_samples: VecDeque::new(),
+                record_completion_samples: VecDeque::new(),
+                stage_timings: HashMap::new(),
                 was_stale: false,
                 recovery_observations: 0,
                 last_reported_state: None,
@@ -358,6 +392,10 @@ impl PipelineProgress {
         let mut state = self.state();
         state.last_received_event_time_us = Some(event_time_us);
         state.received_lag_us = Some(unix_us(wall).saturating_sub(event_time_us));
+        state.received_samples.push_back((now, event_time_us));
+        while state.received_samples.len() > 12 {
+            state.received_samples.pop_front();
+        }
         if state.recovery_phase != RecoveryPhase::UnrecoverableGap
             && state.recovery_phase != RecoveryPhase::Live
         {
@@ -476,6 +514,7 @@ impl PipelineProgress {
             ActiveBatch {
                 stage: PipelineStage::Ingress,
                 started_at: now,
+                stage_started_at: now,
                 running: false,
             },
         );
@@ -485,14 +524,36 @@ impl PipelineProgress {
     pub fn batch_running(&self, batch_id: u64) {
         if let Some(batch) = self.state().active_batches.get_mut(&batch_id) {
             batch.running = true;
-            batch.stage = PipelineStage::Hydration;
+            batch.stage = PipelineStage::DuplicateDetection;
+            batch.stage_started_at = Instant::now();
         }
     }
 
     pub fn batch_stage(&self, batch_id: u64, stage: PipelineStage) {
-        if let Some(batch) = self.state().active_batches.get_mut(&batch_id) {
-            batch.stage = stage;
+        self.batch_stage_at(batch_id, stage, Instant::now());
+    }
+
+    fn batch_stage_at(&self, batch_id: u64, stage: PipelineStage, now: Instant) {
+        let mut state = self.state();
+        let timing = state.active_batches.get(&batch_id).map(|batch| {
+            (batch.stage, now.saturating_duration_since(batch.stage_started_at))
+        });
+        if let Some((previous, duration)) = timing {
+            record_stage_timing(&mut state, previous, PipelineStageOutcome::Success, duration);
         }
+        if let Some(batch) = state.active_batches.get_mut(&batch_id) {
+            batch.stage = stage;
+            batch.stage_started_at = now;
+        }
+    }
+
+    pub fn record_stage_duration(
+        &self,
+        stage: PipelineStage,
+        outcome: PipelineStageOutcome,
+        duration: Duration,
+    ) {
+        record_stage_timing(&mut self.state(), stage, outcome, duration);
     }
 
     pub fn store_succeeded(&self) {
@@ -509,9 +570,21 @@ impl PipelineProgress {
 
     fn batch_completed_at(&self, batch_id: u64, records: usize, now: Instant, wall: SystemTime) {
         let mut state = self.state();
-        if state.active_batches.remove(&batch_id).is_none() {
+        let Some(batch) = state.active_batches.remove(&batch_id) else {
             return;
-        }
+        };
+        record_stage_timing(
+            &mut state,
+            batch.stage,
+            PipelineStageOutcome::Success,
+            now.saturating_duration_since(batch.stage_started_at),
+        );
+        record_stage_timing(
+            &mut state,
+            PipelineStage::EndToEnd,
+            PipelineStageOutcome::Success,
+            now.saturating_duration_since(batch.started_at),
+        );
         state.completed_batches += 1;
         state.completed_records += records as u64;
         state.last_completion = Some(TimedEvent {
@@ -519,28 +592,41 @@ impl PipelineProgress {
             unix_ms: unix_ms(wall),
         });
         state.batch_completion_samples.push_back(now);
+        let completed_records = state.completed_records;
+        state
+            .record_completion_samples
+            .push_back((now, completed_records));
         while state.batch_completion_samples.len() > 128 {
             state.batch_completion_samples.pop_front();
+        }
+        while state.record_completion_samples.len() > 128 {
+            state.record_completion_samples.pop_front();
         }
     }
 
     pub fn batch_timed_out(&self, batch_id: u64) {
         let mut state = self.state();
-        if state.active_batches.remove(&batch_id).is_some() {
+        if let Some(batch) = state.active_batches.remove(&batch_id) {
+            let now = Instant::now();
+            record_terminal_timings(&mut state, &batch, PipelineStageOutcome::Timeout, now);
             state.timed_out_batches += 1;
         }
     }
 
     pub fn batch_failed(&self, batch_id: u64) {
         let mut state = self.state();
-        if state.active_batches.remove(&batch_id).is_some() {
+        if let Some(batch) = state.active_batches.remove(&batch_id) {
+            let now = Instant::now();
+            record_terminal_timings(&mut state, &batch, PipelineStageOutcome::Error, now);
             state.failed_batches += 1;
         }
     }
 
     pub fn batch_aborted(&self, batch_id: u64) {
         let mut state = self.state();
-        if state.active_batches.remove(&batch_id).is_some() {
+        if let Some(batch) = state.active_batches.remove(&batch_id) {
+            let now = Instant::now();
+            record_terminal_timings(&mut state, &batch, PipelineStageOutcome::Cancellation, now);
             state.aborted_batches += 1;
         }
     }
@@ -591,6 +677,11 @@ impl PipelineProgress {
         {
             state.batch_completion_samples.pop_front();
         }
+        while state.record_completion_samples.front().is_some_and(|(sample, _)| {
+            now.saturating_duration_since(*sample) > Duration::from_secs(60)
+        }) {
+            state.record_completion_samples.pop_front();
+        }
         let running_permit_holders = state
             .active_batches
             .values()
@@ -601,6 +692,8 @@ impl PipelineProgress {
             .len()
             .saturating_sub(running_permit_holders);
         let completion_throughput = completion_throughput(&state.batch_completion_samples, now);
+        let record_completion_throughput = record_throughput(&state.record_completion_samples);
+        let received_source_velocity = source_velocity(&state.received_samples);
         let (
             committed_source_velocity,
             net_convergence_rate,
@@ -687,6 +780,15 @@ impl PipelineProgress {
             state.last_reported_state = Some(transition);
         }
 
+        let mut stage_timings = state.stage_timings.iter().map(|(&(stage, outcome), timing)| StageTimingSnapshot {
+            stage,
+            outcome,
+            count: timing.count,
+            duration_milliseconds_total: timing.duration_milliseconds_total,
+            duration_milliseconds_max: timing.duration_milliseconds_max,
+        }).collect::<Vec<_>>();
+        stage_timings.sort_by_key(|timing| (timing.stage as u8, timing.outcome as u8));
+
         PipelineProgressSnapshot {
             recovery_phase: state.recovery_phase,
             readiness_state,
@@ -702,6 +804,7 @@ impl PipelineProgress {
             last_committed_event_time_us: state.last_committed_event_time_us,
             received_lag_us: state.received_lag_us,
             committed_lag_us: state.committed_lag_us,
+            received_source_velocity,
             committed_source_velocity,
             net_convergence_rate,
             catch_up_eta_state,
@@ -731,6 +834,7 @@ impl PipelineProgress {
             queued_batches,
             maximum_permits: state.maximum_permits,
             batch_completion_throughput_per_second: completion_throughput,
+            record_completion_throughput_per_second: record_completion_throughput,
             broadcast_receivers: state.broadcast_receivers,
             successful_broadcasts: state.successful_broadcasts,
             last_valid_ingress_unix_ms: state.last_ingress.as_ref().map(|event| event.unix_ms),
@@ -744,15 +848,39 @@ impl PipelineProgress {
             completion_age_seconds: completion_age.map(|age| age.as_secs()),
             oldest_active_batch_age_seconds: oldest.map(|age| age.as_secs()),
             active_batches,
+            stage_timings,
         }
     }
+}
+
+fn record_terminal_timings(
+    state: &mut ProgressState,
+    batch: &ActiveBatch,
+    outcome: PipelineStageOutcome,
+    now: Instant,
+) {
+    record_stage_timing(state, batch.stage, outcome, now.saturating_duration_since(batch.stage_started_at));
+    record_stage_timing(state, PipelineStage::EndToEnd, outcome, now.saturating_duration_since(batch.started_at));
+}
+
+fn record_stage_timing(
+    state: &mut ProgressState,
+    stage: PipelineStage,
+    outcome: PipelineStageOutcome,
+    duration: Duration,
+) {
+    let milliseconds = duration_millis(duration);
+    let timing = state.stage_timings.entry((stage, outcome)).or_default();
+    timing.count = timing.count.saturating_add(1);
+    timing.duration_milliseconds_total = timing.duration_milliseconds_total.saturating_add(milliseconds);
+    timing.duration_milliseconds_max = timing.duration_milliseconds_max.max(milliseconds);
 }
 
 fn convergence(
     samples: &VecDeque<(Instant, u64)>,
     committed_lag_us: Option<u64>,
 ) -> (Option<f64>, Option<f64>, CatchUpEtaState, Option<u64>) {
-    let (Some((first_at, first_source)), Some((last_at, last_source))) =
+    let (Some((first_at, _)), Some((last_at, _))) =
         (samples.front(), samples.back())
     else {
         return (None, None, CatchUpEtaState::Unavailable, None);
@@ -761,8 +889,9 @@ fn convergence(
     if samples.len() < 3 || wall_seconds <= f64::EPSILON {
         return (None, None, CatchUpEtaState::Unavailable, None);
     }
-    let source_delta_us = *last_source as i128 - *first_source as i128;
-    let velocity = source_delta_us as f64 / 1_000_000.0 / wall_seconds;
+    let Some(velocity) = source_velocity(samples) else {
+        return (None, None, CatchUpEtaState::Unstable, None);
+    };
     let net = velocity - 1.0;
     if net <= 0.0 {
         return (
@@ -774,6 +903,33 @@ fn convergence(
     }
     let eta = committed_lag_us.map(|lag| (lag as f64 / 1_000_000.0 / net).ceil() as u64);
     (Some(velocity), Some(net), CatchUpEtaState::Converging, eta)
+}
+
+fn source_velocity(samples: &VecDeque<(Instant, u64)>) -> Option<f64> {
+    let (Some((first_at, first_source)), Some((last_at, last_source))) =
+        (samples.front(), samples.back())
+    else {
+        return None;
+    };
+    if samples.len() < 3 || last_source < first_source {
+        return None;
+    }
+    let wall_seconds = last_at.saturating_duration_since(*first_at).as_secs_f64();
+    (wall_seconds > f64::EPSILON)
+        .then_some((*last_source - *first_source) as f64 / 1_000_000.0 / wall_seconds)
+}
+
+fn record_throughput(samples: &VecDeque<(Instant, u64)>) -> f64 {
+    let (Some((first_at, first_count)), Some((last_at, last_count))) =
+        (samples.front(), samples.back())
+    else {
+        return 0.0;
+    };
+    let elapsed = last_at.saturating_duration_since(*first_at).as_secs_f64();
+    if elapsed <= f64::EPSILON {
+        return 0.0;
+    }
+    last_count.saturating_sub(*first_count) as f64 / elapsed
 }
 
 fn completion_throughput(samples: &VecDeque<Instant>, now: Instant) -> f64 {

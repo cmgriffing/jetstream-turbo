@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::hydration::HydrationExecutionMode;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Settings {
     // Bluesky Authentication
@@ -91,6 +93,8 @@ pub struct Settings {
     pub post_coordination_key_capacity: usize,
     pub post_coordination_waiter_capacity: usize,
     pub max_concurrent_requests: usize,
+    /// Temporary one-release-cycle switch for overlapping independent hydration branches.
+    pub hydration_execution_mode: HydrationExecutionMode,
     pub cache_size_users: usize,
     pub cache_size_posts: usize,
     pub user_cache_limit_mb: u64,
@@ -203,6 +207,7 @@ impl Default for Settings {
             post_coordination_key_capacity: DEFAULT_POST_COORDINATION_KEY_CAPACITY,
             post_coordination_waiter_capacity: DEFAULT_POST_COORDINATION_WAITER_CAPACITY,
             max_concurrent_requests: 6,
+            hydration_execution_mode: HydrationExecutionMode::Sequential,
             cache_size_users: 50_000,
             cache_size_posts: 40_000,
             user_cache_limit_mb: 512,
@@ -493,6 +498,9 @@ impl Settings {
         }
         if let Ok(value) = std::env::var("BLUESKY_POST_COORDINATION_WAITER_CAPACITY") {
             builder = builder.set_override("post_coordination_waiter_capacity", value)?;
+        }
+        if let Ok(value) = std::env::var("HYDRATION_EXECUTION_MODE") {
+            builder = builder.set_override("hydration_execution_mode", value)?;
         }
 
         if let Ok(trim_maxlen) = std::env::var("TRIM_MAXLEN") {

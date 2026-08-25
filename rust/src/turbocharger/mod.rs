@@ -3,6 +3,7 @@ pub mod diagnostics;
 pub mod failure_supervisor;
 pub mod orchestrator;
 pub mod progress;
+pub mod runtime_identity;
 pub mod runtime_memory;
 
 pub use diagnostics::{
@@ -18,6 +19,10 @@ pub use orchestrator::{ProductionTurboCharger, RunFailure, RunResult, TurboCharg
 pub use progress::{
     PipelineProgress, PipelineProgressSnapshot, PipelineReadinessState, PipelineStage,
     ProgressThresholds,
+};
+pub use runtime_identity::{
+    DiagnosticAvailability, PreviousTerminationClass, PreviousTerminationDiagnostics,
+    PreviousTerminationEvidenceState, ReleaseIdentityDiagnostics, RuntimeIdentityDiagnostics,
 };
 pub use runtime_memory::{
     CgroupMemoryDiagnostics, MemoryComponentDiagnostics, MemoryEnvelope, MemoryIncident,

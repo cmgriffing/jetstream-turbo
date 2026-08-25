@@ -46,12 +46,14 @@ pub struct ReadinessDiagnostics {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct HealthDiagnostics {
+    pub runtime_identity: crate::turbocharger::RuntimeIdentityDiagnostics,
     pub process_memory: ProcessMemoryDiagnostics,
     pub runtime_memory: RuntimeMemoryDiagnostics,
     pub cache_state: CacheStateDiagnostics,
     pub sqlite_state: SQLiteStateDiagnostics,
     pub not_redis_state: NotRedisStateDiagnostics,
     pub pipeline_progress: PipelineProgressSnapshot,
+    pub completion_frontier: crate::turbocharger::coordinator::CompletionFrontierSnapshot,
     pub failure_containment: FailureContainmentSnapshot,
     pub bluesky_fetch: crate::client::BlueskyFetchDiagnostics,
     pub bluesky_coordination: crate::client::BlueskyCoordinationDiagnostics,
@@ -245,11 +247,13 @@ impl DiagnosticsCollector {
     /// Pure assembly: combine component snapshots into a `HealthDiagnostics`
     /// value.  Does not mutate any internal state.
     pub fn assemble_health(
+        runtime_identity: crate::turbocharger::RuntimeIdentityDiagnostics,
         memory: (ProcessMemoryDiagnostics, RuntimeMemoryDiagnostics),
         cache_state: CacheStateDiagnostics,
         sqlite_state: SQLiteStateDiagnostics,
         not_redis_state: NotRedisStateDiagnostics,
         pipeline_progress: PipelineProgressSnapshot,
+        completion_frontier: crate::turbocharger::coordinator::CompletionFrontierSnapshot,
         failure_containment: FailureContainmentSnapshot,
         bluesky: (
             crate::client::BlueskyFetchDiagnostics,
@@ -257,12 +261,14 @@ impl DiagnosticsCollector {
         ),
     ) -> HealthDiagnostics {
         HealthDiagnostics {
+            runtime_identity,
             process_memory: memory.0,
             runtime_memory: memory.1,
             cache_state,
             sqlite_state,
             not_redis_state,
             pipeline_progress,
+            completion_frontier,
             failure_containment,
             bluesky_fetch: bluesky.0,
             bluesky_coordination: bluesky.1,

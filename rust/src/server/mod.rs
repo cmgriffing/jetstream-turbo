@@ -1315,6 +1315,10 @@ mod tests {
         let progress = PipelineProgress::new(6, 10_000);
         let _ = progress.valid_ingress();
         HealthDiagnostics {
+            runtime_identity: crate::turbocharger::RuntimeIdentityDiagnostics::load(
+                Some("test-release"),
+                std::path::Path::new("/definitely/missing/termination.env"),
+            ),
             process_memory: ProcessMemoryDiagnostics {
                 pid: 42,
                 rss_bytes: Some(1024),
@@ -1467,6 +1471,8 @@ mod tests {
                 batch_execution: Duration::from_secs(10),
                 recovery_successes: 1,
             }),
+            completion_frontier: crate::turbocharger::coordinator::CompletionFrontier::new(None)
+                .snapshot(),
             failure_containment: Default::default(),
             bluesky_fetch: Default::default(),
             bluesky_coordination: crate::client::BlueskyCoordinationDiagnostics {

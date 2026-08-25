@@ -112,6 +112,7 @@ pub struct TurboCharger<M, P, Po, S, E> {
     broadcast_sender: broadcast::Sender<EnrichedRecord>,
     error_reporter: ErrorReporter,
     diagnostics_collector: DiagnosticsCollector,
+    runtime_identity: crate::turbocharger::RuntimeIdentityDiagnostics,
     progress: Arc<PipelineProgress>,
     completion_frontier: Arc<Mutex<CompletionFrontier>>,
     failure_supervisor: Arc<FailureSupervisor>,
@@ -223,7 +224,12 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
         );
 
         // Initialize hydrator
-        let hydrator = Hydrator::new(cache, bluesky_client.clone(), bluesky_client.clone());
+        let hydrator = Hydrator::new_with_mode(
+            cache,
+            bluesky_client.clone(),
+            bluesky_client.clone(),
+            settings.hydration_execution_mode,
+        );
 
         // Initialize storage
         let db_path = format!("{}/jetstream.db", settings.db_dir);
@@ -270,6 +276,18 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             settings.memory_sample_interval_secs,
             Some(settings.memory_envelope()),
         );
+        let termination_path = std::env::var_os("JETSTREAM_TURBO_TERMINATION_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(
+                    "/opt/jetstream-turbo/diagnostics/latest-termination.env",
+                )
+            });
+        let release_identifier = std::env::var("JETSTREAM_TURBO_RELEASE_ID").ok();
+        let runtime_identity = crate::turbocharger::RuntimeIdentityDiagnostics::load(
+            release_identifier.as_deref(),
+            &termination_path,
+        );
 
         // Initialize monitor broadcast channel
         let (broadcast_sender, _) = broadcast::channel(settings.monitor_broadcast_capacity);
@@ -289,6 +307,7 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             broadcast_sender,
             error_reporter,
             diagnostics_collector,
+            runtime_identity,
             progress,
             completion_frontier,
             failure_supervisor: Arc::new(FailureSupervisor::new(containment_policy)),
@@ -912,13 +931,23 @@ where
     }
 
     async fn persist_batch_completion(&self, completion: BatchCompletion) -> TurboResult<()> {
-        if let Some(checkpoint) = persist_batch_completion(
+        let started_at = std::time::Instant::now();
+        let persistence = persist_batch_completion(
             self.completion_frontier.as_ref(),
             self.sqlite_store.as_ref(),
             completion,
         )
-        .await?
-        {
+        .await;
+        self.progress.record_stage_duration(
+            PipelineStage::CheckpointPersistence,
+            if persistence.is_ok() {
+                crate::turbocharger::PipelineStageOutcome::Success
+            } else {
+                crate::turbocharger::PipelineStageOutcome::Error
+            },
+            started_at.elapsed(),
+        );
+        if let Some(checkpoint) = persistence? {
             if let Some(recovered) = self.failure_supervisor.observe_checkpoint(&checkpoint) {
                 self.bluesky_client.set_failure_recurrence(0);
                 metrics::gauge!("pipeline_failure_recurrence").set(0.0);
@@ -1522,8 +1551,10 @@ where
         let process_memory = self.diagnostics_collector.capture_memory();
         let bluesky_fetch = self.bluesky_client.fetch_diagnostics().await;
         let bluesky_coordination = self.bluesky_client.coordination_diagnostics().await;
+        let completion_frontier = self.completion_frontier.lock().await.snapshot();
 
         DiagnosticsCollector::assemble_health(
+            self.runtime_identity.clone(),
             (
                 process_memory,
                 self.diagnostics_collector.runtime_memory_diagnostics(),
@@ -1532,6 +1563,7 @@ where
             sqlite_state,
             not_redis_state,
             pipeline_progress,
+            completion_frontier,
             self.failure_supervisor.snapshot(),
             (bluesky_fetch, bluesky_coordination),
         )
