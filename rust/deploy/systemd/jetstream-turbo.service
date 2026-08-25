@@ -11,8 +11,17 @@ WorkingDirectory=/opt/jetstream-turbo
 ExecStart=/opt/jetstream-turbo/current/jetstream-turbo
 Restart=always
 RestartSec=10
+OOMPolicy=stop
+
+# Runtime envelope for the documented 8 GiB host profile. The application
+# begins recovery at 3 GiB, soft pressure at 3.5 GiB, and emergency containment
+# at 4.5 GiB. These external ceilings remain above in-process action thresholds.
+MemoryHigh=4864M
+MemoryMax=5120M
+MemorySwapMax=512M
 
 EnvironmentFile=/opt/jetstream-turbo/.env
+ExecStopPost=/opt/jetstream-turbo/current/capture-memory-incident.sh
 
 StandardOutput=journal
 StandardError=journal

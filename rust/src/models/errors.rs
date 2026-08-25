@@ -84,6 +84,9 @@ pub enum TurboError {
         timeout_secs: u64,
     },
 
+    #[error("controlled exit requested after runtime memory exceeded the emergency envelope")]
+    ControlledMemoryExit,
+
     // Generic errors
     #[error("Internal error: {0}")]
     Internal(String),

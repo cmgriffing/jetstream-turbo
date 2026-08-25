@@ -22,15 +22,22 @@ use crate::turbocharger::progress::{BatchLifecycle, PipelineProgress};
 use crate::turbocharger::progress::{
     PipelineProgressSnapshot, PipelineReadinessState, ProgressThresholds,
 };
+use crate::turbocharger::runtime_memory::{
+    CgroupMemoryDiagnostics, MemoryComponentDiagnostics, MemoryPressureCoordinator,
+    ProcessMemoryBreakdown, RuntimeMemorySample, WorkloadPhase, WorkloadPhaseTracker,
+    MAX_MONITOR_RECORD_BYTES,
+};
 use crate::turbocharger::{FailureSupervisor, RecoveryDecision};
 use chrono::{DateTime, Timelike, Utc};
 use futures::StreamExt;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
-use tokio::sync::{broadcast, Mutex, Semaphore};
+use tokio::sync::{broadcast, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::{interval, sleep, timeout_at, Instant};
 use tracing::{error, info, trace, warn};
@@ -108,6 +115,12 @@ pub struct TurboCharger<M, P, Po, S, E> {
     progress: Arc<PipelineProgress>,
     completion_frontier: Arc<Mutex<CompletionFrontier>>,
     failure_supervisor: Arc<FailureSupervisor>,
+    memory_phase: WorkloadPhaseTracker,
+    memory_pressure: StdMutex<MemoryPressureCoordinator>,
+    memory_pressure_permits: Mutex<Vec<OwnedSemaphorePermit>>,
+    memory_exit_requested: AtomicBool,
+    memory_peak_logged_bytes: AtomicU64,
+    memory_last_external_snapshot_unix_seconds: AtomicU64,
 }
 
 impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, RedisStore> {
@@ -132,6 +145,7 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             settings.wanted_collections.clone(),
         )
         .with_channel_capacity(settings.channel_capacity)
+        .with_max_message_bytes(settings.max_ingress_event_bytes)
         .with_endpoint_backoff(
             Duration::from_secs(settings.jetstream_endpoint_backoff_min_secs),
             Duration::from_secs(settings.jetstream_endpoint_backoff_max_secs),
@@ -197,11 +211,15 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             .await;
 
         // Initialize cache
-        let cache = TurboCache::new_with_negative_cache(
+        const MIB: u64 = 1024 * 1024;
+        let cache = TurboCache::new_with_memory_limits(
             settings.cache_size_users,
             settings.cache_size_posts,
             settings.negative_post_cache_capacity,
             settings.negative_post_cache_ttl,
+            settings.user_cache_limit_mb.saturating_mul(MIB),
+            settings.post_cache_limit_mb.saturating_mul(MIB),
+            settings.negative_post_cache_limit_mb.saturating_mul(MIB),
         );
 
         // Initialize hydrator
@@ -210,13 +228,14 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
         // Initialize storage
         let db_path = format!("{}/jetstream.db", settings.db_dir);
         let sqlite_store = Arc::new(
-            SQLiteStore::new(
+            SQLiteStore::new_with_pool_limit(
                 &db_path,
                 SQLitePragmaConfig {
                     cache_size_kib: settings.sqlite_cache_size_kib,
                     mmap_size_mb: settings.sqlite_mmap_size_mb,
                     journal_size_limit_mb: settings.sqlite_journal_size_limit_mb,
                 },
+                settings.sqlite_max_connections,
             )
             .await?,
         );
@@ -240,6 +259,17 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
 
         // Initialize semaphore for concurrency control
         let semaphore = Arc::new(Semaphore::new(settings.max_concurrent_requests.max(1)));
+        let memory_pressure = MemoryPressureCoordinator::new(
+            settings.memory_envelope(),
+            settings.max_concurrent_requests,
+        )
+        .map_err(|error| TurboError::Internal(format!("invalid memory envelope: {error}")))?;
+        let diagnostics_collector = DiagnosticsCollector::with_runtime_memory(
+            24 * 60 * 60,
+            settings.memory_sample_capacity,
+            settings.memory_sample_interval_secs,
+            Some(settings.memory_envelope()),
+        );
 
         // Initialize monitor broadcast channel
         let (broadcast_sender, _) = broadcast::channel(settings.monitor_broadcast_capacity);
@@ -258,10 +288,16 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             semaphore,
             broadcast_sender,
             error_reporter,
-            diagnostics_collector: DiagnosticsCollector::default(),
+            diagnostics_collector,
             progress,
             completion_frontier,
             failure_supervisor: Arc::new(FailureSupervisor::new(containment_policy)),
+            memory_phase: WorkloadPhaseTracker::default(),
+            memory_pressure: StdMutex::new(memory_pressure),
+            memory_pressure_permits: Mutex::new(Vec::new()),
+            memory_exit_requested: AtomicBool::new(false),
+            memory_peak_logged_bytes: AtomicU64::new(0),
+            memory_last_external_snapshot_unix_seconds: AtomicU64::new(0),
         })
     }
 }
@@ -282,6 +318,11 @@ where
         let mut last_stats = std::time::Instant::now();
         let mut batch_reporter = BatchReporter::new(BATCH_SIZE);
         let checkpoint = self.sqlite_store.load_ingestion_checkpoint().await?;
+        self.transition_memory_phase(if checkpoint.is_some() {
+            WorkloadPhase::Replay
+        } else {
+            WorkloadPhase::LiveIngestion
+        });
         let mut next_ingress_ordinal = checkpoint
             .as_ref()
             .map(|checkpoint| checkpoint.ingress_ordinal.saturating_add(1))
@@ -349,6 +390,12 @@ where
                     Self::abort_and_drain_batch_tasks(&mut batch_tasks).await;
                     return Err(error);
                 }
+            }
+
+            if self.memory_exit_requested.load(Ordering::Relaxed) {
+                buffer.clear();
+                Self::abort_and_drain_batch_tasks(&mut batch_tasks).await;
+                return Err(TurboError::ControlledMemoryExit.into());
             }
 
             if last_stats.elapsed() >= Duration::from_secs(30) {
@@ -460,6 +507,290 @@ where
 
     pub fn minimum_recovery_delay(&self) -> Duration {
         self.settings.recovery_min_delay
+    }
+
+    pub fn start_memory_observer_task(self: &Arc<Self>) {
+        let turbocharger = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut sampler = interval(Duration::from_secs(
+                turbocharger.settings.memory_sample_interval_secs,
+            ));
+            sampler.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                sampler.tick().await;
+                if let Err(error) = turbocharger.capture_runtime_memory_sample().await {
+                    warn!(%error, "Runtime memory observer sample failed");
+                }
+            }
+        });
+    }
+
+    pub fn runtime_memory_samples(&self) -> Vec<RuntimeMemorySample> {
+        self.diagnostics_collector.runtime_memory_samples()
+    }
+
+    fn transition_memory_phase(&self, phase: WorkloadPhase) {
+        if self.memory_phase.transition(phase) {
+            info!(phase = ?phase, "Runtime memory workload phase changed");
+        }
+    }
+
+    async fn capture_runtime_memory_sample(&self) -> TurboResult<()> {
+        let process = ProcessMemoryBreakdown::collect();
+        let cgroup = CgroupMemoryDiagnostics::collect();
+        let usage_bytes = cgroup.current_bytes.or(process.rss_bytes);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO);
+        let observed_actions = {
+            let mut pressure = self
+                .memory_pressure
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            pressure.observe(now, usage_bytes)
+        };
+        let actions = crate::turbocharger::runtime_memory::MemoryPressureActions {
+            reclaim_caches: observed_actions.reclaim_caches
+                && self.settings.memory_pressure_actions_enabled,
+            stop_ingestion: observed_actions.stop_ingestion
+                && self.settings.memory_pressure_actions_enabled
+                && self.settings.memory_emergency_exit_enabled,
+            emit_final_snapshot: observed_actions.emit_final_snapshot
+                && self.settings.memory_pressure_actions_enabled
+                && self.settings.memory_emergency_exit_enabled,
+            ..observed_actions
+        };
+        if self.settings.memory_pressure_actions_enabled {
+            self.apply_memory_pressure_actions(actions).await;
+        }
+
+        let progress = self.progress.snapshot(self.progress_thresholds());
+        if matches!(
+            progress.recovery_phase,
+            crate::models::recovery::RecoveryPhase::Live
+        ) && self.memory_phase.current() == WorkloadPhase::Replay
+        {
+            self.transition_memory_phase(WorkloadPhase::LiveIngestion);
+        }
+        let cache = self.hydrator.get_cache().memory_snapshot();
+        let coordination = self.bluesky_client.coordination_diagnostics().await;
+        let pool = self.sqlite_store.pool_memory_snapshot();
+        if pool.size == pool.max_connections
+            && pool.idle == 0
+            && progress.running_permit_holders > 0
+            && !matches!(
+                self.memory_phase.current(),
+                WorkloadPhase::Cleanup | WorkloadPhase::Vacuum | WorkloadPhase::Containment
+            )
+        {
+            self.transition_memory_phase(WorkloadPhase::DatabaseContention);
+        } else if self.memory_phase.current() == WorkloadPhase::DatabaseContention {
+            self.transition_memory_phase(
+                if matches!(
+                    progress.recovery_phase,
+                    crate::models::recovery::RecoveryPhase::Live
+                ) {
+                    WorkloadPhase::LiveIngestion
+                } else {
+                    WorkloadPhase::Replay
+                },
+            );
+        }
+        let coordination_bytes = coordination
+            .profiles
+            .retained_identifier_bytes
+            .saturating_add(coordination.posts.retained_identifier_bytes)
+            .saturating_add(
+                coordination
+                    .profiles
+                    .pending_keys
+                    .saturating_add(coordination.profiles.in_flight_keys)
+                    .saturating_add(coordination.posts.pending_keys)
+                    .saturating_add(coordination.posts.in_flight_keys)
+                    .saturating_mul(128),
+            )
+            .saturating_add(
+                coordination
+                    .profiles
+                    .waiters
+                    .saturating_add(coordination.posts.waiters)
+                    .saturating_mul(64),
+            );
+        let max_event_bytes =
+            u64::try_from(self.settings.max_ingress_event_bytes).unwrap_or(u64::MAX);
+        let input_channel_bytes = u64::try_from(progress.input_occupancy)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(max_event_bytes);
+        let in_flight_payload_bytes = u64::try_from(progress.running_permit_holders)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(BATCH_SIZE as u64)
+            .saturating_mul(max_event_bytes);
+        let pressure_state = self
+            .memory_pressure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .state();
+        let checkpoint_ordinal = self
+            .completion_frontier
+            .lock()
+            .await
+            .durable_checkpoint_ordinal();
+        let sample = RuntimeMemorySample {
+            captured_at_unix_millis: now.as_millis().try_into().unwrap_or(u64::MAX),
+            phase: self.memory_phase.current(),
+            pressure_state,
+            process,
+            cgroup,
+            components: MemoryComponentDiagnostics {
+                user_cache_entries: cache.user_entries,
+                user_cache_entry_limit: cache.user_entry_limit,
+                user_cache_evictions: cache.user_evictions,
+                user_cache_bytes: cache.user_bytes,
+                user_cache_limit_bytes: cache.user_limit_bytes,
+                post_cache_entries: cache.post_entries,
+                post_cache_entry_limit: cache.post_entry_limit,
+                post_cache_evictions: cache.post_evictions,
+                post_cache_bytes: cache.post_bytes,
+                post_cache_limit_bytes: cache.post_limit_bytes,
+                negative_cache_entries: cache.negative_post_entries,
+                negative_cache_entry_limit: cache.negative_post_entry_limit,
+                negative_cache_evictions: cache.negative_post_evictions,
+                negative_cache_bytes: cache.negative_post_bytes,
+                negative_cache_limit_bytes: cache.negative_post_limit_bytes,
+                coordination_bytes: u64::try_from(coordination_bytes).unwrap_or(u64::MAX),
+                input_channel_bytes,
+                input_channel_limit_bytes: u64::try_from(self.settings.channel_capacity)
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(max_event_bytes),
+                in_flight_payload_bytes,
+                in_flight_payload_limit_bytes: self
+                    .settings
+                    .in_flight_payload_limit_mb
+                    .saturating_mul(1024 * 1024),
+                monitor_broadcast_bytes: u64::try_from(self.broadcast_sender.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(MAX_MONITOR_RECORD_BYTES),
+                monitor_broadcast_limit_bytes: u64::try_from(
+                    self.settings.monitor_broadcast_capacity,
+                )
+                .unwrap_or(u64::MAX)
+                .saturating_mul(MAX_MONITOR_RECORD_BYTES),
+                sqlx_connections: pool.size,
+                sqlx_idle_connections: pool.idle,
+                sqlx_max_connections: pool.max_connections,
+                sqlite_cache_bytes_per_connection: pool.cache_bytes_per_connection,
+                sqlite_mmap_bytes: pool.mmap_limit_bytes,
+                sqlite_temp_store: pool.temp_store.to_string(),
+            },
+            throughput_per_second: progress.batch_completion_throughput_per_second,
+            committed_lag_us: progress.committed_lag_us,
+            checkpoint_ordinal,
+            input_occupancy: progress.input_occupancy,
+            queued_batches: progress.queued_batches,
+            running_batches: progress.running_permit_holders,
+            active_permits: progress.active_permits,
+            maximum_permits: progress.maximum_permits,
+        };
+
+        // A controlled exit is requested only after the final snapshot is durably
+        // replaced, so the supervisor never races the observer out of process.
+        let should_snapshot = actions.stop_ingestion
+            || actions.state_changed
+            || self.record_material_memory_peak(usage_bytes);
+        self.diagnostics_collector
+            .record_runtime_memory(sample.clone());
+        if should_snapshot {
+            info!(
+                phase = ?sample.phase,
+                pressure_state = ?sample.pressure_state,
+                rss_bytes = ?sample.process.rss_bytes,
+                cgroup_current_bytes = ?sample.cgroup.current_bytes,
+                user_cache_bytes = sample.components.user_cache_bytes,
+                post_cache_bytes = sample.components.post_cache_bytes,
+                coordination_bytes = sample.components.coordination_bytes,
+                input_channel_bytes = sample.components.input_channel_bytes,
+                in_flight_payload_bytes = sample.components.in_flight_payload_bytes,
+                "Material runtime memory snapshot"
+            );
+            self.write_external_memory_snapshot(&sample, actions.stop_ingestion)
+                .await?;
+        }
+        if actions.stop_ingestion {
+            self.memory_exit_requested.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    async fn apply_memory_pressure_actions(
+        &self,
+        actions: crate::turbocharger::runtime_memory::MemoryPressureActions,
+    ) {
+        if actions.reclaim_caches {
+            let reclaimed_entries = self.hydrator.get_cache().reclaim_expired();
+            metrics::counter!("jetstream_turbo_memory_reclaimed_cache_entries_total")
+                .increment(reclaimed_entries as u64);
+        }
+        let desired_reserved = self
+            .settings
+            .max_concurrent_requests
+            .saturating_sub(actions.target_permits);
+        let mut reserved = self.memory_pressure_permits.lock().await;
+        while reserved.len() < desired_reserved {
+            match Arc::clone(&self.semaphore).try_acquire_owned() {
+                Ok(permit) => reserved.push(permit),
+                Err(_) => break,
+            }
+        }
+        while reserved.len() > desired_reserved {
+            reserved.pop();
+        }
+        drop(reserved);
+        if actions.stop_ingestion {
+            self.transition_memory_phase(WorkloadPhase::Containment);
+        }
+    }
+
+    fn record_material_memory_peak(&self, usage_bytes: Option<u64>) -> bool {
+        const MATERIAL_PEAK_BYTES: u64 = 64 * 1024 * 1024;
+        let Some(usage_bytes) = usage_bytes else {
+            return false;
+        };
+        let previous = self.memory_peak_logged_bytes.load(Ordering::Relaxed);
+        if usage_bytes < previous.saturating_add(MATERIAL_PEAK_BYTES) {
+            return false;
+        }
+        self.memory_peak_logged_bytes
+            .compare_exchange(previous, usage_bytes, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    async fn write_external_memory_snapshot(
+        &self,
+        sample: &RuntimeMemorySample,
+        final_snapshot: bool,
+    ) -> TurboResult<()> {
+        let now_seconds = sample.captured_at_unix_millis / 1000;
+        let previous = self
+            .memory_last_external_snapshot_unix_seconds
+            .load(Ordering::Relaxed);
+        if !final_snapshot && now_seconds.saturating_sub(previous) < 30 {
+            return Ok(());
+        }
+        self.memory_last_external_snapshot_unix_seconds
+            .store(now_seconds, Ordering::Relaxed);
+        let directory = std::path::Path::new(&self.settings.db_dir).join("diagnostics");
+        tokio::fs::create_dir_all(&directory).await?;
+        let file_name = if final_snapshot {
+            "latest-memory-incident.json"
+        } else {
+            "latest-memory-snapshot.json"
+        };
+        let path = directory.join(file_name);
+        let temporary = directory.join(format!("{file_name}.tmp"));
+        let payload = serde_json::to_vec_pretty(sample)?;
+        tokio::fs::write(&temporary, payload).await?;
+        tokio::fs::rename(temporary, path).await?;
+        Ok(())
     }
 
     async fn spawn_batch_processing(
@@ -734,7 +1065,13 @@ where
         let receivers = broadcast_sender.receiver_count();
         let mut successful_sends = 0;
         for enriched in enriched_records {
-            if broadcast_sender.send(enriched).is_ok() {
+            let monitor_record_bytes = serde_json::to_vec(&enriched)
+                .ok()
+                .and_then(|payload| u64::try_from(payload.len()).ok());
+            if monitor_record_bytes.is_none_or(|bytes| bytes > MAX_MONITOR_RECORD_BYTES) {
+                metrics::counter!("monitor_broadcast_dropped_total", "reason" => "oversize_or_unserializable")
+                    .increment(1);
+            } else if broadcast_sender.send(enriched).is_ok() {
                 successful_sends += 1;
             }
         }
@@ -946,6 +1283,7 @@ where
             .collect_health_diagnostics(redis_healthy, sqlite_available, pipeline_progress.clone())
             .await;
         let containment = diagnostics.failure_containment.clone();
+        let memory_pressure_state = diagnostics.runtime_memory.pressure_state;
 
         let dependency_healthy = redis_healthy && sqlite_available && session_count > 0;
         let transport_connected = pipeline_progress.connected_endpoint.is_some();
@@ -965,6 +1303,24 @@ where
                 state: PipelineReadinessState::Stale,
                 stage: Some(PipelineStage::Ingress),
                 reason: Some("input_drop_correctness_failure".to_string()),
+                transport_connected,
+                recovery_phase,
+                unrecoverable_gap: None,
+            }
+        } else if memory_pressure_state == crate::turbocharger::MemoryPressureState::Emergency {
+            ReadinessDiagnostics {
+                state: PipelineReadinessState::Stale,
+                stage: Some(PipelineStage::Ingress),
+                reason: Some("memory_pressure_emergency".to_string()),
+                transport_connected,
+                recovery_phase,
+                unrecoverable_gap: None,
+            }
+        } else if memory_pressure_state != crate::turbocharger::MemoryPressureState::Normal {
+            ReadinessDiagnostics {
+                state: PipelineReadinessState::Recovering,
+                stage: Some(PipelineStage::Hydration),
+                reason: Some(format!("memory_pressure_{memory_pressure_state:?}").to_lowercase()),
                 transport_connected,
                 recovery_phase,
                 unrecoverable_gap: None,
@@ -1020,7 +1376,8 @@ where
                 session_count,
                 &pipeline_progress,
                 self.settings.pipeline_progress_readiness_enabled,
-            ) && !containment.persistent,
+            ) && !containment.persistent
+                && memory_pressure_state == crate::turbocharger::MemoryPressureState::Normal,
             serving: dependency_healthy,
             recovering: readiness.state == PipelineReadinessState::Recovering,
             live: readiness.state == PipelineReadinessState::Healthy
@@ -1104,6 +1461,7 @@ where
                 mmap_size_bytes: Some(snapshot.mmap_size_bytes),
                 journal_mode: Some(snapshot.journal_mode),
                 journal_size_limit_bytes: Some(snapshot.journal_size_limit_bytes),
+                temp_store: Some(snapshot.temp_store),
                 partial_records: Some(snapshot.partial_records),
                 vacuum_pending: Some(snapshot.vacuum_pending),
                 vacuum_pending_reason: snapshot.vacuum_pending_reason,
@@ -1127,6 +1485,7 @@ where
                 mmap_size_bytes: None,
                 journal_mode: None,
                 journal_size_limit_bytes: None,
+                temp_store: None,
                 partial_records: None,
                 vacuum_pending: None,
                 vacuum_pending_reason: None,
@@ -1165,7 +1524,10 @@ where
         let bluesky_coordination = self.bluesky_client.coordination_diagnostics().await;
 
         DiagnosticsCollector::assemble_health(
-            process_memory,
+            (
+                process_memory,
+                self.diagnostics_collector.runtime_memory_diagnostics(),
+            ),
             cache_state,
             sqlite_state,
             not_redis_state,
@@ -1187,7 +1549,9 @@ where
                 current_size / (1024 * 1024),
                 self.settings.max_db_size_mb
             );
-            let result = self
+            let previous_phase = self.memory_phase.current();
+            self.transition_memory_phase(WorkloadPhase::Cleanup);
+            let cleanup_result = self
                 .sqlite_store
                 .cleanup_with_vacuum(
                     self.settings.db_retention_days,
@@ -1196,7 +1560,9 @@ where
                     self.settings.cleanup_chunk_size,
                     self.settings.cleanup_chunk_delay_ms,
                 )
-                .await?;
+                .await;
+            self.transition_memory_phase(previous_phase);
+            let result = cleanup_result?;
             info!(
                 "Cleanup complete: {} records deleted, new size: {}MB, vacuum_pending: {}",
                 result.records_deleted,
@@ -1310,7 +1676,11 @@ where
         }
 
         let max_size_bytes = (self.settings.max_db_size_mb as i64) * 1024 * 1024;
-        let run = self.sqlite_store.run_vacuum(max_size_bytes).await?;
+        let previous_phase = self.memory_phase.current();
+        self.transition_memory_phase(WorkloadPhase::Vacuum);
+        let run_result = self.sqlite_store.run_vacuum(max_size_bytes).await;
+        self.transition_memory_phase(previous_phase);
+        let run = run_result?;
         info!(
             reason = ?vacuum_state.pending_reason,
             reclaimed_bytes = run.bytes_reclaimed,

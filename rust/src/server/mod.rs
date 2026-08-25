@@ -20,7 +20,7 @@ use tracing::{debug, info, warn};
 const MONITOR_WS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 const MONITOR_WS_PEER_TIMEOUT: Duration = Duration::from_secs(75);
 const MONITOR_WS_LAG_LOG_INTERVAL: Duration = Duration::from_secs(30);
-const MONITOR_WS_OUTGOING_CHANNEL_CAPACITY: usize = 1000;
+const MONITOR_WS_OUTGOING_CHANNEL_CAPACITY: usize = 16;
 
 #[derive(Deserialize)]
 pub struct StatsQuery {
@@ -453,6 +453,212 @@ fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> Strin
                 .virtual_memory_peak_unix_seconds,
         ),
     );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_runtime_memory_samples_retained",
+        "Number of fixed-cadence runtime-memory samples retained in process.",
+        diagnostics.runtime_memory.samples_retained.to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_runtime_memory_sample_capacity",
+        "Hard maximum number of runtime-memory samples retained in process.",
+        diagnostics.runtime_memory.sample_capacity.to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_runtime_memory_sample_interval_seconds",
+        "Configured independent runtime-memory sampling interval.",
+        diagnostics
+            .runtime_memory
+            .sample_interval_seconds
+            .to_string(),
+    );
+    append_gauge_metric(
+        &mut output,
+        "jetstream_turbo_runtime_memory_latest_sample_age_seconds",
+        "Age of the latest independent runtime-memory sample.",
+        optional_u64_metric_value(diagnostics.runtime_memory.latest_sample_age_seconds),
+    );
+    output.push_str("# HELP jetstream_turbo_memory_pressure_state_info Current bounded memory-pressure state.\n");
+    output.push_str("# TYPE jetstream_turbo_memory_pressure_state_info gauge\n");
+    output.push_str(&format!(
+        "jetstream_turbo_memory_pressure_state_info{{state=\"{}\"}} 1\n",
+        diagnostics.runtime_memory.pressure_state.as_str()
+    ));
+    if let Some(envelope) = diagnostics.runtime_memory.envelope {
+        output.push_str("# HELP jetstream_turbo_memory_threshold_bytes Configured runtime-memory envelope threshold.\n");
+        output.push_str("# TYPE jetstream_turbo_memory_threshold_bytes gauge\n");
+        for (threshold, value) in [
+            ("recovery", envelope.recovery_bytes),
+            ("soft_pressure", envelope.soft_pressure_bytes),
+            ("emergency", envelope.emergency_bytes),
+            ("external_hard_limit", envelope.external_hard_limit_bytes),
+        ] {
+            output.push_str(&format!(
+                "jetstream_turbo_memory_threshold_bytes{{threshold=\"{threshold}\"}} {value}\n"
+            ));
+        }
+    }
+    if let Some(sample) = diagnostics.runtime_memory.latest_sample.as_ref() {
+        output.push_str(
+            "# HELP jetstream_turbo_memory_workload_phase_info Current bounded workload phase.\n",
+        );
+        output.push_str("# TYPE jetstream_turbo_memory_workload_phase_info gauge\n");
+        output.push_str(&format!(
+            "jetstream_turbo_memory_workload_phase_info{{phase=\"{}\"}} 1\n",
+            sample.phase.as_str()
+        ));
+        for (name, help, value) in [
+            (
+                "jetstream_turbo_process_memory_anonymous_rss_bytes",
+                "Current anonymous process RSS in bytes.",
+                optional_u64_metric_value(sample.process.anonymous_rss_bytes),
+            ),
+            (
+                "jetstream_turbo_process_memory_file_rss_bytes",
+                "Current file-backed process RSS in bytes.",
+                optional_u64_metric_value(sample.process.file_rss_bytes),
+            ),
+            (
+                "jetstream_turbo_process_memory_shared_rss_bytes",
+                "Current shared process RSS in bytes.",
+                optional_u64_metric_value(sample.process.shared_rss_bytes),
+            ),
+            (
+                "jetstream_turbo_process_memory_swap_bytes",
+                "Current process swap usage in bytes.",
+                optional_u64_metric_value(sample.process.swap_bytes),
+            ),
+            (
+                "jetstream_turbo_cgroup_memory_current_bytes",
+                "Current cgroup memory usage in bytes.",
+                optional_u64_metric_value(sample.cgroup.current_bytes),
+            ),
+            (
+                "jetstream_turbo_cgroup_memory_high_bytes",
+                "Configured cgroup memory.high value in bytes.",
+                optional_u64_metric_value(sample.cgroup.high_bytes),
+            ),
+            (
+                "jetstream_turbo_cgroup_memory_max_bytes",
+                "Configured cgroup memory.max value in bytes.",
+                optional_u64_metric_value(sample.cgroup.max_bytes),
+            ),
+            (
+                "jetstream_turbo_cgroup_oom_events_total",
+                "Cgroup OOM events observed by the kernel.",
+                optional_u64_metric_value(sample.cgroup.events.oom),
+            ),
+            (
+                "jetstream_turbo_cgroup_oom_kills_total",
+                "Cgroup OOM kills observed by the kernel.",
+                optional_u64_metric_value(sample.cgroup.events.oom_kill),
+            ),
+        ] {
+            append_gauge_metric(&mut output, name, help, value);
+        }
+        append_gauge_metric(
+            &mut output,
+            "jetstream_turbo_cgroup_memory_pressure_some_avg10",
+            "Cgroup memory PSI some-stall average over ten seconds.",
+            optional_f64_metric_value(sample.cgroup.pressure_some_avg10),
+        );
+        append_gauge_metric(
+            &mut output,
+            "jetstream_turbo_cgroup_memory_pressure_full_avg10",
+            "Cgroup memory PSI full-stall average over ten seconds.",
+            optional_f64_metric_value(sample.cgroup.pressure_full_avg10),
+        );
+        output.push_str("# HELP jetstream_turbo_memory_component_bytes Estimated retained bytes by bounded component.\n");
+        output.push_str("# TYPE jetstream_turbo_memory_component_bytes gauge\n");
+        output.push_str("# HELP jetstream_turbo_memory_component_limit_bytes Configured byte limit by bounded component.\n");
+        output.push_str("# TYPE jetstream_turbo_memory_component_limit_bytes gauge\n");
+        for (component, current, limit) in [
+            (
+                "user_cache",
+                sample.components.user_cache_bytes,
+                sample.components.user_cache_limit_bytes,
+            ),
+            (
+                "post_cache",
+                sample.components.post_cache_bytes,
+                sample.components.post_cache_limit_bytes,
+            ),
+            (
+                "negative_cache",
+                sample.components.negative_cache_bytes,
+                sample.components.negative_cache_limit_bytes,
+            ),
+            (
+                "input_channel",
+                sample.components.input_channel_bytes,
+                sample.components.input_channel_limit_bytes,
+            ),
+            (
+                "in_flight_payload",
+                sample.components.in_flight_payload_bytes,
+                sample.components.in_flight_payload_limit_bytes,
+            ),
+            (
+                "monitor_broadcast",
+                sample.components.monitor_broadcast_bytes,
+                sample.components.monitor_broadcast_limit_bytes,
+            ),
+        ] {
+            output.push_str(&format!(
+                "jetstream_turbo_memory_component_bytes{{component=\"{component}\"}} {current}\n"
+            ));
+            output.push_str(&format!(
+                "jetstream_turbo_memory_component_limit_bytes{{component=\"{component}\"}} {limit}\n"
+            ));
+        }
+        append_gauge_metric(
+            &mut output,
+            "jetstream_turbo_memory_coordination_bytes",
+            "Conservative current byte estimate for active hydration coordination.",
+            sample.components.coordination_bytes.to_string(),
+        );
+        append_gauge_metric(
+            &mut output,
+            "jetstream_turbo_sqlx_pool_connections",
+            "Current SQLx SQLite pool size.",
+            sample.components.sqlx_connections.to_string(),
+        );
+        append_gauge_metric(
+            &mut output,
+            "jetstream_turbo_sqlx_pool_idle_connections",
+            "Current idle SQLx SQLite connections.",
+            sample.components.sqlx_idle_connections.to_string(),
+        );
+        append_gauge_metric(
+            &mut output,
+            "jetstream_turbo_sqlx_pool_max_connections",
+            "Configured maximum SQLx SQLite connections.",
+            sample.components.sqlx_max_connections.to_string(),
+        );
+        append_gauge_metric(
+            &mut output,
+            "jetstream_turbo_sqlite_cache_bytes_per_connection",
+            "Configured SQLite page-cache byte ceiling per connection.",
+            sample
+                .components
+                .sqlite_cache_bytes_per_connection
+                .to_string(),
+        );
+        append_gauge_metric(
+            &mut output,
+            "jetstream_turbo_sqlite_mmap_limit_bytes",
+            "Configured SQLite mmap byte ceiling.",
+            sample.components.sqlite_mmap_bytes.to_string(),
+        );
+        output.push_str("# HELP jetstream_turbo_sqlite_temp_store_info Current bounded SQLite temp-store mode.\n");
+        output.push_str("# TYPE jetstream_turbo_sqlite_temp_store_info gauge\n");
+        output.push_str(&format!(
+            "jetstream_turbo_sqlite_temp_store_info{{mode=\"{}\"}} 1\n",
+            escape_prometheus_label(&sample.components.sqlite_temp_store)
+        ));
+    }
     append_gauge_metric(
         &mut output,
         "jetstream_turbo_cache_user_entries",
@@ -1036,6 +1242,13 @@ fn append_counter_metric(output: &mut String, name: &str, help: &str, value: u64
     output.push('\n');
 }
 
+fn escape_prometheus_label(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
 fn bool_metric_value(value: bool) -> String {
     if value {
         "1".to_string()
@@ -1119,6 +1332,79 @@ mod tests {
                     virtual_memory_peak_unix_seconds: Some(1_700_000_000),
                 },
             },
+            runtime_memory: crate::turbocharger::RuntimeMemoryDiagnostics {
+                latest_sample: Some(crate::turbocharger::RuntimeMemorySample {
+                    captured_at_unix_millis: 1_700_000_000_000,
+                    phase: crate::turbocharger::WorkloadPhase::DatabaseContention,
+                    pressure_state: crate::turbocharger::MemoryPressureState::Throttled,
+                    process: crate::turbocharger::ProcessMemoryBreakdown {
+                        rss_bytes: Some(1024),
+                        anonymous_rss_bytes: Some(768),
+                        file_rss_bytes: Some(256),
+                        shared_rss_bytes: None,
+                        swap_bytes: Some(0),
+                        virtual_memory_bytes: Some(4096),
+                        collection_error: None,
+                    },
+                    cgroup: crate::turbocharger::CgroupMemoryDiagnostics {
+                        current_bytes: Some(2048),
+                        high_bytes: Some(8192),
+                        max_bytes: Some(16_384),
+                        events: crate::turbocharger::runtime_memory::CgroupMemoryEvents {
+                            oom: Some(1),
+                            oom_kill: Some(0),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    components: crate::turbocharger::MemoryComponentDiagnostics {
+                        user_cache_entries: 1,
+                        user_cache_entry_limit: 10,
+                        user_cache_evictions: 4,
+                        user_cache_bytes: 100,
+                        user_cache_limit_bytes: 1000,
+                        post_cache_entries: 2,
+                        post_cache_entry_limit: 20,
+                        post_cache_evictions: 5,
+                        post_cache_bytes: 200,
+                        post_cache_limit_bytes: 2000,
+                        negative_cache_entries: 3,
+                        negative_cache_entry_limit: 30,
+                        negative_cache_evictions: 6,
+                        negative_cache_bytes: 30,
+                        negative_cache_limit_bytes: 300,
+                        coordination_bytes: 40,
+                        input_channel_bytes: 50,
+                        input_channel_limit_bytes: 500,
+                        in_flight_payload_bytes: 60,
+                        in_flight_payload_limit_bytes: 600,
+                        monitor_broadcast_bytes: 70,
+                        monitor_broadcast_limit_bytes: 700,
+                        sqlx_connections: 2,
+                        sqlx_idle_connections: 1,
+                        sqlx_max_connections: 4,
+                        sqlite_cache_bytes_per_connection: 64 * 1024,
+                        sqlite_mmap_bytes: 256 * 1024 * 1024,
+                        sqlite_temp_store: "memory".to_string(),
+                    },
+                    ..Default::default()
+                }),
+                samples_retained: 12,
+                sample_capacity: 720,
+                sample_interval_seconds: 5,
+                latest_sample_age_seconds: Some(3),
+                pressure_state: crate::turbocharger::MemoryPressureState::Throttled,
+                envelope: Some(crate::turbocharger::MemoryEnvelope {
+                    recovery_bytes: 4096,
+                    soft_pressure_bytes: 8192,
+                    emergency_bytes: 12_288,
+                    external_hard_limit_bytes: 16_384,
+                    host_memory_bytes: 32_768,
+                    required_host_headroom_bytes: 16_384,
+                    pressure_confirmation_seconds: 10,
+                    recovery_confirmation_seconds: 20,
+                }),
+            },
             cache_state: CacheStateDiagnostics {
                 user_entries: 1,
                 post_entries: 2,
@@ -1154,6 +1440,7 @@ mod tests {
                 mmap_size_bytes: Some(268435456),
                 journal_mode: Some("wal".to_string()),
                 journal_size_limit_bytes: Some(5368709120),
+                temp_store: Some(2),
                 partial_records: Some(3),
                 vacuum_pending: Some(true),
                 vacuum_pending_reason: Some(crate::storage::VacuumPendingReason::Bloat),
@@ -1340,6 +1627,17 @@ mod tests {
 
         assert!(output.contains("jetstream_turbo_process_memory_rss_bytes 1024"));
         assert!(output.contains("jetstream_turbo_process_memory_virtual_bytes 4096"));
+        assert!(output.contains("jetstream_turbo_runtime_memory_samples_retained 12"));
+        assert!(
+            output.contains("jetstream_turbo_memory_pressure_state_info{state=\"throttled\"} 1")
+        );
+        assert!(output.contains(
+            "jetstream_turbo_memory_workload_phase_info{phase=\"database_contention\"} 1"
+        ));
+        assert!(
+            output.contains("jetstream_turbo_memory_component_bytes{component=\"post_cache\"} 200")
+        );
+        assert!(output.contains("jetstream_turbo_cgroup_oom_events_total 1"));
         assert!(output.contains("jetstream_turbo_process_memory_peak_window_seconds 86400"));
         assert!(output.contains("jetstream_turbo_process_memory_samples_24h 240"));
         assert!(output.contains("jetstream_turbo_process_memory_rss_peak_24h_bytes 8192"));

@@ -113,6 +113,16 @@ jobs:
           source: ${{ env.BINARY_NAME }}
           target: "/tmp/${{ env.SERVICE_NAME }}-candidate-${{ env.RELEASE_ID }}/"
 
+      - name: Copy bounded memory incident tools to VPS
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.VPS_TURBO_HOST }}
+          username: deploy
+          key: ${{ secrets.VPS_TURBO_SSH_KEY }}
+          strip_components: 2
+          source: "rust/deploy/capture-memory-incident.sh,rust/deploy/latest-memory-incident.sh"
+          target: "/tmp/${{ env.SERVICE_NAME }}-candidate-${{ env.RELEASE_ID }}/"
+
       - name: Install versioned candidate
         uses: appleboy/ssh-action@master
         with:
@@ -123,6 +133,12 @@ jobs:
             sudo install -o ${{ env.SERVICE_NAME }} -g ${{ env.SERVICE_NAME }} -m 0755 \
               /tmp/${{ env.SERVICE_NAME }}-candidate-${{ env.RELEASE_ID }}/${{ env.BINARY_NAME }} \
               ${{ env.DEPLOY_PATH }}/releases/${{ env.RELEASE_ID }}/${{ env.BINARY_NAME }}
+            sudo install -o ${{ env.SERVICE_NAME }} -g ${{ env.SERVICE_NAME }} -m 0755 \
+              /tmp/${{ env.SERVICE_NAME }}-candidate-${{ env.RELEASE_ID }}/capture-memory-incident.sh \
+              ${{ env.DEPLOY_PATH }}/releases/${{ env.RELEASE_ID }}/capture-memory-incident.sh
+            sudo install -o ${{ env.SERVICE_NAME }} -g ${{ env.SERVICE_NAME }} -m 0755 \
+              /tmp/${{ env.SERVICE_NAME }}-candidate-${{ env.RELEASE_ID }}/latest-memory-incident.sh \
+              ${{ env.DEPLOY_PATH }}/releases/${{ env.RELEASE_ID }}/latest-memory-incident.sh
 
       - name: Copy systemd service file to Host
         uses: appleboy/scp-action@master

@@ -3,11 +3,12 @@ pub mod diagnostics;
 pub mod failure_supervisor;
 pub mod orchestrator;
 pub mod progress;
+pub mod runtime_memory;
 
 pub use diagnostics::{
     CacheStateDiagnostics, DiagnosticsCollector, HealthDiagnostics, HealthStatus,
     MemoryPeakDiagnostics, NotRedisStateDiagnostics, ProcessMemoryDiagnostics,
-    ReadinessDiagnostics, SQLiteStateDiagnostics,
+    ReadinessDiagnostics, RuntimeMemoryDiagnostics, SQLiteStateDiagnostics,
 };
 pub use failure_supervisor::{
     FailureContainmentSnapshot, FailureSupervisor, PipelineFailureStage, PipelineFailureSubtype,
@@ -17,4 +18,11 @@ pub use orchestrator::{ProductionTurboCharger, RunFailure, RunResult, TurboCharg
 pub use progress::{
     PipelineProgress, PipelineProgressSnapshot, PipelineReadinessState, PipelineStage,
     ProgressThresholds,
+};
+pub use runtime_memory::{
+    CgroupMemoryDiagnostics, MemoryComponentDiagnostics, MemoryEnvelope, MemoryIncident,
+    MemoryIncidentClass, MemoryObserver, MemoryPressureActions, MemoryPressureCoordinator,
+    MemoryPressureState, MemoryRunArtifact, MemoryRunBaseline, MemoryRunComparison,
+    MemoryRunConfiguration, MemoryRunEvaluation, ProcessMemoryBreakdown, RuntimeMemorySample,
+    WorkloadPhase, WorkloadPhaseTracker,
 };

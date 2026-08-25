@@ -23,6 +23,7 @@ pub trait MessageSource {
 }
 
 const DEFAULT_CHANNEL_CAPACITY: usize = 10_000;
+const DEFAULT_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
 pub struct JetstreamClient {
     endpoints: Vec<String>,
@@ -30,6 +31,7 @@ pub struct JetstreamClient {
     endpoint_backoff_min: Duration,
     endpoint_backoff_max: Duration,
     channel_capacity: usize,
+    max_message_bytes: usize,
     data_idle_timeout: Option<Duration>,
     connection_timeout: Option<Duration>,
     cursor_overlap: Duration,
@@ -45,6 +47,7 @@ impl JetstreamClient {
             endpoint_backoff_min: Duration::from_secs(1),
             endpoint_backoff_max: Duration::from_secs(30),
             channel_capacity: DEFAULT_CHANNEL_CAPACITY,
+            max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
             data_idle_timeout: Some(Duration::from_secs(120)),
             connection_timeout: Some(Duration::from_secs(10)),
             cursor_overlap: Duration::from_secs(10),
@@ -59,6 +62,11 @@ impl JetstreamClient {
 
     pub fn with_channel_capacity(mut self, capacity: usize) -> Self {
         self.channel_capacity = capacity;
+        self
+    }
+
+    pub fn with_max_message_bytes(mut self, max_message_bytes: usize) -> Self {
+        self.max_message_bytes = max_message_bytes.max(1);
         self
     }
 
@@ -140,6 +148,7 @@ impl MessageSource for JetstreamClient {
         let data_idle_timeout = self.data_idle_timeout;
         let connection_timeout = self.connection_timeout;
         let cursor_overlap = self.cursor_overlap;
+        let max_message_bytes = self.max_message_bytes;
         let checkpoint_store = self.checkpoint_store.clone();
         let progress = self.progress.clone();
 
@@ -258,6 +267,23 @@ impl MessageSource for JetstreamClient {
 
                                     match msg_result {
                                 Ok(Message::Text(text)) => {
+                                    if text.len() > max_message_bytes {
+                                        warn!(
+                                            message_bytes = text.len(),
+                                            max_message_bytes,
+                                            "Rejected oversized Jetstream message"
+                                        );
+                                        metrics::counter!(
+                                            "jetstream_ingress_rejections_total",
+                                            "reason" => "oversized",
+                                            "kind" => "wire_message"
+                                        )
+                                        .increment(1);
+                                        if let Some(progress) = &progress {
+                                            progress.input_dropped(1);
+                                        }
+                                        continue;
+                                    }
                                     trace!("Received message: {}", text);
                                     // Parse the owned buffer directly (no input copy).
                                     match parse_message_owned_with_buffers(

@@ -1,0 +1,6 @@
+{
+  "throughput_per_second": 1141.2152493495867,
+  "committed_lag_us": 0,
+  "bluesky_api_requests": 20,
+  "hydration_complete_ratio": 1.0
+}

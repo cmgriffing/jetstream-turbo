@@ -1,6 +1,9 @@
 use crate::turbocharger::progress::{
     PipelineProgressSnapshot, PipelineReadinessState, PipelineStage,
 };
+use crate::turbocharger::runtime_memory::{
+    MemoryEnvelope, MemoryObserver, MemoryPressureState, RuntimeMemorySample,
+};
 use crate::turbocharger::FailureContainmentSnapshot;
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -44,6 +47,7 @@ pub struct ReadinessDiagnostics {
 #[serde(rename_all = "snake_case")]
 pub struct HealthDiagnostics {
     pub process_memory: ProcessMemoryDiagnostics,
+    pub runtime_memory: RuntimeMemoryDiagnostics,
     pub cache_state: CacheStateDiagnostics,
     pub sqlite_state: SQLiteStateDiagnostics,
     pub not_redis_state: NotRedisStateDiagnostics,
@@ -51,6 +55,18 @@ pub struct HealthDiagnostics {
     pub failure_containment: FailureContainmentSnapshot,
     pub bluesky_fetch: crate::client::BlueskyFetchDiagnostics,
     pub bluesky_coordination: crate::client::BlueskyCoordinationDiagnostics,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RuntimeMemoryDiagnostics {
+    pub latest_sample: Option<RuntimeMemorySample>,
+    pub samples_retained: usize,
+    pub sample_capacity: usize,
+    pub sample_interval_seconds: u64,
+    pub latest_sample_age_seconds: Option<u64>,
+    pub pressure_state: MemoryPressureState,
+    pub envelope: Option<MemoryEnvelope>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -117,6 +133,7 @@ pub struct SQLiteStateDiagnostics {
     pub mmap_size_bytes: Option<i64>,
     pub journal_mode: Option<String>,
     pub journal_size_limit_bytes: Option<i64>,
+    pub temp_store: Option<i64>,
     pub partial_records: Option<i64>,
     pub vacuum_pending: Option<bool>,
     pub vacuum_pending_reason: Option<crate::storage::VacuumPendingReason>,
@@ -149,12 +166,57 @@ pub struct NotRedisStateDiagnostics {
 /// health diagnostics from component snapshots.
 pub struct DiagnosticsCollector {
     memory_peak_window: Mutex<MemoryPeakWindow>,
+    runtime_memory_observer: MemoryObserver,
+    runtime_memory_sample_capacity: usize,
+    runtime_memory_sample_interval_seconds: u64,
+    memory_envelope: Option<MemoryEnvelope>,
 }
 
 impl DiagnosticsCollector {
     pub fn new(window_seconds: u64) -> Self {
+        Self::with_runtime_memory(window_seconds, 720, 5, None)
+    }
+
+    pub fn with_runtime_memory(
+        window_seconds: u64,
+        sample_capacity: usize,
+        sample_interval_seconds: u64,
+        memory_envelope: Option<MemoryEnvelope>,
+    ) -> Self {
         Self {
-            memory_peak_window: Mutex::new(MemoryPeakWindow::new(window_seconds)),
+            memory_peak_window: Mutex::new(MemoryPeakWindow::new(window_seconds, sample_capacity)),
+            runtime_memory_observer: MemoryObserver::new(sample_capacity),
+            runtime_memory_sample_capacity: sample_capacity.max(1),
+            runtime_memory_sample_interval_seconds: sample_interval_seconds.max(1),
+            memory_envelope,
+        }
+    }
+
+    pub fn record_runtime_memory(&self, sample: RuntimeMemorySample) {
+        self.runtime_memory_observer.record(sample);
+    }
+
+    pub fn runtime_memory_samples(&self) -> Vec<RuntimeMemorySample> {
+        self.runtime_memory_observer.samples()
+    }
+
+    pub fn runtime_memory_diagnostics(&self) -> RuntimeMemoryDiagnostics {
+        let latest_sample = self.runtime_memory_observer.latest();
+        let latest_sample_age_seconds = latest_sample.as_ref().map(|sample| {
+            unix_timestamp_seconds().saturating_sub(sample.captured_at_unix_millis / 1000)
+        });
+        let pressure_state = latest_sample
+            .as_ref()
+            .map(|sample| sample.pressure_state)
+            .unwrap_or_default();
+        RuntimeMemoryDiagnostics {
+            latest_sample,
+            samples_retained: self.runtime_memory_observer.len(),
+            sample_capacity: self.runtime_memory_sample_capacity,
+            sample_interval_seconds: self.runtime_memory_sample_interval_seconds,
+            latest_sample_age_seconds,
+            pressure_state,
+            envelope: self.memory_envelope,
         }
     }
 
@@ -183,7 +245,7 @@ impl DiagnosticsCollector {
     /// Pure assembly: combine component snapshots into a `HealthDiagnostics`
     /// value.  Does not mutate any internal state.
     pub fn assemble_health(
-        process_memory: ProcessMemoryDiagnostics,
+        memory: (ProcessMemoryDiagnostics, RuntimeMemoryDiagnostics),
         cache_state: CacheStateDiagnostics,
         sqlite_state: SQLiteStateDiagnostics,
         not_redis_state: NotRedisStateDiagnostics,
@@ -195,7 +257,8 @@ impl DiagnosticsCollector {
         ),
     ) -> HealthDiagnostics {
         HealthDiagnostics {
-            process_memory,
+            process_memory: memory.0,
+            runtime_memory: memory.1,
             cache_state,
             sqlite_state,
             not_redis_state,
@@ -247,13 +310,15 @@ struct MemorySample {
 #[derive(Debug)]
 struct MemoryPeakWindow {
     window_seconds: u64,
+    max_samples: usize,
     samples: VecDeque<MemorySample>,
 }
 
 impl MemoryPeakWindow {
-    fn new(window_seconds: u64) -> Self {
+    fn new(window_seconds: u64, max_samples: usize) -> Self {
         Self {
             window_seconds,
+            max_samples: max_samples.max(1),
             samples: VecDeque::new(),
         }
     }
@@ -261,6 +326,9 @@ impl MemoryPeakWindow {
     fn record(&mut self, sample: MemorySample) {
         self.samples.push_back(sample);
         self.trim_old_samples(sample.captured_at_unix_seconds);
+        while self.samples.len() > self.max_samples {
+            self.samples.pop_front();
+        }
     }
 
     fn snapshot(&mut self, now_unix_seconds: u64) -> MemoryPeakDiagnostics {
@@ -555,7 +623,7 @@ VmRSS:\t  1024 kB\n";
 
     #[test]
     fn memory_peak_window_tracks_high_watermarks_within_window() {
-        let mut window = MemoryPeakWindow::new(60);
+        let mut window = MemoryPeakWindow::new(60, 720);
         window.record(MemorySample {
             captured_at_unix_seconds: 100,
             rss_bytes: 10,
@@ -580,7 +648,7 @@ VmRSS:\t  1024 kB\n";
 
     #[test]
     fn memory_peak_window_expires_old_samples() {
-        let mut window = MemoryPeakWindow::new(60);
+        let mut window = MemoryPeakWindow::new(60, 720);
         window.record(MemorySample {
             captured_at_unix_seconds: 10,
             rss_bytes: 10,
@@ -617,5 +685,21 @@ VmRSS:\t  1024 kB\n";
         // On macOS, falls back to ps; on Linux, uses procfs
         assert!(mem.source == "procfs" || mem.source == "ps");
         assert!(mem.peaks_24h.samples_collected > 0);
+    }
+
+    #[test]
+    fn memory_peak_window_is_count_bounded_under_request_churn() {
+        let mut window = MemoryPeakWindow::new(60, 2);
+        for captured_at_unix_seconds in 1..=4 {
+            window.record(MemorySample {
+                captured_at_unix_seconds,
+                rss_bytes: captured_at_unix_seconds,
+                virtual_memory_bytes: captured_at_unix_seconds,
+            });
+        }
+
+        let snapshot = window.snapshot(4);
+        assert_eq!(snapshot.samples_collected, 2);
+        assert_eq!(snapshot.rss_peak_bytes, Some(4));
     }
 }

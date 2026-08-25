@@ -234,6 +234,7 @@ impl ErrorReporter {
             TurboError::TaskJoin(_) => "TaskJoin",
             TurboError::Timeout(_) => "Timeout",
             TurboError::BatchStageTimeout { .. } => "BatchStageTimeout",
+            TurboError::ControlledMemoryExit => "ControlledMemoryExit",
             TurboError::Internal(_) => "Internal",
             TurboError::NotFound(_) => "NotFound",
             TurboError::PermissionDenied(_) => "PermissionDenied",

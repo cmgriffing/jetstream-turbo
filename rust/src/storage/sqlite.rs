@@ -74,6 +74,7 @@ pub struct SQLiteStateSnapshot {
     pub mmap_size_bytes: i64,
     pub journal_mode: String,
     pub journal_size_limit_bytes: i64,
+    pub temp_store: i64,
     pub partial_records: i64,
     pub vacuum_pending: bool,
     pub vacuum_pending_reason: Option<VacuumPendingReason>,
@@ -109,6 +110,8 @@ pub trait RecordStore {
 pub struct SQLiteStore {
     pool: SqlitePool,
     db_path: String,
+    max_connections: u32,
+    pragma_config: SQLitePragmaConfig,
     vacuum_state: Mutex<VacuumState>,
 }
 
@@ -124,7 +127,8 @@ impl SQLiteStore {
                 tokio::fs::create_dir_all(parent).await?;
             }
         }
-        let pool = Self::connect_pool(&db_path_str, pragma_config, Duration::from_secs(5)).await?;
+        let pool =
+            Self::connect_pool(&db_path_str, pragma_config, Duration::from_secs(5), 1).await?;
         Self::initialize_bounded_schema(&pool).await?;
         let verification = verify_required_indexes(&pool).await?;
         pool.close().await;
@@ -144,6 +148,14 @@ impl SQLiteStore {
         db_path: P,
         pragma_config: SQLitePragmaConfig,
     ) -> TurboResult<Self> {
+        Self::new_with_pool_limit(db_path, pragma_config, 5).await
+    }
+
+    pub async fn new_with_pool_limit<P: AsRef<Path>>(
+        db_path: P,
+        pragma_config: SQLitePragmaConfig,
+        max_connections: u32,
+    ) -> TurboResult<Self> {
         let db_path_str = db_path.as_ref().to_string_lossy().to_string();
 
         info!("Creating SQLite database at: {}", db_path_str);
@@ -155,7 +167,13 @@ impl SQLiteStore {
             }
         }
 
-        let pool = Self::connect_pool(&db_path_str, pragma_config, Duration::from_secs(5)).await?;
+        let pool = Self::connect_pool(
+            &db_path_str,
+            pragma_config,
+            Duration::from_secs(5),
+            max_connections.max(1),
+        )
+        .await?;
 
         Self::initialize_bounded_schema(&pool).await?;
         match verify_required_indexes(&pool).await? {
@@ -174,6 +192,8 @@ impl SQLiteStore {
         Ok(Self {
             pool,
             db_path: db_path_str,
+            max_connections: max_connections.max(1),
+            pragma_config,
             vacuum_state: Mutex::new(VacuumState::default()),
         })
     }
@@ -194,7 +214,7 @@ impl SQLiteStore {
         }
 
         let command_started = Instant::now();
-        let pool = Self::connect_pool(&db_path_str, pragma_config, busy_timeout)
+        let pool = Self::connect_pool(&db_path_str, pragma_config, busy_timeout, 1)
             .await
             .map_err(|source| maintenance_sql_error("database_connection", busy_timeout, source))?;
         Self::initialize_bounded_schema(&pool)
@@ -230,6 +250,7 @@ impl SQLiteStore {
         db_path: &str,
         pragma_config: SQLitePragmaConfig,
         busy_timeout: Duration,
+        max_connections: u32,
     ) -> Result<SqlitePool, sqlx::Error> {
         let mut connect_options = SqliteConnectOptions::new()
             .filename(db_path)
@@ -241,6 +262,7 @@ impl SQLiteStore {
         }
 
         SqlitePoolOptions::new()
+            .max_connections(max_connections.max(1))
             .after_connect({
                 let db_path = db_path.to_string();
                 move |conn, _meta| {
@@ -711,6 +733,9 @@ impl SQLiteStore {
             sqlx::query_scalar("SELECT COUNT(*) FROM records WHERE hydration_quality = 'partial'")
                 .fetch_one(&self.pool)
                 .await?;
+        let (temp_store,): (i64,) = sqlx::query_as("PRAGMA temp_store")
+            .fetch_one(&self.pool)
+            .await?;
         let freelist_ratio = if page_count > 0 {
             Some(freelist_count as f64 / page_count as f64)
         } else {
@@ -729,6 +754,7 @@ impl SQLiteStore {
             mmap_size_bytes,
             journal_mode,
             journal_size_limit_bytes,
+            temp_store,
             partial_records,
             vacuum_pending: vacuum_state.pending,
             vacuum_pending_reason: vacuum_state.pending_reason,
@@ -958,11 +984,37 @@ impl SQLiteStore {
         &self.db_path
     }
 
+    pub fn pool_memory_snapshot(&self) -> SQLitePoolMemorySnapshot {
+        let cache_bytes_per_connection =
+            u64::from(self.pragma_config.cache_size_kib).saturating_mul(1024);
+        SQLitePoolMemorySnapshot {
+            size: self.pool.size(),
+            idle: self.pool.num_idle(),
+            max_connections: self.max_connections,
+            cache_bytes_per_connection,
+            aggregate_cache_limit_bytes: cache_bytes_per_connection
+                .saturating_mul(u64::from(self.max_connections)),
+            mmap_limit_bytes: self.pragma_config.mmap_size_mb.saturating_mul(1024 * 1024),
+            temp_store: "memory",
+        }
+    }
+
     pub async fn close(&self) -> TurboResult<()> {
         self.pool.close().await;
         info!("SQLite connection pool closed");
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SQLitePoolMemorySnapshot {
+    pub size: u32,
+    pub idle: usize,
+    pub max_connections: u32,
+    pub cache_bytes_per_connection: u64,
+    pub aggregate_cache_limit_bytes: u64,
+    pub mmap_limit_bytes: u64,
+    pub temp_store: &'static str,
 }
 
 fn maintenance_sql_error(

@@ -51,6 +51,8 @@ pub struct Settings {
     pub sqlite_cache_size_kib: u32,
     pub sqlite_mmap_size_mb: u64,
     pub sqlite_journal_size_limit_mb: u64,
+    /// Maximum concurrent SQLite connections. Each connection owns a page cache.
+    pub sqlite_max_connections: u32,
     pub sqlite_schema_maintenance_busy_timeout_secs: u64,
 
     // HTTP Server Configuration
@@ -91,11 +93,30 @@ pub struct Settings {
     pub max_concurrent_requests: usize,
     pub cache_size_users: usize,
     pub cache_size_posts: usize,
+    pub user_cache_limit_mb: u64,
+    pub post_cache_limit_mb: u64,
     /// Maximum temporarily unavailable referenced-post outcomes retained in memory.
     pub negative_post_cache_capacity: usize,
+    pub negative_post_cache_limit_mb: u64,
     /// Expiry for temporarily unavailable referenced-post outcomes.
     #[serde(skip)]
     pub negative_post_cache_ttl: Duration,
+
+    // Runtime memory safety
+    pub memory_recovery_mb: u64,
+    pub memory_soft_pressure_mb: u64,
+    pub memory_emergency_mb: u64,
+    pub memory_external_hard_limit_mb: u64,
+    pub memory_host_total_mb: u64,
+    pub memory_required_host_headroom_mb: u64,
+    pub memory_pressure_confirmation_secs: u64,
+    pub memory_recovery_confirmation_secs: u64,
+    pub memory_sample_interval_secs: u64,
+    pub memory_sample_capacity: usize,
+    pub in_flight_payload_limit_mb: u64,
+    pub max_ingress_event_bytes: usize,
+    pub memory_pressure_actions_enabled: bool,
+    pub memory_emergency_exit_enabled: bool,
 
     // Retry Configuration
     pub max_retries: u32,
@@ -153,6 +174,7 @@ impl Default for Settings {
             sqlite_cache_size_kib: 64 * 1024,
             sqlite_mmap_size_mb: 256,
             sqlite_journal_size_limit_mb: 512,
+            sqlite_max_connections: 4,
             sqlite_schema_maintenance_busy_timeout_secs: 30,
             http_port: 8080,
             channel_capacity: default_channel_capacity(),
@@ -183,10 +205,27 @@ impl Default for Settings {
             max_concurrent_requests: 6,
             cache_size_users: 50_000,
             cache_size_posts: 40_000,
+            user_cache_limit_mb: 512,
+            post_cache_limit_mb: 1024,
             // Sized for roughly half of the positive post cache's expected unique
             // reference volume while bounding outage-related memory growth.
             negative_post_cache_capacity: 20_000,
+            negative_post_cache_limit_mb: 128,
             negative_post_cache_ttl: Duration::from_secs(5 * 60),
+            memory_recovery_mb: 3072,
+            memory_soft_pressure_mb: 3584,
+            memory_emergency_mb: 4608,
+            memory_external_hard_limit_mb: 5120,
+            memory_host_total_mb: 8192,
+            memory_required_host_headroom_mb: 2048,
+            memory_pressure_confirmation_secs: 30,
+            memory_recovery_confirmation_secs: 60,
+            memory_sample_interval_secs: 5,
+            memory_sample_capacity: 720,
+            in_flight_payload_limit_mb: 256,
+            max_ingress_event_bytes: 256 * 1024,
+            memory_pressure_actions_enabled: false,
+            memory_emergency_exit_enabled: false,
             max_retries: 3,
             retry_base_delay: Duration::from_millis(100),
             retry_max_delay: Duration::from_secs(5),
@@ -311,6 +350,9 @@ impl Settings {
             builder = builder
                 .set_override("sqlite_journal_size_limit_mb", sqlite_journal_size_limit_mb)?;
         }
+        if let Ok(value) = std::env::var("SQLITE_MAX_CONNECTIONS") {
+            builder = builder.set_override("sqlite_max_connections", value)?;
+        }
         if let Ok(value) = std::env::var("SQLITE_SCHEMA_MAINTENANCE_BUSY_TIMEOUT_SECS") {
             builder = builder.set_override("sqlite_schema_maintenance_busy_timeout_secs", value)?;
         }
@@ -326,6 +368,54 @@ impl Settings {
 
         if let Ok(cache_size_posts) = std::env::var("CACHE_SIZE_POSTS") {
             builder = builder.set_override("cache_size_posts", cache_size_posts)?;
+        }
+        if let Ok(value) = std::env::var("USER_CACHE_LIMIT_MB") {
+            builder = builder.set_override("user_cache_limit_mb", value)?;
+        }
+        if let Ok(value) = std::env::var("POST_CACHE_LIMIT_MB") {
+            builder = builder.set_override("post_cache_limit_mb", value)?;
+        }
+        if let Ok(value) = std::env::var("NEGATIVE_POST_CACHE_LIMIT_MB") {
+            builder = builder.set_override("negative_post_cache_limit_mb", value)?;
+        }
+
+        for (environment, setting) in [
+            ("MEMORY_RECOVERY_MB", "memory_recovery_mb"),
+            ("MEMORY_SOFT_PRESSURE_MB", "memory_soft_pressure_mb"),
+            ("MEMORY_EMERGENCY_MB", "memory_emergency_mb"),
+            (
+                "MEMORY_EXTERNAL_HARD_LIMIT_MB",
+                "memory_external_hard_limit_mb",
+            ),
+            ("MEMORY_HOST_TOTAL_MB", "memory_host_total_mb"),
+            (
+                "MEMORY_REQUIRED_HOST_HEADROOM_MB",
+                "memory_required_host_headroom_mb",
+            ),
+            (
+                "MEMORY_PRESSURE_CONFIRMATION_SECS",
+                "memory_pressure_confirmation_secs",
+            ),
+            (
+                "MEMORY_RECOVERY_CONFIRMATION_SECS",
+                "memory_recovery_confirmation_secs",
+            ),
+            ("MEMORY_SAMPLE_INTERVAL_SECS", "memory_sample_interval_secs"),
+            ("MEMORY_SAMPLE_CAPACITY", "memory_sample_capacity"),
+            ("IN_FLIGHT_PAYLOAD_LIMIT_MB", "in_flight_payload_limit_mb"),
+            ("MAX_INGRESS_EVENT_BYTES", "max_ingress_event_bytes"),
+            (
+                "MEMORY_PRESSURE_ACTIONS_ENABLED",
+                "memory_pressure_actions_enabled",
+            ),
+            (
+                "MEMORY_EMERGENCY_EXIT_ENABLED",
+                "memory_emergency_exit_enabled",
+            ),
+        ] {
+            if let Ok(value) = std::env::var(environment) {
+                builder = builder.set_override(setting, value)?;
+            }
         }
 
         if let Ok(channel_capacity) = std::env::var("CHANNEL_CAPACITY") {
@@ -575,6 +665,12 @@ impl Settings {
         if self.cache_size_users == 0 || self.cache_size_posts == 0 {
             anyhow::bail!("cache_size_users and cache_size_posts must be greater than 0");
         }
+        if self.user_cache_limit_mb == 0
+            || self.post_cache_limit_mb == 0
+            || self.negative_post_cache_limit_mb == 0
+        {
+            anyhow::bail!("hydration cache byte limits must be greater than 0");
+        }
         if self.profile_coordination_key_capacity < self.profile_batch_size {
             anyhow::bail!(
                 "BLUESKY_PROFILE_COORDINATION_KEY_CAPACITY must be at least profile_batch_size ({})",
@@ -636,11 +732,113 @@ impl Settings {
             anyhow::bail!("sqlite_journal_size_limit_mb must be greater than 0");
         }
 
+        if self.sqlite_max_connections == 0 {
+            anyhow::bail!("sqlite_max_connections must be greater than 0");
+        }
+
+        self.memory_envelope().validate()?;
+        if self.memory_sample_interval_secs == 0 || self.memory_sample_capacity == 0 {
+            anyhow::bail!("memory sampling interval and capacity must be greater than 0");
+        }
+        if self.in_flight_payload_limit_mb == 0 || self.max_ingress_event_bytes == 0 {
+            anyhow::bail!("in-flight payload and ingress event byte limits must be greater than 0");
+        }
+        let required_in_flight_bytes = u64::try_from(self.max_concurrent_requests)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(25)
+            .saturating_mul(u64::try_from(self.max_ingress_event_bytes).unwrap_or(u64::MAX));
+        if self.in_flight_payload_limit_mb.saturating_mul(1024 * 1024) < required_in_flight_bytes {
+            anyhow::bail!(
+                "in_flight_payload_limit_mb must cover max_concurrent_requests * 25 records * max_ingress_event_bytes"
+            );
+        }
+        if self.conservative_memory_working_set_bytes() > self.memory_envelope().recovery_bytes {
+            anyhow::bail!(
+                "bounded cache, queue, payload, and SQLite working set must fit below memory_recovery_mb"
+            );
+        }
+
         if self.sqlite_schema_maintenance_busy_timeout_secs == 0 {
             anyhow::bail!("sqlite_schema_maintenance_busy_timeout_secs must be greater than 0");
         }
 
         Ok(())
+    }
+
+    pub fn memory_envelope(&self) -> crate::turbocharger::runtime_memory::MemoryEnvelope {
+        const MIB: u64 = 1024 * 1024;
+        crate::turbocharger::runtime_memory::MemoryEnvelope {
+            recovery_bytes: self.memory_recovery_mb.saturating_mul(MIB),
+            soft_pressure_bytes: self.memory_soft_pressure_mb.saturating_mul(MIB),
+            emergency_bytes: self.memory_emergency_mb.saturating_mul(MIB),
+            external_hard_limit_bytes: self.memory_external_hard_limit_mb.saturating_mul(MIB),
+            host_memory_bytes: self.memory_host_total_mb.saturating_mul(MIB),
+            required_host_headroom_bytes: self.memory_required_host_headroom_mb.saturating_mul(MIB),
+            pressure_confirmation_seconds: self.memory_pressure_confirmation_secs,
+            recovery_confirmation_seconds: self.memory_recovery_confirmation_secs,
+        }
+    }
+
+    pub fn conservative_memory_working_set_bytes(&self) -> u64 {
+        const MIB: u64 = 1024 * 1024;
+        const MAX_MONITOR_RECORD_BYTES: u64 = 2 * MIB;
+        const COORDINATION_IDENTIFIER_BYTES: u64 = 8 * 1024;
+        const COORDINATION_KEY_METADATA_BYTES: u64 = 192;
+        const COORDINATION_WAITER_BYTES: u64 = 128;
+        const MEMORY_SAMPLE_BYTES: u64 = 4 * 1024;
+        let mib_bounded = self
+            .user_cache_limit_mb
+            .saturating_add(self.post_cache_limit_mb)
+            .saturating_add(self.negative_post_cache_limit_mb)
+            .saturating_add(self.in_flight_payload_limit_mb)
+            .saturating_add(self.sqlite_mmap_size_mb)
+            .saturating_mul(MIB);
+        let coordination_bytes = [
+            (
+                self.profile_coordination_key_capacity,
+                self.profile_coordination_waiter_capacity,
+            ),
+            (
+                self.post_coordination_key_capacity,
+                self.post_coordination_waiter_capacity,
+            ),
+        ]
+        .into_iter()
+        .fold(0_u64, |total, (keys, waiters)| {
+            total
+                .saturating_add(u64::try_from(keys).unwrap_or(u64::MAX).saturating_mul(
+                    COORDINATION_IDENTIFIER_BYTES.saturating_add(COORDINATION_KEY_METADATA_BYTES),
+                ))
+                .saturating_add(
+                    u64::try_from(waiters)
+                        .unwrap_or(u64::MAX)
+                        .saturating_mul(COORDINATION_WAITER_BYTES),
+                )
+        });
+        mib_bounded
+            .saturating_add(
+                u64::from(self.sqlite_max_connections)
+                    .saturating_mul(u64::from(self.sqlite_cache_size_kib))
+                    .saturating_mul(1024),
+            )
+            .saturating_add(
+                u64::try_from(self.channel_capacity)
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(
+                        u64::try_from(self.max_ingress_event_bytes).unwrap_or(u64::MAX),
+                    ),
+            )
+            .saturating_add(
+                u64::try_from(self.monitor_broadcast_capacity)
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(MAX_MONITOR_RECORD_BYTES),
+            )
+            .saturating_add(coordination_bytes)
+            .saturating_add(
+                u64::try_from(self.memory_sample_capacity)
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(MEMORY_SAMPLE_BYTES),
+            )
     }
 }
 
@@ -652,11 +850,11 @@ fn default_jetstream_hosts() -> Vec<String> {
 }
 
 fn default_channel_capacity() -> usize {
-    10_000
+    1_000
 }
 
 fn default_monitor_broadcast_capacity() -> usize {
-    10_000
+    32
 }
 
 fn default_wanted_collections() -> String {
@@ -702,8 +900,13 @@ mod tests {
         assert_eq!(settings.batch_size, 10);
         assert_eq!(settings.max_db_size_mb, 20 * 1024);
         assert_eq!(settings.max_concurrent_requests, 6);
-        assert_eq!(settings.channel_capacity, 10_000);
-        assert_eq!(settings.monitor_broadcast_capacity, 10_000);
+        assert_eq!(settings.channel_capacity, 1_000);
+        assert_eq!(settings.monitor_broadcast_capacity, 32);
+        assert_eq!(settings.max_ingress_event_bytes, 256 * 1024);
+        assert!(
+            settings.conservative_memory_working_set_bytes()
+                < settings.memory_envelope().recovery_bytes
+        );
         assert_eq!(settings.jetstream_data_idle_timeout_secs, 30);
         assert_eq!(settings.jetstream_connect_timeout_secs, 10);
         assert_eq!(settings.jetstream_cursor_overlap_secs, 10);
@@ -733,6 +936,15 @@ mod tests {
         assert_eq!(settings.sqlite_cache_size_kib, 64 * 1024);
         assert_eq!(settings.sqlite_mmap_size_mb, 256);
         assert_eq!(settings.sqlite_journal_size_limit_mb, 512);
+        assert_eq!(settings.sqlite_max_connections, 4);
+        assert_eq!(settings.user_cache_limit_mb, 512);
+        assert_eq!(settings.post_cache_limit_mb, 1024);
+        assert_eq!(settings.negative_post_cache_limit_mb, 128);
+        assert_eq!(settings.memory_recovery_mb, 3072);
+        assert_eq!(settings.memory_soft_pressure_mb, 3584);
+        assert_eq!(settings.memory_emergency_mb, 4608);
+        assert_eq!(settings.memory_external_hard_limit_mb, 5120);
+        assert!(settings.memory_envelope().validate().is_ok());
         assert_eq!(settings.max_retries, 3);
         assert_eq!(settings.retry_base_delay, Duration::from_millis(100));
         assert_eq!(settings.retry_max_delay, Duration::from_secs(5));
@@ -887,6 +1099,24 @@ mod tests {
             ("BLUESKY_PROFILE_COORDINATION_WAITER_CAPACITY", "401"),
             ("BLUESKY_POST_COORDINATION_KEY_CAPACITY", "102"),
             ("BLUESKY_POST_COORDINATION_WAITER_CAPACITY", "402"),
+            ("SQLITE_MAX_CONNECTIONS", "3"),
+            ("USER_CACHE_LIMIT_MB", "111"),
+            ("POST_CACHE_LIMIT_MB", "222"),
+            ("NEGATIVE_POST_CACHE_LIMIT_MB", "33"),
+            ("MEMORY_RECOVERY_MB", "2500"),
+            ("MEMORY_SOFT_PRESSURE_MB", "2800"),
+            ("MEMORY_EMERGENCY_MB", "3000"),
+            ("MEMORY_EXTERNAL_HARD_LIMIT_MB", "4000"),
+            ("MEMORY_HOST_TOTAL_MB", "6000"),
+            ("MEMORY_REQUIRED_HOST_HEADROOM_MB", "2000"),
+            ("MEMORY_PRESSURE_CONFIRMATION_SECS", "7"),
+            ("MEMORY_RECOVERY_CONFIRMATION_SECS", "9"),
+            ("MEMORY_SAMPLE_INTERVAL_SECS", "2"),
+            ("MEMORY_SAMPLE_CAPACITY", "44"),
+            ("IN_FLIGHT_PAYLOAD_LIMIT_MB", "300"),
+            ("MAX_INGRESS_EVENT_BYTES", "1048576"),
+            ("MEMORY_PRESSURE_ACTIONS_ENABLED", "true"),
+            ("MEMORY_EMERGENCY_EXIT_ENABLED", "true"),
         ];
         for (key, value) in values {
             std::env::set_var(key, value);
@@ -928,5 +1158,44 @@ mod tests {
         assert_eq!(settings.profile_coordination_waiter_capacity, 401);
         assert_eq!(settings.post_coordination_key_capacity, 102);
         assert_eq!(settings.post_coordination_waiter_capacity, 402);
+        assert_eq!(settings.sqlite_max_connections, 3);
+        assert_eq!(settings.user_cache_limit_mb, 111);
+        assert_eq!(settings.post_cache_limit_mb, 222);
+        assert_eq!(settings.negative_post_cache_limit_mb, 33);
+        assert_eq!(settings.memory_recovery_mb, 2500);
+        assert_eq!(settings.memory_soft_pressure_mb, 2800);
+        assert_eq!(settings.memory_emergency_mb, 3000);
+        assert_eq!(settings.memory_external_hard_limit_mb, 4000);
+        assert_eq!(settings.memory_sample_interval_secs, 2);
+        assert_eq!(settings.memory_sample_capacity, 44);
+        assert!(settings.memory_pressure_actions_enabled);
+        assert!(settings.memory_emergency_exit_enabled);
+    }
+
+    #[test]
+    fn runtime_memory_settings_reject_invalid_envelopes_and_bounds() {
+        let valid = Settings {
+            stream_name: "test".to_string(),
+            bluesky_handle: "test.bsky.social".to_string(),
+            bluesky_app_password: "password".to_string(),
+            ..Default::default()
+        };
+        assert!(valid.validate().is_ok());
+
+        let mut invalid_order = valid.clone();
+        invalid_order.memory_soft_pressure_mb = invalid_order.memory_recovery_mb;
+        assert!(invalid_order.validate().is_err());
+
+        let mut invalid_headroom = valid.clone();
+        invalid_headroom.memory_required_host_headroom_mb = 4096;
+        assert!(invalid_headroom.validate().is_err());
+
+        let mut invalid_pool = valid.clone();
+        invalid_pool.sqlite_max_connections = 0;
+        assert!(invalid_pool.validate().is_err());
+
+        let mut invalid_payload = valid;
+        invalid_payload.in_flight_payload_limit_mb = 1;
+        assert!(invalid_payload.validate().is_err());
     }
 }

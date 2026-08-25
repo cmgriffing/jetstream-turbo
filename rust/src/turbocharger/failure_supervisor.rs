@@ -314,6 +314,7 @@ fn error_category(error: &TurboError) -> &'static str {
         TurboError::Io(_) => "io",
         TurboError::TaskJoin(_) => "task_join",
         TurboError::Timeout(_) | TurboError::BatchStageTimeout { .. } => "timeout",
+        TurboError::ControlledMemoryExit => "memory_emergency",
         TurboError::Internal(_) => "internal",
         TurboError::NotFound(_) => "not_found",
         TurboError::PermissionDenied(_) => "permission",

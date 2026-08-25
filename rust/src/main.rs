@@ -141,6 +141,9 @@ async fn main() -> Result<()> {
         TurboCharger::new(settings.clone(), modulo, shard, error_reporter.clone()).await?;
     let turbocharger = std::sync::Arc::new(turbocharger);
 
+    // Independent of the ingestion loop so SQLite stalls cannot suppress samples.
+    turbocharger.start_memory_observer_task();
+
     // Start background session refresh task
     turbocharger.start_session_refresh_task();
 
@@ -150,6 +153,7 @@ async fn main() -> Result<()> {
     // Run both turbocharger and server
     let turbocharger_clone = turbocharger.clone();
     let error_reporter_clone = error_reporter.clone();
+    let memory_emergency_exit_enabled = settings.memory_emergency_exit_enabled;
     let turbocharger_handle = tokio::spawn(async move {
         loop {
             let restart_delay = match turbocharger_clone.run().await {
@@ -158,6 +162,17 @@ async fn main() -> Result<()> {
                     turbocharger_clone.minimum_recovery_delay()
                 }
                 Err(failure) => {
+                    if matches!(
+                        failure.error(),
+                        jetstream_turbo_rs::TurboError::ControlledMemoryExit
+                    ) && memory_emergency_exit_enabled
+                    {
+                        tracing::error!(
+                            exit_code = 75,
+                            "Exiting after controlled runtime-memory containment"
+                        );
+                        std::process::exit(75);
+                    }
                     let decision = turbocharger_clone.record_run_failure(&failure).await;
                     if decision.log_terminal {
                         let mut ctx = HashMap::new();
