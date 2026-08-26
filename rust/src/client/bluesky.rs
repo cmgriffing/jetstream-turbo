@@ -723,8 +723,8 @@ impl BlueskyClient {
         self.session_strings.read().await.len()
     }
 
-    #[cfg(test)]
-    pub(crate) async fn set_api_base_url_for_test(&self, api_base_url: String) {
+    #[cfg(any(test, feature = "testing"))]
+    pub async fn set_api_base_url_for_test(&self, api_base_url: String) {
         self.profile_batch_collector.write().await.api_base_url = api_base_url.clone();
         self.post_batch_collector.write().await.api_base_url = api_base_url;
     }
@@ -2120,7 +2120,8 @@ impl PostBatchCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hydration::{CacheMissResolver, TurboCache};
+    use crate::hydration::{CacheMissResolver, HydrationExecutionMode, Hydrator, TurboCache};
+    use crate::testing::fixtures::create_reply_message;
     use std::sync::Mutex as StdMutex;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -3132,5 +3133,309 @@ mod tests {
         assert_eq!(waiter_settled.waiters, 0);
         assert_eq!(waiter_settled.retained_identifier_bytes, 0);
         assert!(waiter_settled.cancellations_total >= 1);
+    }
+
+    async fn assert_collectors_settled(client: &BlueskyClient) {
+        for _ in 0..200 {
+            let diagnostics = client.coordination_diagnostics().await;
+            let profiles = (
+                diagnostics.profiles.pending_keys,
+                diagnostics.profiles.in_flight_keys,
+                diagnostics.profiles.waiters,
+            );
+            let posts = (
+                diagnostics.posts.pending_keys,
+                diagnostics.posts.in_flight_keys,
+                diagnostics.posts.waiters,
+            );
+            if profiles == (0, 0, 0) && posts == (0, 0, 0) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let diagnostics = client.coordination_diagnostics().await;
+        panic!(
+            "collectors did not settle: profiles {:?} posts {:?}",
+            (
+                diagnostics.profiles.pending_keys,
+                diagnostics.profiles.in_flight_keys,
+                diagnostics.profiles.waiters
+            ),
+            (
+                diagnostics.posts.pending_keys,
+                diagnostics.posts.in_flight_keys,
+                diagnostics.posts.waiters
+            )
+        );
+    }
+
+    async fn parallel_hydrator_over(
+        client: &Arc<BlueskyClient>,
+    ) -> Hydrator<BlueskyClient, BlueskyClient> {
+        Hydrator::new_with_mode(
+            TurboCache::new(20, 20),
+            Arc::clone(client),
+            Arc::clone(client),
+            HydrationExecutionMode::Parallel,
+        )
+    }
+
+    #[tokio::test]
+    async fn parallel_required_branch_failure_settles_both_collectors() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.actor.getProfiles"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.feed.getPosts"))
+            .respond_with(DelayedEchoResponder {
+                delay: Duration::from_millis(300),
+            })
+            .mount(&server)
+            .await;
+        let client = Arc::new(client_for_server(&server, 0, ContainmentPolicy::default()).await);
+        let hydrator = parallel_hydrator_over(&client).await;
+
+        // The post branch has an in-flight claim when the required profile
+        // branch fails; both branches run to completion under join semantics
+        // and both collectors must settle with the batch failing on the
+        // profile error.
+        let error = hydrator
+            .hydrate_batch(vec![create_reply_message(1, "did:plc:parent", "settle")])
+            .await
+            .unwrap_err();
+        assert!(matches!(error, TurboError::BlueskyUpstream(_)));
+
+        assert_collectors_settled(&client).await;
+    }
+
+    #[tokio::test]
+    async fn parallel_deadline_cancellation_settles_both_collectors() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.actor.getProfiles"))
+            .respond_with(DelayedEchoResponder {
+                delay: Duration::from_secs(10),
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.feed.getPosts"))
+            .respond_with(DelayedEchoResponder {
+                delay: Duration::from_secs(10),
+            })
+            .mount(&server)
+            .await;
+        let client = Arc::new(client_for_server(&server, 0, ContainmentPolicy::default()).await);
+        let hydrator = parallel_hydrator_over(&client).await;
+
+        // Whole-batch deadline expiry drops the combined future, cancelling
+        // both branches simultaneously (and per-branch timeouts share this
+        // drop path via the orchestrator's `timeout_at`).
+        let result = tokio::time::timeout(
+            Duration::from_millis(150),
+            hydrator.hydrate_batch(vec![create_reply_message(1, "did:plc:parent", "cancel")]),
+        )
+        .await;
+        assert!(result.is_err(), "batch should hit the deadline");
+
+        assert_collectors_settled(&client).await;
+    }
+
+    #[tokio::test]
+    async fn optional_post_branch_cancellation_settles_post_collector() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.feed.getPosts"))
+            .respond_with(DelayedEchoResponder {
+                delay: Duration::from_secs(5),
+            })
+            .mount(&server)
+            .await;
+        let client = Arc::new(client_for_server(&server, 0, ContainmentPolicy::default()).await);
+
+        let task = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move {
+                client
+                    .bulk_fetch_posts(&[
+                        "at://did:plc:parent/app.bsky.feed.post/aborted".to_string()
+                    ])
+                    .await
+            })
+        };
+        for _ in 0..200 {
+            if client.coordination_diagnostics().await.posts.in_flight_keys == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+
+        assert_collectors_settled(&client).await;
+    }
+
+    #[tokio::test]
+    async fn demand_aware_partial_claim_reports_fill_counters_correctly() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.actor.getProfiles"))
+            .respond_with(PoisonResponder {
+                mode: PoisonMode::One("never-match".to_string()),
+            })
+            .mount(&server)
+            .await;
+        // The window is far longer than the test run: only the demand-aware
+        // immediate flush can serve the 5-key tail chunk of a 30-DID fetch.
+        let client = BlueskyClient::new_with_policies(
+            vec!["test-session".to_string()],
+            None,
+            25,
+            25,
+            600_000,
+            600_000,
+            fast_policy(0),
+            ContainmentPolicy::default(),
+        )
+        .unwrap();
+        client.set_api_base_url_for_test(server.uri()).await;
+
+        let dids = (0..30)
+            .map(|index| format!("did:plc:fill{index:02}"))
+            .collect::<Vec<_>>();
+        let profiles = client.bulk_fetch_profiles(&dids).await.unwrap();
+        assert_eq!(profiles.len(), 30);
+        assert!(profiles.iter().all(|profile| profile.is_some()));
+
+        let diagnostics = client.fetch_diagnostics().await;
+        assert_eq!(
+            diagnostics.profiles.requests_total, 2,
+            "one full 25-item claim plus the immediate 5-item tail claim"
+        );
+        assert_eq!(diagnostics.profiles.items_total, 30);
+        assert_eq!(
+            client
+                .profile_batch_collector
+                .read()
+                .await
+                .batches_partial
+                .load(Ordering::Relaxed),
+            1,
+            "only the tail claim is partial"
+        );
+
+        assert_collectors_settled(&client).await;
+    }
+
+    #[tokio::test]
+    async fn nine_permits_stay_below_the_shared_request_quota() {
+        let server = MockServer::start().await;
+        for endpoint in ["/app.bsky.actor.getProfiles", "/app.bsky.feed.getPosts"] {
+            Mock::given(method("GET"))
+                .and(path(endpoint))
+                .respond_with(DelayedEchoResponder {
+                    delay: Duration::from_millis(250),
+                })
+                .mount(&server)
+                .await;
+        }
+        let client = Arc::new(client_for_server(&server, 0, ContainmentPolicy::default()).await);
+
+        // Nine permits' worth of concurrent batches, each issuing one profile
+        // and one post request through the shared 10 requests/second limiter.
+        let started = std::time::Instant::now();
+        let mut tasks = Vec::new();
+        for index in 0..9 {
+            let client = Arc::clone(&client);
+            tasks.push(tokio::spawn(async move {
+                client
+                    .bulk_fetch_profiles(&[format!("did:plc:quota{index}")])
+                    .await
+                    .unwrap();
+                client
+                    .bulk_fetch_posts(&[format!("at://did:plc:quota{index}/app.bsky.feed.post/x")])
+                    .await
+                    .unwrap();
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let elapsed = started.elapsed();
+
+        let diagnostics = client.fetch_diagnostics().await;
+        let requests = diagnostics.profiles.requests_total + diagnostics.posts.requests_total;
+        assert_eq!(requests, 18);
+        assert_eq!(
+            diagnostics.profiles.errors_rate_limited + diagnostics.posts.errors_rate_limited,
+            0,
+            "the limiter must pace requests instead of producing rate-limit errors"
+        );
+
+        // The shared limiter (10 requests/second, burst 1) spaces the 18
+        // request starts at least 100ms apart; with the 250ms response delay
+        // the run cannot finish before ~1.95s, so the observed combined rate
+        // stays below the 10 requests/second quota with margin.
+        let minimum_paced_seconds = 17.0 / 10.0 + 0.25;
+        assert!(
+            elapsed.as_secs_f64() >= minimum_paced_seconds,
+            "rate limiter did not pace the shared quota: {elapsed:?}"
+        );
+        let request_rate = requests as f64 / elapsed.as_secs_f64();
+        assert!(
+            request_rate < 10.0,
+            "combined upstream request rate {request_rate:.2}/s exceeds the quota"
+        );
+
+        assert_collectors_settled(&client).await;
+    }
+
+    #[tokio::test]
+    async fn parallel_hydration_substage_timings_separate_branch_contributions() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.actor.getProfiles"))
+            .respond_with(DelayedEchoResponder {
+                delay: Duration::from_millis(120),
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/app.bsky.feed.getPosts"))
+            .respond_with(DelayedEchoResponder {
+                delay: Duration::from_millis(40),
+            })
+            .mount(&server)
+            .await;
+        let client = Arc::new(client_for_server(&server, 0, ContainmentPolicy::default()).await);
+        let hydrator = parallel_hydrator_over(&client).await;
+
+        hydrator
+            .hydrate_batch(vec![create_reply_message(1, "did:plc:parent", "substage")])
+            .await
+            .unwrap();
+
+        let diagnostics = client.fetch_diagnostics().await;
+        let substage = |kind: &BlueskyFetchKindDiagnostics, wanted: HydrationSubstage| {
+            kind.substage_timings()
+                .into_iter()
+                .find(|timing| timing.substage == wanted)
+                .unwrap_or_else(|| panic!("missing {wanted:?} substage timing"))
+        };
+        let profile_http = substage(&diagnostics.profiles, HydrationSubstage::UpstreamHttp);
+        let post_http = substage(&diagnostics.posts, HydrationSubstage::UpstreamHttp);
+        assert!(profile_http.sample_count >= 1);
+        assert!(
+            profile_http.duration_ns_total >= 120_u64 * 1_000_000,
+            "profile branch upstream contribution must be measured separately"
+        );
+        assert!(post_http.sample_count >= 1);
+        assert!(
+            post_http.duration_ns_total >= 40_u64 * 1_000_000,
+            "post branch upstream contribution must be measured separately"
+        );
     }
 }

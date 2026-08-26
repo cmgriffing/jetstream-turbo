@@ -206,8 +206,8 @@ impl Default for Settings {
             profile_coordination_waiter_capacity: DEFAULT_PROFILE_COORDINATION_WAITER_CAPACITY,
             post_coordination_key_capacity: DEFAULT_POST_COORDINATION_KEY_CAPACITY,
             post_coordination_waiter_capacity: DEFAULT_POST_COORDINATION_WAITER_CAPACITY,
-            max_concurrent_requests: 6,
-            hydration_execution_mode: HydrationExecutionMode::Sequential,
+            max_concurrent_requests: 9,
+            hydration_execution_mode: HydrationExecutionMode::Parallel,
             cache_size_users: 50_000,
             cache_size_posts: 40_000,
             user_cache_limit_mb: 512,
@@ -907,7 +907,7 @@ mod tests {
         assert_eq!(settings.wanted_collections, "app.bsky.feed.post");
         assert_eq!(settings.batch_size, 10);
         assert_eq!(settings.max_db_size_mb, 20 * 1024);
-        assert_eq!(settings.max_concurrent_requests, 6);
+        assert_eq!(settings.max_concurrent_requests, 9);
         assert_eq!(settings.channel_capacity, 1_000);
         assert_eq!(settings.monitor_broadcast_capacity, 32);
         assert_eq!(settings.max_ingress_event_bytes, 256 * 1024);
@@ -1205,8 +1205,9 @@ mod tests {
         let default = Settings::default();
         assert_eq!(
             default.hydration_execution_mode,
-            HydrationExecutionMode::Sequential,
-            "sequential must remain the deployment default"
+            HydrationExecutionMode::Parallel,
+            "concurrent resolution is the deployment default after the canary promotion; \
+             rollback is HYDRATION_EXECUTION_MODE=sequential"
         );
 
         std::env::set_var("HYDRATION_EXECUTION_MODE", "unbounded-chaos");
@@ -1248,5 +1249,25 @@ mod tests {
         let mut invalid_payload = valid;
         invalid_payload.in_flight_payload_limit_mb = 1;
         assert!(invalid_payload.validate().is_err());
+    }
+
+    #[test]
+    fn permit_default_of_nine_keeps_payload_coverage_bounded() {
+        let settings = Settings {
+            stream_name: "test".to_string(),
+            bluesky_handle: "test.bsky.social".to_string(),
+            bluesky_app_password: "password".to_string(),
+            ..Default::default()
+        };
+        // The default in-flight payload limit (256 MB) must still cover the
+        // raised permit count: 9 permits * 25 records * 256 KiB ≈ 57.6 MB.
+        assert!(settings.validate().is_ok());
+
+        let mut undersized = settings.clone();
+        undersized.in_flight_payload_limit_mb = 50;
+        assert!(
+            undersized.validate().is_err(),
+            "50 MB cannot cover 9 permits * 25 records * max_ingress_event_bytes"
+        );
     }
 }

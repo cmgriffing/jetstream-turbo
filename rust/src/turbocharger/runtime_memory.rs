@@ -993,6 +993,22 @@ mod tests {
     }
 
     #[test]
+    fn pressure_derivations_at_nine_permits_remain_at_or_above_one() {
+        // The raised permit default derives pressure-state permits by
+        // halving (Reclaiming) and quartering (Throttled); both must stay
+        // at or above 1 so pressure never fully stalls the pipeline.
+        let mut coordinator = MemoryPressureCoordinator::new(envelope(), 9).unwrap();
+        coordinator.observe(Duration::from_secs(0), Some(250));
+        let reclaimed = coordinator.observe(Duration::from_secs(11), Some(250));
+        assert_eq!(reclaimed.target_permits, 4, "9 permits halve to 4");
+        assert_eq!(coordinator.state(), MemoryPressureState::Reclaiming);
+
+        let throttled = coordinator.observe(Duration::from_secs(21), Some(250));
+        assert_eq!(throttled.target_permits, 2, "9 permits quarter to 2");
+        assert_eq!(coordinator.state(), MemoryPressureState::Throttled);
+    }
+
+    #[test]
     fn recovery_is_hysteretic_and_restores_permits_gradually() {
         let mut coordinator = MemoryPressureCoordinator::new(envelope(), 4).unwrap();
         coordinator.observe(Duration::from_secs(0), Some(250));

@@ -237,9 +237,21 @@ where
 
     pub(crate) fn claim(self: &Arc<Self>) -> Option<ClaimGuard<V, E>> {
         let mut state = self.lock_state();
+        // Demand-aware partial flush: with no key in flight, every currently
+        // registered waiter is waiting on a pending key, so flushing the
+        // partial claim satisfies all current demand immediately. While a
+        // claim is in flight, waiters outside the pending set may bring more
+        // demand, so the fixed window is retained to accumulate toward the
+        // upstream batch size and protect fill efficiency.
+        let has_in_flight_keys = state
+            .entries
+            .values()
+            .any(|entry| entry.phase == CoordinationPhase::InFlight);
         let claim_size = if state.pending.len() >= self.batch_size {
             self.batch_size
-        } else if !state.pending.is_empty() && state.last_flush.elapsed() >= self.wait {
+        } else if !state.pending.is_empty()
+            && (state.last_flush.elapsed() >= self.wait || !has_in_flight_keys)
+        {
             state.pending.len()
         } else {
             return None;
@@ -460,6 +472,128 @@ mod tests {
             "claim abandoned",
         )
         .unwrap()
+    }
+
+    fn windowed_coordinator(batch_size: usize) -> Arc<BoundedCoordinator<usize, &'static str>> {
+        BoundedCoordinator::new(
+            CoordinationLimits {
+                key_capacity: batch_size * 4,
+                waiter_capacity: batch_size * 4,
+            },
+            batch_size,
+            // A window far longer than any test run: only the demand-aware
+            // immediate flush (or a full batch) can claim inside it.
+            Duration::from_secs(600),
+            "claim abandoned",
+        )
+        .unwrap()
+    }
+
+    fn assert_settled(coordinator: &BoundedCoordinator<usize, &'static str>) {
+        let snapshot = coordinator.snapshot();
+        assert_eq!(snapshot.pending_keys, 0);
+        assert_eq!(snapshot.in_flight_keys, 0);
+        assert_eq!(snapshot.waiters, 0);
+        assert_eq!(snapshot.retained_identifier_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn quiescent_tail_set_flushes_without_waiting_the_window() {
+        let coordinator = windowed_coordinator(4);
+        let registrations = coordinator.register(&["tail".to_string()]).await.unwrap();
+
+        // No claim is in flight and the pending key covers every currently
+        // registered waiter, so the partial claim must flush immediately
+        // instead of parking the tail set behind the 600s window.
+        let claim = coordinator
+            .claim()
+            .expect("quiescent partial claim flushes immediately");
+        assert_eq!(claim.identifiers().len(), 1);
+        claim.finalize(vec![Ok(1)]);
+
+        assert_eq!(
+            registrations.into_iter().next().unwrap().receive().await,
+            Ok(1)
+        );
+        assert_settled(&coordinator);
+    }
+
+    #[tokio::test]
+    async fn overlapping_registrations_coalesce_toward_the_batch_size() {
+        let coordinator = windowed_coordinator(4);
+
+        let first = coordinator
+            .register(&[
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "d".to_string(),
+            ])
+            .await
+            .unwrap();
+        let claim_one = coordinator.claim().expect("full batch is claimable");
+        assert_eq!(claim_one.identifiers().len(), 4);
+
+        // While the first claim is in flight, an overlapping registration
+        // coalesces its duplicate key onto the in-flight entry and its new
+        // keys must accumulate toward the next full batch instead of issuing
+        // their own request.
+        let second = coordinator
+            .register(&["b".to_string(), "e".to_string(), "f".to_string()])
+            .await
+            .unwrap();
+        assert!(
+            coordinator.claim().is_none(),
+            "partial pending set must wait while a claim is in flight"
+        );
+
+        let third = coordinator
+            .register(&["g".to_string(), "h".to_string()])
+            .await
+            .unwrap();
+        let claim_two = coordinator
+            .claim()
+            .expect("accumulated full batch flushes despite the in-flight claim");
+        assert_eq!(claim_two.identifiers().len(), 4);
+
+        claim_one.finalize(vec![Ok(1), Ok(2), Ok(3), Ok(4)]);
+        claim_two.finalize(vec![Ok(5), Ok(6), Ok(7), Ok(8)]);
+
+        let mut outcomes = Vec::new();
+        for registration in first.into_iter().chain(second).chain(third) {
+            outcomes.push(registration.receive().await.unwrap());
+        }
+
+        // 9 waiters were served by 2 claims: the coalesced "b" waiter
+        // received the in-flight claim's outcome. Fill efficiency is at the
+        // maximum possible for this demand (2 requests for 8 unique keys
+        // against a batch size of 4), not one request per registration.
+        assert_eq!(outcomes, [1, 2, 3, 4, 2, 5, 6, 7, 8]);
+        assert_eq!(
+            coordinator.snapshot().coalesced_waiters_total,
+            1,
+            "the duplicate key registration must coalesce"
+        );
+        assert_settled(&coordinator);
+    }
+
+    #[tokio::test]
+    async fn simultaneous_drop_of_waiters_and_claim_settles_all_ownership() {
+        let coordinator = windowed_coordinator(2);
+        let first = coordinator
+            .register(&["one".to_string(), "two".to_string()])
+            .await
+            .unwrap();
+        let claim = coordinator.claim().expect("full claim");
+        let second = coordinator.register(&["three".to_string()]).await.unwrap();
+
+        // Whole-batch cancellation: dropping the combined future takes the
+        // in-flight claim and every waiter registration together.
+        drop(first);
+        drop(claim);
+        drop(second);
+
+        assert_settled(&coordinator);
     }
 
     #[tokio::test]

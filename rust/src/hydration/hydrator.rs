@@ -18,8 +18,8 @@ use tracing::info;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HydrationExecutionMode {
-    #[default]
     Sequential,
+    #[default]
     Parallel,
 }
 
@@ -142,7 +142,7 @@ where
             cache,
             profile_fetcher,
             post_fetcher,
-            HydrationExecutionMode::Sequential,
+            HydrationExecutionMode::default(),
         )
     }
 
@@ -313,11 +313,17 @@ where
             HydrationExecutionMode::Parallel => {
                 // These futures share the existing batch deadline imposed by the
                 // orchestrator. They do not spawn tasks, so dropping this future
-                // cancels both branches and releases coordinator guards normally.
-                tokio::try_join!(
+                // cancels both branches and releases coordinator guards via Drop.
+                // `join!` (not `try_join!`) runs both branches to completion so
+                // coalesced coordination waiters on either collector always
+                // receive real outcomes, and the required branch's error is
+                // surfaced deterministically first: a batch is never failed by
+                // an optional referenced-post failure.
+                let (profiles, posts) = futures::join!(
                     self.resolver.resolve_profiles(&dids),
                     self.resolver.resolve_posts(&uris)
-                )?
+                );
+                (profiles?, posts?)
             }
         };
         if post_outcomes.len() != uris.len() {
@@ -524,6 +530,33 @@ mod tests {
         }
     }
 
+    /// Fails only after a delay, so the other branch's error is ready first.
+    struct SlowlyFailingProfileFetcher {
+        delay: Duration,
+    }
+
+    impl ProfileFetcher for SlowlyFailingProfileFetcher {
+        async fn bulk_fetch_profiles(
+            &self,
+            _dids: &[String],
+        ) -> TurboResult<Vec<Option<Arc<BlueskyProfile>>>> {
+            tokio::time::sleep(self.delay).await;
+            Err(crate::models::TurboError::Internal(
+                "profile branch failed".to_string(),
+            ))
+        }
+    }
+
+    struct AlwaysFailingPostFetcher;
+
+    impl PostFetcher for AlwaysFailingPostFetcher {
+        async fn bulk_fetch_posts(&self, _uris: &[String]) -> TurboResult<Vec<PostFetchOutcome>> {
+            Err(crate::models::TurboError::Internal(
+                "post branch failed".to_string(),
+            ))
+        }
+    }
+
     struct HangingProfileFetcher {
         released: Arc<std::sync::atomic::AtomicBool>,
     }
@@ -671,6 +704,159 @@ mod tests {
         assert!(
             !released.load(Ordering::SeqCst),
             "cancelled branch must never produce results"
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_mode_fails_with_profile_error_when_both_branches_fail() {
+        // The optional post branch fails immediately while the required
+        // profile branch fails later; the batch must still fail with the
+        // profile branch's error (deterministic error precedence).
+        let hydrator = Hydrator::new_with_mode(
+            TurboCache::new(20, 20),
+            Arc::new(SlowlyFailingProfileFetcher {
+                delay: Duration::from_millis(25),
+            }),
+            Arc::new(AlwaysFailingPostFetcher),
+            HydrationExecutionMode::Parallel,
+        );
+
+        let error = hydrator
+            .hydrate_batch(vec![create_reply_message(1, "did:plc:parent", "both-fail")])
+            .await
+            .unwrap_err();
+
+        match error {
+            crate::models::TurboError::Internal(message) => {
+                assert_eq!(message, "profile branch failed");
+            }
+            other => panic!("expected the profile branch error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_mode_matches_sequential_output_on_mixed_workload() {
+        // Mocks consume entries when read, so each mode gets an identically
+        // pre-populated fetcher set.
+        async fn fixture_fetchers() -> (Arc<MockProfileFetcher>, Arc<MockPostFetcher>) {
+            let profiles = Arc::new(MockProfileFetcher::new());
+            let posts = Arc::new(MockPostFetcher::new());
+            posts
+                .add_post(test_post("at://did:plc:parent/app.bsky.feed.post/found"))
+                .await;
+            posts
+                .add_outcome(
+                    "at://did:plc:parent/app.bsky.feed.post/flaky".to_string(),
+                    unavailable(),
+                )
+                .await;
+            (profiles, posts)
+        }
+        let (sequential_profiles, sequential_posts) = fixture_fetchers().await;
+        let (parallel_profiles, parallel_posts) = fixture_fetchers().await;
+
+        // Mixed workload: profile cache hit, profile misses, post cache hit
+        // (found), post miss (missing), post degradation (flaky), duplicates,
+        // and out-of-order branch completion (profiles delayed past posts).
+        let mut messages = vec![
+            create_post_message(1),
+            create_reply_message(2, "did:plc:parent", "found"),
+            create_reply_message(3, "did:plc:parent", "flaky"),
+            create_reply_message(4, "did:plc:parent", "missing"),
+        ];
+        let cache_hit_author = messages[0].did.clone();
+        messages.push(messages[1].clone());
+        messages.push(messages[2].clone());
+
+        let sequential_cache = TurboCache::new(20, 20);
+        let parallel_cache = TurboCache::new(20, 20);
+        for cache in [&sequential_cache, &parallel_cache] {
+            cache.set_user_profile(
+                (*cache_hit_author).to_string(),
+                Arc::new(create_profile(&cache_hit_author)),
+            );
+        }
+
+        let sequential = Hydrator::new(sequential_cache, sequential_profiles, sequential_posts);
+        let parallel = Hydrator::new_with_mode(
+            parallel_cache,
+            Arc::new(Delayed {
+                inner: parallel_profiles,
+                delay: Duration::from_millis(20),
+            }),
+            parallel_posts,
+            HydrationExecutionMode::Parallel,
+        );
+
+        let sequential_records = sequential.hydrate_batch(messages.clone()).await.unwrap();
+        let parallel_records = parallel.hydrate_batch(messages).await.unwrap();
+
+        assert_eq!(sequential_records.len(), parallel_records.len());
+        for (sequential_record, parallel_record) in sequential_records.iter().zip(&parallel_records)
+        {
+            assert_eq!(
+                sequential_record.message.did, parallel_record.message.did,
+                "record order and identity must match"
+            );
+            assert_eq!(sequential_record.message.seq, parallel_record.message.seq);
+            assert_eq!(
+                sequential_record.hydrated_metadata.hydration_quality,
+                parallel_record.hydrated_metadata.hydration_quality
+            );
+            assert_eq!(
+                sequential_record
+                    .hydrated_metadata
+                    .author_profile
+                    .as_ref()
+                    .map(|profile| profile.did.as_ref()),
+                parallel_record
+                    .hydrated_metadata
+                    .author_profile
+                    .as_ref()
+                    .map(|profile| profile.did.as_ref())
+            );
+            assert_eq!(
+                sequential_record.hydrated_metadata.mentioned_profiles.len(),
+                parallel_record.hydrated_metadata.mentioned_profiles.len()
+            );
+            assert_eq!(
+                sequential_record.hydrated_metadata.referenced_posts.len(),
+                parallel_record.hydrated_metadata.referenced_posts.len()
+            );
+            for (sequential_post, parallel_post) in sequential_record
+                .hydrated_metadata
+                .referenced_posts
+                .iter()
+                .zip(&parallel_record.hydrated_metadata.referenced_posts)
+            {
+                assert_eq!(sequential_post.uri, parallel_post.uri);
+                assert_eq!(sequential_post.cid, parallel_post.cid);
+                assert_eq!(sequential_post.text, parallel_post.text);
+                assert_eq!(sequential_post.author_did, parallel_post.author_did);
+                assert_eq!(sequential_post.author_handle, parallel_post.author_handle);
+            }
+            assert_eq!(
+                sequential_record.hydrated_metadata.degradation_summaries,
+                parallel_record.hydrated_metadata.degradation_summaries,
+                "degradations must be identical"
+            );
+        }
+
+        // Per-record hydration time must stay monotonic and bounded under
+        // concurrent branches.
+        let parallel_times = parallel_records
+            .iter()
+            .map(|record| record.metrics.hydration_time_ms)
+            .collect::<Vec<_>>();
+        assert!(
+            parallel_times
+                .windows(2)
+                .all(|window| window[0] <= window[1]),
+            "per-record hydration time must be monotonic: {parallel_times:?}"
+        );
+        assert!(
+            parallel_times.iter().all(|time| *time < 1_000),
+            "per-record hydration time must be bounded: {parallel_times:?}"
         );
     }
 }

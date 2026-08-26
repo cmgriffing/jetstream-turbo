@@ -56,6 +56,50 @@ idempotency key.
 
 The server runs on port 8080 by default.
 
+## Recovery throughput canary
+
+Hydration throughput levers are rolled out one at a time and validated
+against the retained sequential production baseline (`baseline.json`,
+release `9b22f30`, 2026-08-25: drain 34.7 msg/s, hydration 85% of the batch
+critical path, 5.6 of 10 requests/second used, fill 10.7/8.2 items per
+request). The levers, in rollout order:
+
+1. **Adaptive claim window** — collector partial claims flush immediately
+   when no fetch is in flight (all current waiters are covered), otherwise
+   the fixed window (`TURBO_PROFILE_BATCH_WAIT_MS`, `TURBO_POST_BATCH_WAIT_MS`)
+   accumulates toward the upstream batch size.
+2. **Concurrent resolution** — `HYDRATION_EXECUTION_MODE=parallel` overlaps
+   the profile and referenced-post branches of every batch.
+3. **Permit increase** — `MAX_CONCURRENT_REQUESTS=9` converts unused
+   rate-limiter headroom into concurrent batches.
+
+**Procedure.** Each lever is canaried with `deploy/capture-recovery-baseline.sh`
+against one process for several measurement windows, then compared with the
+retained baseline across: drain rate (`completed_batches` deltas, not
+windowed committed velocity), hydration share of the batch critical path,
+combined upstream request rate, request fill efficiency
+(`items_total`/`requests_total` per collector), error counts (failed batches,
+rate-limit errors, upstream exhaustions), and coordination guard settling
+(pending/in-flight keys and waiters return to zero). The deterministic
+in-repo harnesses — `tests/recovery_gate_test.rs` (convergence gate) and
+`tests/recovery_canary_test.rs` (per-lever canary artifacts) — run the same
+comparison with delayed fetch doubles; the production canary confirms them
+against live traffic before each default change.
+
+**Promotion criterion.** A lever is promoted to default only when its canary
+drains faster than the retained sequential baseline with zero failed
+batches, no rate-limit errors, request rate below the 10 requests/second
+quota with margin, and all coordination guards settled. Any regressed
+dimension fails the canary.
+
+**Per-lever rollback (configuration only, no data migration):**
+
+| Lever | Rollback |
+|-------|----------|
+| Adaptive claim window | Restore the fixed window by raising `TURBO_PROFILE_BATCH_WAIT_MS`/`TURBO_POST_BATCH_WAIT_MS`; the demand-aware flush only bypasses the window when no claim is in flight |
+| Concurrent resolution | `HYDRATION_EXECUTION_MODE=sequential` plus restart |
+| Permit count | `MAX_CONCURRENT_REQUESTS=6` plus restart |
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/` | GET | Basic server status |
@@ -375,7 +419,7 @@ POSTHOG_HOST=https://us.i.posthog.com
 
 # Optional advanced overrides (generic settings path)
 TURBO__BATCH_SIZE=10
-MAX_CONCURRENT_REQUESTS=6
+MAX_CONCURRENT_REQUESTS=9
 CACHE_SIZE_USERS=12000
 CACHE_SIZE_POSTS=12000
 MAX_DB_SIZE_MB=12288
@@ -585,7 +629,7 @@ Pipeline diagnostics are always present at `/api/v1/health`; that endpoint remai
 | `READINESS_RECOVERY_SUCCESSES` | `3` | Consecutive healthy observations required after staleness. |
 | `PIPELINE_DEADLINES_ENABLED` | `false` | Enables the legacy batch execution deadline only; it does not control Jetstream recovery safety. |
 | `PIPELINE_PROGRESS_READINESS_ENABLED` | `false` | Makes progress participate in `/ready`. |
-| `HYDRATION_EXECUTION_MODE` | `sequential` | Temporary one-release-cycle switch for resolving independent profile and referenced-post misses concurrently (`parallel`) or sequentially inside a batch. Invalid values are rejected at startup. Rollback is `HYDRATION_EXECUTION_MODE=sequential` plus restart; see `docs/recovery-telemetry.md`. |
+| `HYDRATION_EXECUTION_MODE` | `parallel` | Temporary one-release-cycle switch for resolving independent profile and referenced-post misses concurrently (`parallel`) or sequentially inside a batch. Invalid values are rejected at startup. Rollback is `HYDRATION_EXECUTION_MODE=sequential` plus restart; see `docs/recovery-telemetry.md`. |
 
 ### Bluesky request resilience and replay containment
 

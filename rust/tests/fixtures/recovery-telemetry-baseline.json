@@ -1,0 +1,636 @@
+{
+  "kind": "recovery-telemetry-baseline",
+  "base_url": "https://turbostream-rs.messijo.com",
+  "release_identifier": "9b22f302a6736c3641da6e96ff873b8387d8bd2b",
+  "process_started_at_unix_seconds": 1787704265,
+  "sampling": {
+    "samples": 4,
+    "interval_seconds": 20
+  },
+  "summary": {
+    "recovery_phase": "catching_up",
+    "committed_lag_us_end": 24681770472,
+    "lag_change_us": 17821205,
+    "net_convergence_rate_end": -0.10819162591593967,
+    "frontier_end": {
+      "pending_range_count": 71,
+      "next_required_ordinal": 59068073,
+      "furthest_completed_ordinal": 59068673,
+      "durable_checkpoint_ordinal": 59068072,
+      "unresolved_gap_age_seconds": 3
+    },
+    "hydration_stage_seconds": 367.24299999999994,
+    "end_to_end_stage_seconds": 431.16100000000006,
+    "profiles_window": {
+      "requests": 163,
+      "items": 1509,
+      "lock_duration_seconds": 212.810444278,
+      "rate_limiter_wait_seconds": 0.354431923,
+      "http_duration_seconds": 145.079022011,
+      "assembly_duration_seconds": 0.131167647
+    },
+    "posts_window": {
+      "requests": 117,
+      "items": 968,
+      "lock_duration_seconds": 153.613738423,
+      "rate_limiter_wait_seconds": 0.130669567,
+      "http_duration_seconds": 89.829682703,
+      "assembly_duration_seconds": 0.31051281
+    }
+  },
+  "windows": [
+    {
+      "window": 1,
+      "wall_seconds": 20,
+      "committed_source_seconds_advanced": 10.089097,
+      "observed_committed_velocity": 0.50445485,
+      "batches_completed": 77,
+      "failed_batches_delta": 0,
+      "input_drops_or_failures": null
+    },
+    {
+      "window": 2,
+      "wall_seconds": 20,
+      "committed_source_seconds_advanced": -12.978749,
+      "observed_committed_velocity": -0.64893745,
+      "batches_completed": 12,
+      "failed_batches_delta": 0,
+      "input_drops_or_failures": null
+    },
+    {
+      "window": 3,
+      "wall_seconds": 20,
+      "committed_source_seconds_advanced": -14.931553,
+      "observed_committed_velocity": -0.74657765,
+      "batches_completed": 95,
+      "failed_batches_delta": 0,
+      "input_drops_or_failures": null
+    }
+  ],
+  "frames": [
+    {
+      "sample": 0,
+      "captured_at_unix_seconds": 1787704867,
+      "process_started_at_unix_seconds": 1787704265,
+      "release_identifier": "9b22f302a6736c3641da6e96ff873b8387d8bd2b",
+      "recovery_phase": "catching_up",
+      "committed_lag_us": 24663949267,
+      "committed_source_velocity": 1.0750378313530282,
+      "net_convergence_rate": 0.07503783135302822,
+      "catch_up_eta_state": "converging",
+      "input_backpressured": true,
+      "input_occupancy": 1000,
+      "input_capacity": 1000,
+      "blocked_send_duration_ms": 598287,
+      "completed_batches": 2020,
+      "failed_batches": 0,
+      "active_permits": 6,
+      "frontier": {
+        "pending_range_count": 127,
+        "next_required_ordinal": 59064907,
+        "furthest_completed_ordinal": 59066807,
+        "durable_checkpoint_ordinal": 59064906,
+        "unresolved_gap_age_seconds": 20
+      },
+      "stage_timings": [
+        {
+          "stage": "duplicate_detection",
+          "outcome": "success",
+          "count": 2026,
+          "duration_milliseconds_total": 6973,
+          "duration_milliseconds_max": 47
+        },
+        {
+          "stage": "hydration",
+          "outcome": "success",
+          "count": 2020,
+          "duration_milliseconds_total": 3537436,
+          "duration_milliseconds_max": 31232
+        },
+        {
+          "stage": "storage",
+          "outcome": "success",
+          "count": 2020,
+          "duration_milliseconds_total": 16310,
+          "duration_milliseconds_max": 211
+        },
+        {
+          "stage": "publication",
+          "outcome": "success",
+          "count": 2020,
+          "duration_milliseconds_total": 111,
+          "duration_milliseconds_max": 12
+        },
+        {
+          "stage": "broadcast",
+          "outcome": "success",
+          "count": 2020,
+          "duration_milliseconds_total": 116,
+          "duration_milliseconds_max": 15
+        },
+        {
+          "stage": "checkpoint_persistence",
+          "outcome": "success",
+          "count": 2020,
+          "duration_milliseconds_total": 356,
+          "duration_milliseconds_max": 68
+        },
+        {
+          "stage": "end_to_end",
+          "outcome": "success",
+          "count": 2020,
+          "duration_milliseconds_total": 4161474,
+          "duration_milliseconds_max": 32842
+        }
+      ],
+      "bluesky_fetch": {
+        "profiles": {
+          "requests_total": 2018,
+          "items_total": 21978,
+          "lock_duration_ns_total": 1986323476633,
+          "lock_duration_count": 1840,
+          "http_duration_ns_total": 1490325062817,
+          "http_duration_count": 2015,
+          "rate_limiter_wait_ns_total": 23504552946,
+          "rate_limiter_wait_count": 2043,
+          "assembly_duration_ns_total": 1375421406,
+          "assembly_duration_count": 2015,
+          "errors_rate_limited": 0,
+          "errors_upstream": 0
+        },
+        "posts": {
+          "requests_total": 1379,
+          "items_total": 13055,
+          "lock_duration_ns_total": 1550018733590,
+          "lock_duration_count": 1620,
+          "http_duration_ns_total": 1025076021007,
+          "http_duration_count": 1378,
+          "rate_limiter_wait_ns_total": 9652909575,
+          "rate_limiter_wait_count": 1405,
+          "assembly_duration_ns_total": 2622874806,
+          "assembly_duration_count": 1376,
+          "errors_rate_limited": 0,
+          "errors_upstream": 2
+        }
+      },
+      "bluesky_coordination": {
+        "profiles": {
+          "pending_keys": 0,
+          "in_flight_keys": 54,
+          "waiters": 56,
+          "retained_identifier_bytes": 1728,
+          "key_capacity": 150,
+          "waiter_capacity": 600,
+          "key_high_watermark": 141,
+          "waiter_high_watermark": 145,
+          "retained_identifier_bytes_high_watermark": 4512,
+          "coalesced_waiters_total": 64,
+          "completions_total": 21924,
+          "cancellations_total": 0,
+          "failed_finalizations_total": 0,
+          "completed_result_owners": 0
+        },
+        "posts": {
+          "pending_keys": 0,
+          "in_flight_keys": 12,
+          "waiters": 12,
+          "retained_identifier_bytes": 840,
+          "key_capacity": 150,
+          "waiter_capacity": 600,
+          "key_high_watermark": 79,
+          "waiter_high_watermark": 79,
+          "retained_identifier_bytes_high_watermark": 5530,
+          "coalesced_waiters_total": 22,
+          "completions_total": 13043,
+          "cancellations_total": 0,
+          "failed_finalizations_total": 0,
+          "completed_result_owners": 0
+        }
+      },
+      "_metrics_raw_len": 32550
+    },
+    {
+      "sample": 1,
+      "captured_at_unix_seconds": 1787704887,
+      "process_started_at_unix_seconds": 1787704265,
+      "release_identifier": "9b22f302a6736c3641da6e96ff873b8387d8bd2b",
+      "recovery_phase": "catching_up",
+      "committed_lag_us": 24653860170,
+      "committed_source_velocity": 1.0859752945478827,
+      "net_convergence_rate": 0.08597529454788266,
+      "catch_up_eta_state": "converging",
+      "input_backpressured": true,
+      "input_occupancy": 1000,
+      "input_capacity": 1000,
+      "blocked_send_duration_ms": 614898,
+      "completed_batches": 2097,
+      "failed_batches": 0,
+      "active_permits": 6,
+      "frontier": {
+        "pending_range_count": 60,
+        "next_required_ordinal": 59067037,
+        "furthest_completed_ordinal": 59067984,
+        "durable_checkpoint_ordinal": 59067036,
+        "unresolved_gap_age_seconds": 10
+      },
+      "stage_timings": [
+        {
+          "stage": "duplicate_detection",
+          "outcome": "success",
+          "count": 2103,
+          "duration_milliseconds_total": 7356,
+          "duration_milliseconds_max": 47
+        },
+        {
+          "stage": "hydration",
+          "outcome": "success",
+          "count": 2097,
+          "duration_milliseconds_total": 3636779,
+          "duration_milliseconds_max": 31232
+        },
+        {
+          "stage": "storage",
+          "outcome": "success",
+          "count": 2097,
+          "duration_milliseconds_total": 17249,
+          "duration_milliseconds_max": 211
+        },
+        {
+          "stage": "publication",
+          "outcome": "success",
+          "count": 2097,
+          "duration_milliseconds_total": 127,
+          "duration_milliseconds_max": 12
+        },
+        {
+          "stage": "broadcast",
+          "outcome": "success",
+          "count": 2097,
+          "duration_milliseconds_total": 131,
+          "duration_milliseconds_max": 15
+        },
+        {
+          "stage": "checkpoint_persistence",
+          "outcome": "success",
+          "count": 2097,
+          "duration_milliseconds_total": 367,
+          "duration_milliseconds_max": 68
+        },
+        {
+          "stage": "end_to_end",
+          "outcome": "success",
+          "count": 2097,
+          "duration_milliseconds_total": 4279178,
+          "duration_milliseconds_max": 32842
+        }
+      ],
+      "bluesky_fetch": {
+        "profiles": {
+          "requests_total": 2085,
+          "items_total": 22905,
+          "lock_duration_ns_total": 2053027602039,
+          "lock_duration_count": 1910,
+          "http_duration_ns_total": 1545574967542,
+          "http_duration_count": 2084,
+          "rate_limiter_wait_ns_total": 23772233492,
+          "rate_limiter_wait_count": 2113,
+          "assembly_duration_ns_total": 1405681359,
+          "assembly_duration_count": 2084,
+          "errors_rate_limited": 0,
+          "errors_upstream": 0
+        },
+        "posts": {
+          "requests_total": 1432,
+          "items_total": 13649,
+          "lock_duration_ns_total": 1582536035268,
+          "lock_duration_count": 1685,
+          "http_duration_ns_total": 1040890995832,
+          "http_duration_count": 1430,
+          "rate_limiter_wait_ns_total": 9752709576,
+          "rate_limiter_wait_count": 1459,
+          "assembly_duration_ns_total": 2753126803,
+          "assembly_duration_count": 1428,
+          "errors_rate_limited": 0,
+          "errors_upstream": 2
+        }
+      },
+      "bluesky_coordination": {
+        "profiles": {
+          "pending_keys": 0,
+          "in_flight_keys": 18,
+          "waiters": 20,
+          "retained_identifier_bytes": 576,
+          "key_capacity": 150,
+          "waiter_capacity": 600,
+          "key_high_watermark": 141,
+          "waiter_high_watermark": 145,
+          "retained_identifier_bytes_high_watermark": 4512,
+          "coalesced_waiters_total": 69,
+          "completions_total": 22887,
+          "cancellations_total": 0,
+          "failed_finalizations_total": 0,
+          "completed_result_owners": 0
+        },
+        "posts": {
+          "pending_keys": 0,
+          "in_flight_keys": 28,
+          "waiters": 28,
+          "retained_identifier_bytes": 1960,
+          "key_capacity": 150,
+          "waiter_capacity": 600,
+          "key_high_watermark": 79,
+          "waiter_high_watermark": 79,
+          "retained_identifier_bytes_high_watermark": 5530,
+          "coalesced_waiters_total": 24,
+          "completions_total": 13621,
+          "cancellations_total": 0,
+          "failed_finalizations_total": 0,
+          "completed_result_owners": 0
+        }
+      },
+      "_metrics_raw_len": 32549
+    },
+    {
+      "sample": 2,
+      "captured_at_unix_seconds": 1787704907,
+      "process_started_at_unix_seconds": 1787704265,
+      "release_identifier": "9b22f302a6736c3641da6e96ff873b8387d8bd2b",
+      "recovery_phase": "catching_up",
+      "committed_lag_us": 24666838919,
+      "committed_source_velocity": 1.1141126611005057,
+      "net_convergence_rate": 0.11411266110050566,
+      "catch_up_eta_state": "converging",
+      "input_backpressured": true,
+      "input_occupancy": 1000,
+      "input_capacity": 1000,
+      "blocked_send_duration_ms": 636135,
+      "completed_batches": 2109,
+      "failed_batches": 0,
+      "active_permits": 6,
+      "frontier": {
+        "pending_range_count": 32,
+        "next_required_ordinal": 59067596,
+        "furthest_completed_ordinal": 59068025,
+        "durable_checkpoint_ordinal": 59067595,
+        "unresolved_gap_age_seconds": 7
+      },
+      "stage_timings": [
+        {
+          "stage": "duplicate_detection",
+          "outcome": "success",
+          "count": 2115,
+          "duration_milliseconds_total": 7393,
+          "duration_milliseconds_max": 47
+        },
+        {
+          "stage": "hydration",
+          "outcome": "success",
+          "count": 2109,
+          "duration_milliseconds_total": 3702525,
+          "duration_milliseconds_max": 31232
+        },
+        {
+          "stage": "storage",
+          "outcome": "success",
+          "count": 2109,
+          "duration_milliseconds_total": 17348,
+          "duration_milliseconds_max": 211
+        },
+        {
+          "stage": "publication",
+          "outcome": "success",
+          "count": 2109,
+          "duration_milliseconds_total": 127,
+          "duration_milliseconds_max": 12
+        },
+        {
+          "stage": "broadcast",
+          "outcome": "success",
+          "count": 2109,
+          "duration_milliseconds_total": 131,
+          "duration_milliseconds_max": 15
+        },
+        {
+          "stage": "checkpoint_persistence",
+          "outcome": "success",
+          "count": 2109,
+          "duration_milliseconds_total": 406,
+          "duration_milliseconds_max": 68
+        },
+        {
+          "stage": "end_to_end",
+          "outcome": "success",
+          "count": 2109,
+          "duration_milliseconds_total": 4348989,
+          "duration_milliseconds_max": 32842
+        }
+      ],
+      "bluesky_fetch": {
+        "profiles": {
+          "requests_total": 2097,
+          "items_total": 22927,
+          "lock_duration_ns_total": 2055538071678,
+          "lock_duration_count": 1920,
+          "http_duration_ns_total": 1547945165723,
+          "http_duration_count": 2094,
+          "rate_limiter_wait_ns_total": 23772241067,
+          "rate_limiter_wait_count": 2125,
+          "assembly_duration_ns_total": 1407028567,
+          "assembly_duration_count": 2094,
+          "errors_rate_limited": 0,
+          "errors_upstream": 0
+        },
+        "posts": {
+          "requests_total": 1439,
+          "items_total": 13658,
+          "lock_duration_ns_total": 1645230038344,
+          "lock_duration_count": 1694,
+          "http_duration_ns_total": 1072894561574,
+          "http_duration_count": 1438,
+          "rate_limiter_wait_ns_total": 9752715825,
+          "rate_limiter_wait_count": 1467,
+          "assembly_duration_ns_total": 2755092949,
+          "assembly_duration_count": 1436,
+          "errors_rate_limited": 0,
+          "errors_upstream": 2
+        }
+      },
+      "bluesky_coordination": {
+        "profiles": {
+          "pending_keys": 0,
+          "in_flight_keys": 26,
+          "waiters": 28,
+          "retained_identifier_bytes": 832,
+          "key_capacity": 150,
+          "waiter_capacity": 600,
+          "key_high_watermark": 141,
+          "waiter_high_watermark": 145,
+          "retained_identifier_bytes_high_watermark": 4512,
+          "coalesced_waiters_total": 69,
+          "completions_total": 22901,
+          "cancellations_total": 0,
+          "failed_finalizations_total": 0,
+          "completed_result_owners": 0
+        },
+        "posts": {
+          "pending_keys": 0,
+          "in_flight_keys": 17,
+          "waiters": 17,
+          "retained_identifier_bytes": 1190,
+          "key_capacity": 150,
+          "waiter_capacity": 600,
+          "key_high_watermark": 79,
+          "waiter_high_watermark": 79,
+          "retained_identifier_bytes_high_watermark": 5530,
+          "coalesced_waiters_total": 24,
+          "completions_total": 13641,
+          "cancellations_total": 0,
+          "failed_finalizations_total": 0,
+          "completed_result_owners": 0
+        }
+      },
+      "_metrics_raw_len": 32550
+    },
+    {
+      "sample": 3,
+      "captured_at_unix_seconds": 1787704927,
+      "process_started_at_unix_seconds": 1787704265,
+      "release_identifier": "9b22f302a6736c3641da6e96ff873b8387d8bd2b",
+      "recovery_phase": "catching_up",
+      "committed_lag_us": 24681770472,
+      "committed_source_velocity": 0.8918083740840603,
+      "net_convergence_rate": -0.10819162591593967,
+      "catch_up_eta_state": "non_converging",
+      "input_backpressured": true,
+      "input_occupancy": 1000,
+      "input_capacity": 1000,
+      "blocked_send_duration_ms": 659206,
+      "completed_batches": 2204,
+      "failed_batches": 0,
+      "active_permits": 6,
+      "frontier": {
+        "pending_range_count": 71,
+        "next_required_ordinal": 59068073,
+        "furthest_completed_ordinal": 59068673,
+        "durable_checkpoint_ordinal": 59068072,
+        "unresolved_gap_age_seconds": 3
+      },
+      "stage_timings": [
+        {
+          "stage": "duplicate_detection",
+          "outcome": "success",
+          "count": 2210,
+          "duration_milliseconds_total": 7645,
+          "duration_milliseconds_max": 53
+        },
+        {
+          "stage": "hydration",
+          "outcome": "success",
+          "count": 2204,
+          "duration_milliseconds_total": 3904679,
+          "duration_milliseconds_max": 31232
+        },
+        {
+          "stage": "storage",
+          "outcome": "success",
+          "count": 2204,
+          "duration_milliseconds_total": 17738,
+          "duration_milliseconds_max": 211
+        },
+        {
+          "stage": "publication",
+          "outcome": "success",
+          "count": 2204,
+          "duration_milliseconds_total": 133,
+          "duration_milliseconds_max": 12
+        },
+        {
+          "stage": "broadcast",
+          "outcome": "success",
+          "count": 2204,
+          "duration_milliseconds_total": 138,
+          "duration_milliseconds_max": 15
+        },
+        {
+          "stage": "checkpoint_persistence",
+          "outcome": "success",
+          "count": 2204,
+          "duration_milliseconds_total": 461,
+          "duration_milliseconds_max": 68
+        },
+        {
+          "stage": "end_to_end",
+          "outcome": "success",
+          "count": 2204,
+          "duration_milliseconds_total": 4592635,
+          "duration_milliseconds_max": 37303
+        }
+      ],
+      "bluesky_fetch": {
+        "profiles": {
+          "requests_total": 2181,
+          "items_total": 23487,
+          "lock_duration_ns_total": 2199133920911,
+          "lock_duration_count": 2003,
+          "http_duration_ns_total": 1635404084828,
+          "http_duration_count": 2178,
+          "rate_limiter_wait_ns_total": 23858984869,
+          "rate_limiter_wait_count": 2210,
+          "assembly_duration_ns_total": 1506589053,
+          "assembly_duration_count": 2178,
+          "errors_rate_limited": 0,
+          "errors_upstream": 0
+        },
+        "posts": {
+          "requests_total": 1496,
+          "items_total": 14023,
+          "lock_duration_ns_total": 1703632472013,
+          "lock_duration_count": 1763,
+          "http_duration_ns_total": 1114905703710,
+          "http_duration_count": 1495,
+          "rate_limiter_wait_ns_total": 9783579142,
+          "rate_limiter_wait_count": 1525,
+          "assembly_duration_ns_total": 2933387616,
+          "assembly_duration_count": 1493,
+          "errors_rate_limited": 0,
+          "errors_upstream": 2
+        }
+      },
+      "bluesky_coordination": {
+        "profiles": {
+          "pending_keys": 0,
+          "in_flight_keys": 20,
+          "waiters": 20,
+          "retained_identifier_bytes": 640,
+          "key_capacity": 150,
+          "waiter_capacity": 600,
+          "key_high_watermark": 141,
+          "waiter_high_watermark": 145,
+          "retained_identifier_bytes_high_watermark": 4512,
+          "coalesced_waiters_total": 70,
+          "completions_total": 23467,
+          "cancellations_total": 0,
+          "failed_finalizations_total": 0,
+          "completed_result_owners": 0
+        },
+        "posts": {
+          "pending_keys": 0,
+          "in_flight_keys": 11,
+          "waiters": 11,
+          "retained_identifier_bytes": 770,
+          "key_capacity": 150,
+          "waiter_capacity": 600,
+          "key_high_watermark": 79,
+          "waiter_high_watermark": 79,
+          "retained_identifier_bytes_high_watermark": 5530,
+          "coalesced_waiters_total": 27,
+          "completions_total": 14012,
+          "cancellations_total": 0,
+          "failed_finalizations_total": 0,
+          "completed_result_owners": 0
+        }
+      },
+      "_metrics_raw_len": 32543
+    }
+  ]
+}
