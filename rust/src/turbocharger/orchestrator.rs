@@ -279,9 +279,7 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
         let termination_path = std::env::var_os("JETSTREAM_TURBO_TERMINATION_PATH")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
-                std::path::PathBuf::from(
-                    "/opt/jetstream-turbo/diagnostics/latest-termination.env",
-                )
+                std::path::PathBuf::from("/opt/jetstream-turbo/diagnostics/latest-termination.env")
             });
         let release_identifier = std::env::var("JETSTREAM_TURBO_RELEASE_ID").ok();
         let runtime_identity = crate::turbocharger::RuntimeIdentityDiagnostics::load(

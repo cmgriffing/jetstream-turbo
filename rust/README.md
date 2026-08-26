@@ -585,6 +585,7 @@ Pipeline diagnostics are always present at `/api/v1/health`; that endpoint remai
 | `READINESS_RECOVERY_SUCCESSES` | `3` | Consecutive healthy observations required after staleness. |
 | `PIPELINE_DEADLINES_ENABLED` | `false` | Enables the legacy batch execution deadline only; it does not control Jetstream recovery safety. |
 | `PIPELINE_PROGRESS_READINESS_ENABLED` | `false` | Makes progress participate in `/ready`. |
+| `HYDRATION_EXECUTION_MODE` | `sequential` | Temporary one-release-cycle switch for resolving independent profile and referenced-post misses concurrently (`parallel`) or sequentially inside a batch. Invalid values are rejected at startup. Rollback is `HYDRATION_EXECUTION_MODE=sequential` plus restart; see `docs/recovery-telemetry.md`. |
 
 ### Bluesky request resilience and replay containment
 

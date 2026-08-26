@@ -1015,6 +1015,9 @@ fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> Strin
             .batch_completion_throughput_per_second
             .to_string(),
     );
+    append_runtime_identity_metrics(&mut output, &diagnostics.runtime_identity);
+    append_completion_frontier_metrics(&mut output, &diagnostics.completion_frontier);
+    append_stage_timing_metrics(&mut output, &diagnostics.pipeline_progress.stage_timings);
     append_bluesky_fetch_metrics(&mut output, &diagnostics.bluesky_fetch);
     append_bluesky_coordination_metrics(&mut output, &diagnostics.bluesky_coordination);
 
@@ -1046,6 +1049,100 @@ fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> Strin
     }
 
     output
+}
+
+fn append_runtime_identity_metrics(
+    output: &mut String,
+    identity: &crate::turbocharger::RuntimeIdentityDiagnostics,
+) {
+    append_gauge_metric(
+        output,
+        "jetstream_turbo_process_start_time_seconds",
+        "Unix start time of this process epoch; cumulative counters reset when it changes.",
+        identity.process_started_at_unix_seconds.to_string(),
+    );
+    output.push_str(
+        "# HELP jetstream_turbo_release_info Release identity of the running process epoch.\n",
+    );
+    output.push_str("# TYPE jetstream_turbo_release_info gauge\n");
+    match identity.release.identifier.as_deref() {
+        Some(identifier) => output.push_str(&format!(
+            "jetstream_turbo_release_info{{release=\"{}\",available=\"1\"}} 1\n",
+            escape_prometheus_label(identifier)
+        )),
+        None => output.push_str("jetstream_turbo_release_info{available=\"0\"} 1\n"),
+    }
+    let termination = &identity.previous_termination;
+    let classification = termination
+        .classification
+        .map(|classification| classification.as_str())
+        .unwrap_or("unavailable");
+    output.push_str("# HELP jetstream_turbo_previous_termination_info Previous-termination evidence for this process epoch.\n");
+    output.push_str("# TYPE jetstream_turbo_previous_termination_info gauge\n");
+    output.push_str(&format!(
+        "jetstream_turbo_previous_termination_info{{state=\"{}\",class=\"{}\"}} 1\n",
+        termination.state.as_str(),
+        classification,
+    ));
+}
+
+fn append_completion_frontier_metrics(
+    output: &mut String,
+    frontier: &crate::turbocharger::coordinator::CompletionFrontierSnapshot,
+) {
+    append_gauge_metric(
+        output,
+        "jetstream_turbo_frontier_pending_ranges",
+        "Completed ingress ranges retained pending contiguous checkpoint advancement.",
+        frontier.pending_range_count.to_string(),
+    );
+    append_gauge_metric(
+        output,
+        "jetstream_turbo_frontier_next_required_ordinal",
+        "Next ingress ordinal required to advance the durable checkpoint.",
+        frontier.next_required_ordinal.to_string(),
+    );
+    append_gauge_metric(
+        output,
+        "jetstream_turbo_frontier_furthest_completed_ordinal",
+        "Furthest successfully completed ingress ordinal.",
+        optional_u64_metric_value(frontier.furthest_completed_ordinal),
+    );
+    append_gauge_metric(
+        output,
+        "jetstream_turbo_frontier_durable_checkpoint_ordinal",
+        "Durable checkpoint ingress ordinal (process-lifetime value, not reset by restarts).",
+        optional_u64_metric_value(frontier.durable_checkpoint_ordinal),
+    );
+    append_gauge_metric(
+        output,
+        "jetstream_turbo_frontier_unresolved_gap_age_seconds",
+        "Age of the current unresolved contiguous frontier gap; resets on advancement.",
+        optional_u64_metric_value(frontier.unresolved_gap_age_seconds),
+    );
+}
+
+fn append_stage_timing_metrics(
+    output: &mut String,
+    stage_timings: &[crate::turbocharger::StageTimingSnapshot],
+) {
+    output.push_str("# HELP jetstream_turbo_pipeline_stage_duration_seconds Cumulative per-stage batch execution time by bounded outcome.\n");
+    output.push_str("# TYPE jetstream_turbo_pipeline_stage_duration_seconds histogram\n");
+    let mut timings: Vec<&crate::turbocharger::StageTimingSnapshot> =
+        stage_timings.iter().collect();
+    timings.sort_by_key(|timing| (timing.stage as u8, timing.outcome as u8));
+    for timing in timings {
+        output.push_str(&format!(
+            "jetstream_turbo_pipeline_stage_duration_seconds_sum{{stage=\"{}\",outcome=\"{}\"}} {:.6}\n\
+             jetstream_turbo_pipeline_stage_duration_seconds_count{{stage=\"{}\",outcome=\"{}\"}} {}\n",
+            timing.stage.as_str(),
+            timing.outcome.as_str(),
+            timing.duration_milliseconds_total as f64 / 1_000.0,
+            timing.stage.as_str(),
+            timing.outcome.as_str(),
+            timing.count,
+        ));
+    }
 }
 
 fn append_bluesky_fetch_metrics(
@@ -1088,6 +1185,22 @@ fn append_fetch_kind_metrics(
          jetstream_turbo_bluesky_fetch_http_duration_seconds_count{{kind=\"{kind}\"}} {}\n",
         fetch.http_duration_ns_total as f64 / 1_000_000_000.0,
         fetch.http_duration_count
+    ));
+    output.push_str(&format!(
+        "# HELP jetstream_turbo_bluesky_rate_limiter_wait_seconds Wall time spent waiting on the shared upstream rate limiter per attempt.\n\
+         # TYPE jetstream_turbo_bluesky_rate_limiter_wait_seconds histogram\n\
+         jetstream_turbo_bluesky_rate_limiter_wait_seconds_sum{{kind=\"{kind}\"}} {:.6}\n\
+         jetstream_turbo_bluesky_rate_limiter_wait_seconds_count{{kind=\"{kind}\"}} {}\n",
+        fetch.rate_limiter_wait_ns_total as f64 / 1_000_000_000.0,
+        fetch.rate_limiter_wait_count
+    ));
+    output.push_str(&format!(
+        "# HELP jetstream_turbo_bluesky_local_assembly_seconds Wall time spent decoding responses and assembling results locally per request.\n\
+         # TYPE jetstream_turbo_bluesky_local_assembly_seconds histogram\n\
+         jetstream_turbo_bluesky_local_assembly_seconds_sum{{kind=\"{kind}\"}} {:.6}\n\
+         jetstream_turbo_bluesky_local_assembly_seconds_count{{kind=\"{kind}\"}} {}\n",
+        fetch.assembly_duration_ns_total as f64 / 1_000_000_000.0,
+        fetch.assembly_duration_count
     ));
     output.push_str(&format!(
         "# HELP jetstream_turbo_bluesky_fetch_errors_total Fetch-chain requests exhausted by error class (rate_limited = 429, upstream = 5xx/timeout/transport).\n\
@@ -1685,6 +1798,108 @@ mod tests {
         assert!(!output.contains("request_fingerprint="));
         assert!(!output.contains("did:plc:"));
         assert!(!output.contains("fingerprint=\""));
+    }
+
+    #[test]
+    fn metrics_expose_runtime_identity_frontier_and_bounded_stage_labels() {
+        let mut diagnostics = sample_diagnostics();
+        let frontier = crate::turbocharger::coordinator::CompletionFrontierSnapshot {
+            pending_range_count: 2,
+            next_required_ordinal: 5,
+            furthest_completed_ordinal: Some(9),
+            durable_checkpoint_ordinal: Some(4),
+            unresolved_gap_age_seconds: Some(17),
+        };
+        diagnostics.completion_frontier = frontier;
+        diagnostics.pipeline_progress.stage_timings.push(
+            crate::turbocharger::StageTimingSnapshot {
+                stage: crate::turbocharger::PipelineStage::Hydration,
+                outcome: crate::turbocharger::PipelineStageOutcome::Timeout,
+                count: 1,
+                duration_milliseconds_total: 1500,
+                duration_milliseconds_max: 1500,
+            },
+        );
+        let output = prometheus_metrics_from_diagnostics(&diagnostics);
+
+        // Runtime identity is rendered beside every scrape so counter resets
+        // are attributable to a process epoch and release.
+        assert!(output.contains("jetstream_turbo_process_start_time_seconds"));
+        assert!(output
+            .contains("jetstream_turbo_release_info{release=\"test-release\",available=\"1\"} 1"));
+        assert!(output.contains(
+            "jetstream_turbo_previous_termination_info{state=\"missing\",class=\"unavailable\"} 1"
+        ));
+
+        // Frontier gauges render available values without cursor content.
+        assert!(output.contains("jetstream_turbo_frontier_pending_ranges 2"));
+        assert!(output.contains("jetstream_turbo_frontier_next_required_ordinal 5"));
+        assert!(output.contains("jetstream_turbo_frontier_furthest_completed_ordinal 9"));
+        assert!(output.contains("jetstream_turbo_frontier_durable_checkpoint_ordinal 4"));
+        assert!(output.contains("jetstream_turbo_frontier_unresolved_gap_age_seconds 17"));
+
+        // Stage timings render as histogram sums/counts over bounded enums.
+        assert!(output.contains(
+            "jetstream_turbo_pipeline_stage_duration_seconds_sum{stage=\"hydration\",outcome=\"timeout\"}"
+        ));
+        assert!(output.contains(
+            "jetstream_turbo_pipeline_stage_duration_seconds_count{stage=\"hydration\",outcome=\"timeout\"} 1"
+        ));
+        const APPROVED_STAGES: [&str; 8] = [
+            "ingress",
+            "duplicate_detection",
+            "hydration",
+            "storage",
+            "publication",
+            "broadcast",
+            "checkpoint_persistence",
+            "end_to_end",
+        ];
+        const APPROVED_OUTCOMES: [&str; 4] = ["success", "error", "timeout", "cancellation"];
+        for line in output.lines().filter(|line| {
+            line.starts_with("jetstream_turbo_pipeline_stage_duration_seconds")
+                && !line.starts_with('#')
+        }) {
+            let stage = APPROVED_STAGES
+                .iter()
+                .any(|stage| line.contains(&format!("stage=\"{stage}\"")));
+            let outcome = APPROVED_OUTCOMES
+                .iter()
+                .any(|outcome| line.contains(&format!("outcome=\"{outcome}\"")));
+            assert!(stage && outcome, "unbounded stage label: {line}");
+        }
+
+        // No request query strings or raw source event identifiers leak into
+        // the metrics surface.
+        assert!(!output.contains("actors="));
+        assert!(!output.contains("uris="));
+        assert!(!output.contains('?'));
+    }
+
+    #[test]
+    fn metrics_render_unavailable_runtime_identity_states() {
+        let mut diagnostics = sample_diagnostics();
+        diagnostics.runtime_identity = crate::turbocharger::RuntimeIdentityDiagnostics::load(
+            None,
+            std::path::Path::new("/definitely/missing/termination.env"),
+        );
+        diagnostics.completion_frontier =
+            crate::turbocharger::coordinator::CompletionFrontierSnapshot {
+                pending_range_count: 0,
+                next_required_ordinal: 1,
+                furthest_completed_ordinal: None,
+                durable_checkpoint_ordinal: None,
+                unresolved_gap_age_seconds: None,
+            };
+        let output = prometheus_metrics_from_diagnostics(&diagnostics);
+
+        assert!(output.contains("jetstream_turbo_release_info{available=\"0\"} 1"));
+        assert!(output.contains(
+            "jetstream_turbo_previous_termination_info{state=\"missing\",class=\"unavailable\"} 1"
+        ));
+        assert!(output.contains("jetstream_turbo_frontier_furthest_completed_ordinal NaN"));
+        assert!(output.contains("jetstream_turbo_frontier_durable_checkpoint_ordinal NaN"));
+        assert!(output.contains("jetstream_turbo_frontier_unresolved_gap_age_seconds NaN"));
     }
 
     #[test]

@@ -1181,6 +1181,49 @@ mod tests {
     }
 
     #[test]
+    fn hydration_execution_mode_env_override_is_validated() {
+        let _guard = ENV_LOCK.lock().expect("environment test lock poisoned");
+        std::env::set_var("STREAM_NAME", "test");
+        std::env::set_var("BLUESKY_HANDLE", "test.bsky.social");
+        std::env::set_var("BLUESKY_APP_PASSWORD", "password");
+
+        std::env::set_var("HYDRATION_EXECUTION_MODE", "parallel");
+        let settings = Settings::from_env().expect("settings should load with parallel mode");
+        assert_eq!(
+            settings.hydration_execution_mode,
+            HydrationExecutionMode::Parallel
+        );
+
+        std::env::set_var("HYDRATION_EXECUTION_MODE", "sequential");
+        let settings = Settings::from_env().expect("settings should load with sequential mode");
+        assert_eq!(
+            settings.hydration_execution_mode,
+            HydrationExecutionMode::Sequential
+        );
+        std::env::remove_var("HYDRATION_EXECUTION_MODE");
+
+        let default = Settings::default();
+        assert_eq!(
+            default.hydration_execution_mode,
+            HydrationExecutionMode::Sequential,
+            "sequential must remain the deployment default"
+        );
+
+        std::env::set_var("HYDRATION_EXECUTION_MODE", "unbounded-chaos");
+        let error = Settings::from_env().expect_err("invalid mode must be rejected");
+        std::env::remove_var("HYDRATION_EXECUTION_MODE");
+        for key in ["STREAM_NAME", "BLUESKY_HANDLE", "BLUESKY_APP_PASSWORD"] {
+            std::env::remove_var(key);
+        }
+        assert!(
+            error.to_string().to_lowercase().contains("hydration")
+                || error.to_string().to_lowercase().contains("unknown_variant")
+                || error.to_string().to_lowercase().contains("deserialize"),
+            "unexpected error for invalid hydration mode: {error}"
+        );
+    }
+
+    #[test]
     fn runtime_memory_settings_reject_invalid_envelopes_and_bounds() {
         let valid = Settings {
             stream_name: "test".to_string(),

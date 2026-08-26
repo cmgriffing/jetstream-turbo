@@ -390,6 +390,8 @@ mod tests {
     use crate::models::bluesky::BlueskyPost;
     use crate::testing::fixtures::{create_post_message, create_profile, create_reply_message};
     use crate::testing::mocks::{MockPostFetcher, MockProfileFetcher};
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     fn test_post(uri: &str) -> BlueskyPost {
         BlueskyPost {
@@ -481,5 +483,194 @@ mod tests {
         );
         assert_eq!(record.hydrated_metadata.referenced_posts.len(), 1);
         assert_eq!(record.hydrated_metadata.referenced_posts[0].uri, uri);
+    }
+
+    // ---- Parallel execution mode ----
+
+    /// Wraps a fetcher with an artificial delay so the other hydration branch
+    /// is guaranteed to finish first.
+    struct Delayed<F> {
+        inner: F,
+        delay: Duration,
+    }
+
+    impl ProfileFetcher for Delayed<Arc<MockProfileFetcher>> {
+        async fn bulk_fetch_profiles(
+            &self,
+            dids: &[String],
+        ) -> TurboResult<Vec<Option<Arc<BlueskyProfile>>>> {
+            tokio::time::sleep(self.delay).await;
+            self.inner.bulk_fetch_profiles(dids).await
+        }
+    }
+
+    impl PostFetcher for Delayed<Arc<MockPostFetcher>> {
+        async fn bulk_fetch_posts(&self, uris: &[String]) -> TurboResult<Vec<PostFetchOutcome>> {
+            tokio::time::sleep(self.delay).await;
+            self.inner.bulk_fetch_posts(uris).await
+        }
+    }
+
+    struct AlwaysFailingProfileFetcher;
+
+    impl ProfileFetcher for AlwaysFailingProfileFetcher {
+        async fn bulk_fetch_profiles(
+            &self,
+            _dids: &[String],
+        ) -> TurboResult<Vec<Option<Arc<BlueskyProfile>>>> {
+            Err(crate::models::TurboError::Internal(
+                "profile branch failed".to_string(),
+            ))
+        }
+    }
+
+    struct HangingProfileFetcher {
+        released: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl ProfileFetcher for HangingProfileFetcher {
+        async fn bulk_fetch_profiles(
+            &self,
+            _dids: &[String],
+        ) -> TurboResult<Vec<Option<Arc<BlueskyProfile>>>> {
+            futures::future::pending::<()>().await;
+            self.released.store(true, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_mode_preserves_output_when_profiles_finish_after_posts() {
+        let profile_fetcher = Arc::new(MockProfileFetcher::new());
+        profile_fetcher
+            .add_profile(create_profile("did:plc:parent"))
+            .await;
+        profile_fetcher
+            .add_profile(create_profile("did:plc:replier0001"))
+            .await;
+        profile_fetcher
+            .add_profile(create_profile("did:plc:replier0002"))
+            .await;
+        let post_fetcher = Arc::new(MockPostFetcher::new());
+        let uri = "at://did:plc:parent/app.bsky.feed.post/slow-profiles";
+        post_fetcher.add_post(test_post(uri)).await;
+
+        let hydrator = Hydrator::new_with_mode(
+            TurboCache::new(20, 20),
+            Arc::new(Delayed {
+                inner: Arc::clone(&profile_fetcher),
+                delay: Duration::from_millis(50),
+            }),
+            post_fetcher,
+            HydrationExecutionMode::Parallel,
+        );
+
+        let records = hydrator
+            .hydrate_batch(vec![
+                create_reply_message(1, "did:plc:parent", "slow-profiles"),
+                create_reply_message(2, "did:plc:parent", "slow-profiles"),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(records.len(), 2);
+        for (index, record) in records.iter().enumerate() {
+            assert_eq!(
+                record.hydrated_metadata.hydration_quality,
+                HydrationQuality::Complete
+            );
+            let expected_author = format!("did:plc:replier{:04}", index + 1);
+            assert_eq!(
+                record
+                    .hydrated_metadata
+                    .author_profile
+                    .as_ref()
+                    .unwrap()
+                    .did
+                    .as_ref(),
+                expected_author
+            );
+            assert_eq!(record.hydrated_metadata.referenced_posts[0].uri, uri);
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_mode_fails_batch_when_required_profile_branch_fails() {
+        let post_fetcher = Arc::new(MockPostFetcher::new());
+        let hydrator = Hydrator::new_with_mode(
+            TurboCache::new(20, 20),
+            Arc::new(AlwaysFailingProfileFetcher),
+            post_fetcher,
+            HydrationExecutionMode::Parallel,
+        );
+
+        let error = hydrator
+            .hydrate_batch(vec![create_reply_message(1, "did:plc:parent", "failing")])
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, crate::models::TurboError::Internal(_)));
+    }
+
+    #[tokio::test]
+    async fn parallel_mode_degrades_only_affected_records_on_optional_post_failure() {
+        let profile_fetcher = Arc::new(MockProfileFetcher::new());
+        profile_fetcher
+            .add_profile(create_profile("did:plc:parent"))
+            .await;
+        let post_fetcher = Arc::new(MockPostFetcher::new());
+        let uri = "at://did:plc:parent/app.bsky.feed.post/degraded";
+        post_fetcher
+            .add_outcome(uri.to_string(), unavailable())
+            .await;
+
+        let hydrator = Hydrator::new_with_mode(
+            TurboCache::new(20, 20),
+            profile_fetcher,
+            post_fetcher,
+            HydrationExecutionMode::Parallel,
+        );
+
+        let records = hydrator
+            .hydrate_batch(vec![
+                create_reply_message(1, "did:plc:parent", "degraded"),
+                create_post_message(2),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            records[0].hydrated_metadata.hydration_quality,
+            HydrationQuality::Partial
+        );
+        assert_eq!(
+            records[1].hydrated_metadata.hydration_quality,
+            HydrationQuality::Complete
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_mode_cancels_both_branches_when_deadline_expires() {
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hydrator = Hydrator::new_with_mode(
+            TurboCache::new(20, 20),
+            Arc::new(HangingProfileFetcher {
+                released: Arc::clone(&released),
+            }),
+            Arc::new(MockPostFetcher::new()),
+            HydrationExecutionMode::Parallel,
+        );
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(50),
+            hydrator.hydrate_batch(vec![create_reply_message(1, "did:plc:parent", "hanging")]),
+        )
+        .await;
+
+        assert!(result.is_err(), "batch should hit the shared deadline");
+        assert!(
+            !released.load(Ordering::SeqCst),
+            "cancelled branch must never produce results"
+        );
     }
 }

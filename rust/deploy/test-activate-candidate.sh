@@ -26,6 +26,7 @@ cp "$script_dir/test-fixtures/fake-journalctl.sh" "$fake_bin/journalctl"
 chmod 0755 "$fake_bin/systemctl" "$fake_bin/curl" "$fake_bin/chown" "$fake_bin/journalctl"
 
 run_candidate() {
+    local candidate_binary=${1:-"$deploy_path/releases/candidate/jetstream-turbo"}
     DEPLOY_PATH="$deploy_path" \
     SERVICE_NAME=jetstream-turbo \
     RUN_AS_SERVICE_USER=0 \
@@ -40,13 +41,25 @@ run_candidate() {
     FAKE_CHOWN_LOG="$fixture/chown.log" \
     FAKE_MAINTENANCE_FAIL_FILE="$fixture/maintenance-fails" \
     FAKE_READINESS_FAIL_FILE="$fixture/readiness-fails" \
-    "$script_dir/activate-candidate.sh" "$deploy_path/releases/candidate/jetstream-turbo"
+    "$script_dir/activate-candidate.sh" "$candidate_binary"
 }
 
 : >"$fixture/systemctl.log"
 run_candidate
 [[ $(readlink "$deploy_path/current") == "$deploy_path/releases/candidate" ]]
 grep -q '^restart jetstream-turbo$' "$fixture/systemctl.log"
+
+# Activation must publish a bounded release identifier for startup diagnostics.
+grep -q '^JETSTREAM_TURBO_RELEASE_ID=candidate$' "$deploy_path/.env"
+
+# Re-activating from a differently named release updates the identifier in place.
+mkdir -p "$deploy_path/releases/candidate-2"
+write_release_binary "$deploy_path/releases/candidate-2/jetstream-turbo"
+: >"$fixture/systemctl.log"
+run_candidate "$deploy_path/releases/candidate-2/jetstream-turbo"
+[[ $(readlink "$deploy_path/current") == "$deploy_path/releases/candidate-2" ]]
+grep -q '^JETSTREAM_TURBO_RELEASE_ID=candidate-2$' "$deploy_path/.env"
+[[ $(grep -c '^JETSTREAM_TURBO_RELEASE_ID=' "$deploy_path/.env") -eq 1 ]]
 
 ln -sfn "$deploy_path/releases/old" "$deploy_path/current"
 : >"$fixture/systemctl.log"

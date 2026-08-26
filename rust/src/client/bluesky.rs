@@ -149,10 +149,40 @@ pub struct FetchDiagnostics {
     pub http_duration_ns_total: AtomicU64,
     /// Number of HTTP chain samples.
     pub http_duration_count: AtomicU64,
+    /// Total wall time spent waiting on the shared upstream rate limiter
+    /// before each attempt, in nanoseconds. One sample per attempt.
+    pub rate_limiter_wait_ns_total: AtomicU64,
+    /// Number of rate-limiter wait samples (one per attempt).
+    pub rate_limiter_wait_count: AtomicU64,
+    /// Total wall time spent decoding responses and assembling results locally
+    /// after a successful response, in nanoseconds. One sample per request.
+    pub assembly_duration_ns_total: AtomicU64,
+    /// Number of local-assembly samples.
+    pub assembly_duration_count: AtomicU64,
     /// Requests exhausted with a 429 rate-limit response.
     pub errors_rate_limited: AtomicU64,
     /// Requests exhausted with a 5xx / timeout / transport failure.
     pub errors_upstream: AtomicU64,
+}
+
+/// Bounded hydration-substage identifiers used by latency telemetry. Label
+/// values are limited to this fixed enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HydrationSubstage {
+    CacheLookup,
+    RateLimiterWait,
+    UpstreamHttp,
+    LocalAssembly,
+}
+
+/// Aggregate latency snapshot for one hydration substage. A zero sample count
+/// is the explicit "unavailable" state (the substage was never exercised).
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct HydrationSubstageTimingSnapshot {
+    pub substage: HydrationSubstage,
+    pub sample_count: u64,
+    pub duration_ns_total: u64,
 }
 
 /// Broad class of a fetch-chain failure, used to discriminate 429s from
@@ -188,8 +218,40 @@ pub struct BlueskyFetchKindDiagnostics {
     pub lock_duration_count: u64,
     pub http_duration_ns_total: u64,
     pub http_duration_count: u64,
+    pub rate_limiter_wait_ns_total: u64,
+    pub rate_limiter_wait_count: u64,
+    pub assembly_duration_ns_total: u64,
+    pub assembly_duration_count: u64,
     pub errors_rate_limited: u64,
     pub errors_upstream: u64,
+}
+
+impl BlueskyFetchKindDiagnostics {
+    /// Bounded per-substage latency aggregates for this collector kind.
+    pub fn substage_timings(&self) -> [HydrationSubstageTimingSnapshot; 4] {
+        [
+            HydrationSubstageTimingSnapshot {
+                substage: HydrationSubstage::CacheLookup,
+                sample_count: self.lock_duration_count,
+                duration_ns_total: self.lock_duration_ns_total,
+            },
+            HydrationSubstageTimingSnapshot {
+                substage: HydrationSubstage::RateLimiterWait,
+                sample_count: self.rate_limiter_wait_count,
+                duration_ns_total: self.rate_limiter_wait_ns_total,
+            },
+            HydrationSubstageTimingSnapshot {
+                substage: HydrationSubstage::UpstreamHttp,
+                sample_count: self.http_duration_count,
+                duration_ns_total: self.http_duration_ns_total,
+            },
+            HydrationSubstageTimingSnapshot {
+                substage: HydrationSubstage::LocalAssembly,
+                sample_count: self.assembly_duration_count,
+                duration_ns_total: self.assembly_duration_ns_total,
+            },
+        ]
+    }
 }
 
 /// Fetch-path diagnostics for both collector kinds, surfaced on /health and /metrics.
@@ -1020,7 +1082,15 @@ impl ProfileBatchCollector {
 
         loop {
             attempts = attempts.saturating_add(1);
+            let limiter_wait_start = Instant::now();
             self.rate_limiter.until_ready().await;
+            self.fetch.rate_limiter_wait_ns_total.fetch_add(
+                limiter_wait_start.elapsed().as_nanos() as u64,
+                Ordering::Relaxed,
+            );
+            self.fetch
+                .rate_limiter_wait_count
+                .fetch_add(1, Ordering::Relaxed);
 
             let mut query_params: Vec<(&str, &str)> = Vec::new();
             for did in dids {
@@ -1038,6 +1108,7 @@ impl ProfileBatchCollector {
             match response {
                 Ok(resp) => match resp.status() {
                     StatusCode::OK => {
+                        let assembly_start = Instant::now();
                         let body = resp.text().await?;
                         let profiles_response: GetProfilesResponse = serde_json::from_str(&body)
                             .map_err(|e| {
@@ -1050,6 +1121,13 @@ impl ProfileBatchCollector {
                                 result[i] = Some(Arc::new(profile.into()));
                             }
                         }
+                        self.fetch.assembly_duration_ns_total.fetch_add(
+                            assembly_start.elapsed().as_nanos() as u64,
+                            Ordering::Relaxed,
+                        );
+                        self.fetch
+                            .assembly_duration_count
+                            .fetch_add(1, Ordering::Relaxed);
                         return Ok(result);
                     }
                     StatusCode::UNAUTHORIZED => {
@@ -1417,6 +1495,16 @@ impl ProfileBatchCollector {
             http_duration_ns_total: self.fetch.http_duration_ns_total.load(Ordering::Relaxed),
             http_duration_count: self.fetch.http_duration_count.load(Ordering::Relaxed),
             errors_rate_limited: self.fetch.errors_rate_limited.load(Ordering::Relaxed),
+            rate_limiter_wait_ns_total: self
+                .fetch
+                .rate_limiter_wait_ns_total
+                .load(Ordering::Relaxed),
+            rate_limiter_wait_count: self.fetch.rate_limiter_wait_count.load(Ordering::Relaxed),
+            assembly_duration_ns_total: self
+                .fetch
+                .assembly_duration_ns_total
+                .load(Ordering::Relaxed),
+            assembly_duration_count: self.fetch.assembly_duration_count.load(Ordering::Relaxed),
             errors_upstream: self.fetch.errors_upstream.load(Ordering::Relaxed),
         }
     }
@@ -1600,7 +1688,15 @@ impl PostBatchCollector {
 
         loop {
             attempts = attempts.saturating_add(1);
+            let limiter_wait_start = Instant::now();
             self.rate_limiter.until_ready().await;
+            self.fetch.rate_limiter_wait_ns_total.fetch_add(
+                limiter_wait_start.elapsed().as_nanos() as u64,
+                Ordering::Relaxed,
+            );
+            self.fetch
+                .rate_limiter_wait_count
+                .fetch_add(1, Ordering::Relaxed);
 
             let mut query_params: Vec<(&str, &str)> = Vec::new();
             for uri in uris {
@@ -1618,6 +1714,7 @@ impl PostBatchCollector {
             match response {
                 Ok(resp) => match resp.status() {
                     StatusCode::OK => {
+                        let assembly_start = Instant::now();
                         let body = resp.text().await?;
                         let posts_response: GetPostsBulkResponse = serde_json::from_str(&body)
                             .map_err(|e| {
@@ -1632,6 +1729,13 @@ impl PostBatchCollector {
                             }
                         }
 
+                        self.fetch.assembly_duration_ns_total.fetch_add(
+                            assembly_start.elapsed().as_nanos() as u64,
+                            Ordering::Relaxed,
+                        );
+                        self.fetch
+                            .assembly_duration_count
+                            .fetch_add(1, Ordering::Relaxed);
                         return Ok(results);
                     }
                     StatusCode::UNAUTHORIZED => {
@@ -1998,6 +2102,16 @@ impl PostBatchCollector {
             http_duration_ns_total: self.fetch.http_duration_ns_total.load(Ordering::Relaxed),
             http_duration_count: self.fetch.http_duration_count.load(Ordering::Relaxed),
             errors_rate_limited: self.fetch.errors_rate_limited.load(Ordering::Relaxed),
+            rate_limiter_wait_ns_total: self
+                .fetch
+                .rate_limiter_wait_ns_total
+                .load(Ordering::Relaxed),
+            rate_limiter_wait_count: self.fetch.rate_limiter_wait_count.load(Ordering::Relaxed),
+            assembly_duration_ns_total: self
+                .fetch
+                .assembly_duration_ns_total
+                .load(Ordering::Relaxed),
+            assembly_duration_count: self.fetch.assembly_duration_count.load(Ordering::Relaxed),
             errors_upstream: self.fetch.errors_upstream.load(Ordering::Relaxed),
         }
     }

@@ -18,7 +18,7 @@ pub use failure_supervisor::{
 pub use orchestrator::{ProductionTurboCharger, RunFailure, RunResult, TurboCharger, TurboStats};
 pub use progress::{
     PipelineProgress, PipelineProgressSnapshot, PipelineReadinessState, PipelineStage,
-    ProgressThresholds,
+    PipelineStageOutcome, ProgressThresholds, StageTimingSnapshot,
 };
 pub use runtime_identity::{
     DiagnosticAvailability, PreviousTerminationClass, PreviousTerminationDiagnostics,

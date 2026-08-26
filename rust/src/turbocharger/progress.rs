@@ -17,9 +17,40 @@ pub enum PipelineStage {
     EndToEnd,
 }
 
+impl PipelineStage {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ingress => "ingress",
+            Self::DuplicateDetection => "duplicate_detection",
+            Self::Hydration => "hydration",
+            Self::Storage => "storage",
+            Self::Publication => "publication",
+            Self::Broadcast => "broadcast",
+            Self::CheckpointPersistence => "checkpoint_persistence",
+            Self::EndToEnd => "end_to_end",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PipelineStageOutcome { Success, Error, Timeout, Cancellation }
+pub enum PipelineStageOutcome {
+    Success,
+    Error,
+    Timeout,
+    Cancellation,
+}
+
+impl PipelineStageOutcome {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Error => "error",
+            Self::Timeout => "timeout",
+            Self::Cancellation => "cancellation",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StageTimingSnapshot {
@@ -536,10 +567,18 @@ impl PipelineProgress {
     fn batch_stage_at(&self, batch_id: u64, stage: PipelineStage, now: Instant) {
         let mut state = self.state();
         let timing = state.active_batches.get(&batch_id).map(|batch| {
-            (batch.stage, now.saturating_duration_since(batch.stage_started_at))
+            (
+                batch.stage,
+                now.saturating_duration_since(batch.stage_started_at),
+            )
         });
         if let Some((previous, duration)) = timing {
-            record_stage_timing(&mut state, previous, PipelineStageOutcome::Success, duration);
+            record_stage_timing(
+                &mut state,
+                previous,
+                PipelineStageOutcome::Success,
+                duration,
+            );
         }
         if let Some(batch) = state.active_batches.get_mut(&batch_id) {
             batch.stage = stage;
@@ -677,9 +716,13 @@ impl PipelineProgress {
         {
             state.batch_completion_samples.pop_front();
         }
-        while state.record_completion_samples.front().is_some_and(|(sample, _)| {
-            now.saturating_duration_since(*sample) > Duration::from_secs(60)
-        }) {
+        while state
+            .record_completion_samples
+            .front()
+            .is_some_and(|(sample, _)| {
+                now.saturating_duration_since(*sample) > Duration::from_secs(60)
+            })
+        {
             state.record_completion_samples.pop_front();
         }
         let running_permit_holders = state
@@ -780,13 +823,17 @@ impl PipelineProgress {
             state.last_reported_state = Some(transition);
         }
 
-        let mut stage_timings = state.stage_timings.iter().map(|(&(stage, outcome), timing)| StageTimingSnapshot {
-            stage,
-            outcome,
-            count: timing.count,
-            duration_milliseconds_total: timing.duration_milliseconds_total,
-            duration_milliseconds_max: timing.duration_milliseconds_max,
-        }).collect::<Vec<_>>();
+        let mut stage_timings = state
+            .stage_timings
+            .iter()
+            .map(|(&(stage, outcome), timing)| StageTimingSnapshot {
+                stage,
+                outcome,
+                count: timing.count,
+                duration_milliseconds_total: timing.duration_milliseconds_total,
+                duration_milliseconds_max: timing.duration_milliseconds_max,
+            })
+            .collect::<Vec<_>>();
         stage_timings.sort_by_key(|timing| (timing.stage as u8, timing.outcome as u8));
 
         PipelineProgressSnapshot {
@@ -859,8 +906,18 @@ fn record_terminal_timings(
     outcome: PipelineStageOutcome,
     now: Instant,
 ) {
-    record_stage_timing(state, batch.stage, outcome, now.saturating_duration_since(batch.stage_started_at));
-    record_stage_timing(state, PipelineStage::EndToEnd, outcome, now.saturating_duration_since(batch.started_at));
+    record_stage_timing(
+        state,
+        batch.stage,
+        outcome,
+        now.saturating_duration_since(batch.stage_started_at),
+    );
+    record_stage_timing(
+        state,
+        PipelineStage::EndToEnd,
+        outcome,
+        now.saturating_duration_since(batch.started_at),
+    );
 }
 
 fn record_stage_timing(
@@ -872,7 +929,9 @@ fn record_stage_timing(
     let milliseconds = duration_millis(duration);
     let timing = state.stage_timings.entry((stage, outcome)).or_default();
     timing.count = timing.count.saturating_add(1);
-    timing.duration_milliseconds_total = timing.duration_milliseconds_total.saturating_add(milliseconds);
+    timing.duration_milliseconds_total = timing
+        .duration_milliseconds_total
+        .saturating_add(milliseconds);
     timing.duration_milliseconds_max = timing.duration_milliseconds_max.max(milliseconds);
 }
 
@@ -880,9 +939,7 @@ fn convergence(
     samples: &VecDeque<(Instant, u64)>,
     committed_lag_us: Option<u64>,
 ) -> (Option<f64>, Option<f64>, CatchUpEtaState, Option<u64>) {
-    let (Some((first_at, _)), Some((last_at, _))) =
-        (samples.front(), samples.back())
-    else {
+    let (Some((first_at, _)), Some((last_at, _))) = (samples.front(), samples.back()) else {
         return (None, None, CatchUpEtaState::Unavailable, None);
     };
     let wall_seconds = last_at.saturating_duration_since(*first_at).as_secs_f64();
@@ -1260,6 +1317,139 @@ mod tests {
         assert_eq!(snapshot.net_convergence_rate, Some(1.0));
         assert_eq!(snapshot.catch_up_eta_state, CatchUpEtaState::Converging);
         assert_eq!(snapshot.catch_up_eta_seconds, Some(30));
+    }
+
+    #[test]
+    fn too_few_committed_samples_leave_catch_up_eta_unavailable() {
+        let start = Instant::now();
+        let wall = UNIX_EPOCH + Duration::from_secs(100);
+        let progress = PipelineProgress::with_started_at(2, 100, start);
+
+        for seconds in 0..2 {
+            progress.checkpoint_committed_at(
+                (50 + seconds * 10) * 1_000_000,
+                Duration::from_secs(5),
+                3,
+                start + Duration::from_secs(seconds),
+                wall,
+            );
+        }
+
+        let snapshot = progress.snapshot_at(thresholds(), start + Duration::from_secs(2));
+        assert_eq!(snapshot.catch_up_eta_state, CatchUpEtaState::Unavailable);
+        assert_eq!(snapshot.committed_source_velocity, None);
+        assert_eq!(snapshot.net_convergence_rate, None);
+        assert_eq!(snapshot.catch_up_eta_seconds, None);
+    }
+
+    #[test]
+    fn non_monotonic_source_timestamps_leave_catch_up_eta_unstable() {
+        let start = Instant::now();
+        let progress = PipelineProgress::with_started_at(2, 100, start);
+
+        // Three observations whose source timestamps regress (e.g. replayed or
+        // reordered commits): enough samples for an estimate, but not stable.
+        for (seconds, source_seconds) in [(0, 50), (10, 70), (20, 40)] {
+            progress.checkpoint_committed_at(
+                source_seconds * 1_000_000,
+                Duration::from_secs(5),
+                3,
+                start + Duration::from_secs(seconds),
+                UNIX_EPOCH + Duration::from_secs(100 + seconds),
+            );
+        }
+
+        let snapshot = progress.snapshot_at(thresholds(), start + Duration::from_secs(20));
+        assert_eq!(snapshot.catch_up_eta_state, CatchUpEtaState::Unstable);
+        assert_eq!(snapshot.committed_source_velocity, None);
+        assert_eq!(snapshot.catch_up_eta_seconds, None);
+    }
+
+    #[test]
+    fn stage_timings_finalize_with_the_bounded_outcome_for_each_terminal_path() {
+        let progress = Arc::new(PipelineProgress::new(4, 10));
+
+        // Success path: hydration stage closed, end-to-end success recorded.
+        let success = progress.batch_started();
+        progress.batch_running(success);
+        progress.batch_stage(success, PipelineStage::Hydration);
+        progress.batch_completed(success, 2);
+
+        // Error path: storage stage closed with the error outcome.
+        let failed = progress.batch_started();
+        progress.batch_running(failed);
+        progress.batch_stage(failed, PipelineStage::Storage);
+        progress.batch_failed(failed);
+
+        // Timeout path.
+        let timed_out = progress.batch_started();
+        progress.batch_running(timed_out);
+        progress.batch_stage(timed_out, PipelineStage::Publication);
+        progress.batch_timed_out(timed_out);
+
+        // Cancellation path (dropped lifecycle, e.g. task panic or shutdown).
+        let cancelled = progress.batch_started();
+        progress.batch_running(cancelled);
+        drop(BatchLifecycle::new(Arc::clone(&progress), cancelled));
+
+        let snapshot = progress.snapshot(thresholds());
+        let find = |stage: PipelineStage, outcome: PipelineStageOutcome| {
+            snapshot
+                .stage_timings
+                .iter()
+                .find(|timing| timing.stage == stage && timing.outcome == outcome)
+        };
+
+        assert_eq!(
+            find(PipelineStage::Hydration, PipelineStageOutcome::Success).map(|t| t.count),
+            Some(1)
+        );
+        assert_eq!(
+            find(PipelineStage::EndToEnd, PipelineStageOutcome::Success).map(|t| t.count),
+            Some(1)
+        );
+        assert_eq!(
+            find(PipelineStage::Storage, PipelineStageOutcome::Error).map(|t| t.count),
+            Some(1)
+        );
+        assert_eq!(
+            find(PipelineStage::EndToEnd, PipelineStageOutcome::Error).map(|t| t.count),
+            Some(1)
+        );
+        assert_eq!(
+            find(PipelineStage::Publication, PipelineStageOutcome::Timeout).map(|t| t.count),
+            Some(1)
+        );
+        assert_eq!(
+            find(PipelineStage::EndToEnd, PipelineStageOutcome::Timeout).map(|t| t.count),
+            Some(1)
+        );
+        assert_eq!(
+            find(
+                PipelineStage::DuplicateDetection,
+                PipelineStageOutcome::Cancellation
+            )
+            .map(|t| t.count),
+            Some(1)
+        );
+        assert_eq!(
+            find(PipelineStage::EndToEnd, PipelineStageOutcome::Cancellation).map(|t| t.count),
+            Some(1)
+        );
+
+        for timing in &snapshot.stage_timings {
+            let serialized = serde_json::to_string(&(
+                serde_json::to_value(timing.stage).unwrap(),
+                serde_json::to_value(timing.outcome).unwrap(),
+            ))
+            .unwrap();
+            assert!(
+                !serialized.contains("did:")
+                    && !serialized.contains("at://")
+                    && !serialized.chars().any(|c| c == '?'),
+                "stage timing labels must stay bounded: {serialized}"
+            );
+        }
     }
 
     #[test]

@@ -51,6 +51,22 @@ emit_diagnostics() {
     "$journalctl_bin" -u "$service_name" --since "$activation_started_at" --no-pager -n 100 || true
 }
 
+# Publish the release identifier consumed by the service at startup
+# (JETSTREAM_TURBO_RELEASE_ID in orchestrator startup diagnostics). The
+# versioned release directory name is the bounded release identity.
+write_release_identifier() {
+    local env_file="$deploy_path/.env"
+    local release_id
+    release_id=$(basename "$candidate_release")
+    touch "$env_file"
+    if grep -q '^JETSTREAM_TURBO_RELEASE_ID=' "$env_file"; then
+        sed -i.bak 's/^JETSTREAM_TURBO_RELEASE_ID=.*/JETSTREAM_TURBO_RELEASE_ID='"$release_id"'/' "$env_file"
+        rm -f "$env_file.bak"
+    else
+        printf 'JETSTREAM_TURBO_RELEASE_ID=%s\n' "$release_id" >>"$env_file"
+    fi
+}
+
 mkdir -p "$deploy_path/releases"
 
 # Bootstrap the versioned layout without touching the currently running process.
@@ -73,6 +89,7 @@ if [[ -L "$current_link" ]]; then
 fi
 
 ln -sfn "$candidate_release" "$current_link"
+write_release_identifier
 activation_started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 "$systemctl_bin" enable "$service_name"
 "$systemctl_bin" restart "$service_name"
