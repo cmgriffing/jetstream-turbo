@@ -71,6 +71,9 @@ chrono = { version = "0.4", features = ["serde"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.15"
 
+# Filesystem headroom checks for maintenance volumes
+fs4 = "0.13"
+
 # Retry and rate limiting
 backoff = { version = "0.4", features = ["tokio"] }
 governor = "0.6"

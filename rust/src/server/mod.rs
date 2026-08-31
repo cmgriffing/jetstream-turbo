@@ -7,7 +7,7 @@ use axum::{
     },
     http::StatusCode,
     response::Json,
-    routing::{get, Router},
+    routing::{get, post, Router},
 };
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,7 @@ pub fn create_router(turbocharger: Arc<ProductionTurboCharger>) -> Router {
         .route("/health", get(health_check))
         .route("/stats", get(get_stats))
         .route("/metrics", get(get_metrics))
+        .route("/maintenance/vacuum", post(request_vacuum))
         .route("/ws", get(ws_handler))
         .with_state(turbocharger)
 }
@@ -82,6 +83,93 @@ async fn get_stats(
 async fn get_metrics(State(turbocharger): State<Arc<ProductionTurboCharger>>) -> String {
     let diagnostics = turbocharger.get_runtime_diagnostics().await;
     prometheus_metrics_from_diagnostics(&diagnostics)
+}
+
+#[derive(Serialize)]
+struct MaintenanceResponse {
+    status: String,
+    message: String,
+}
+
+async fn request_vacuum(
+    State(turbocharger): State<Arc<ProductionTurboCharger>>,
+    headers: axum::http::HeaderMap,
+) -> (StatusCode, Json<MaintenanceResponse>) {
+    let provided = headers
+        .get(MAINTENANCE_KEY_HEADER)
+        .and_then(|value| value.to_str().ok());
+    match verify_maintenance_key(
+        turbocharger.settings().maintenance_api_key.as_deref(),
+        provided,
+    ) {
+        Ok(()) => {}
+        Err(MaintenanceAuthError::Disabled) => {
+            warn!("Maintenance endpoint rejected: no maintenance_api_key is configured");
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(MaintenanceResponse {
+                    status: "disabled".to_string(),
+                    message: "maintenance overrides are disabled (no MAINTENANCE_API_KEY set)"
+                        .to_string(),
+                }),
+            );
+        }
+        Err(MaintenanceAuthError::Invalid) => {
+            warn!("Maintenance endpoint rejected: missing or invalid shared key");
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(MaintenanceResponse {
+                    status: "unauthorized".to_string(),
+                    message: "missing or invalid X-Maintenance-Key".to_string(),
+                }),
+            );
+        }
+    }
+    turbocharger.request_operator_vacuum();
+    (
+        StatusCode::ACCEPTED,
+        Json(MaintenanceResponse {
+            status: "accepted".to_string(),
+            message: "VACUUM override requested; the scheduler will run it at the next tick"
+                .to_string(),
+        }),
+    )
+}
+
+const MAINTENANCE_KEY_HEADER: &str = "x-maintenance-key";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaintenanceAuthError {
+    /// No shared key is configured: maintenance overrides are disabled.
+    Disabled,
+    /// The presented key is missing or does not match.
+    Invalid,
+}
+
+/// Fail-closed shared-key verification for maintenance endpoints. Digests are
+/// compared byte-wise so the comparison does not leak key contents via timing.
+fn verify_maintenance_key(
+    configured: Option<&str>,
+    provided: Option<&str>,
+) -> Result<(), MaintenanceAuthError> {
+    use sha2::{Digest, Sha256};
+    let Some(configured) = configured.map(str::trim).filter(|key| !key.is_empty()) else {
+        return Err(MaintenanceAuthError::Disabled);
+    };
+    let Some(provided) = provided else {
+        return Err(MaintenanceAuthError::Invalid);
+    };
+    let configured_digest = Sha256::digest(configured.as_bytes());
+    let provided_digest = Sha256::digest(provided.as_bytes());
+    let mismatch = configured_digest
+        .iter()
+        .zip(provided_digest.iter())
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b));
+    if mismatch == 0 {
+        Ok(())
+    } else {
+        Err(MaintenanceAuthError::Invalid)
+    }
 }
 
 async fn ws_handler(
@@ -797,6 +885,26 @@ fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> Strin
     );
     append_gauge_metric(
         &mut output,
+        "jetstream_turbo_vacuum_deferred_seconds",
+        "Seconds the current pending VACUUM has been deferred.",
+        optional_u64_metric_value(diagnostics.sqlite_state.vacuum_deferred_seconds),
+    );
+    let active_gating_reason = diagnostics
+        .sqlite_state
+        .vacuum_gating_reason
+        .map(|reason| reason.as_str());
+    output.push_str("# HELP jetstream_turbo_vacuum_gating_reason Current VACUUM deferral gating reason (1 = active for this label).\n");
+    output.push_str("# TYPE jetstream_turbo_vacuum_gating_reason gauge\n");
+    for reason in ["memory_pressure", "recovery_phase", "window", "force_defer"] {
+        let value = if active_gating_reason == Some(reason) { 1.0 } else { 0.0 };
+        output.push_str("jetstream_turbo_vacuum_gating_reason{reason=\"");
+        output.push_str(reason);
+        output.push_str("\"} ");
+        output.push_str(&optional_f64_metric_value(Some(value)));
+        output.push('\n');
+    }
+    append_gauge_metric(
+        &mut output,
         "jetstream_turbo_db_over_budget",
         "Whether the database file exceeds the configured maximum size (1 = yes, 0 = no).",
         optional_bool_metric_value(diagnostics.sqlite_state.over_budget),
@@ -1406,11 +1514,11 @@ fn optional_bool_metric_value(value: Option<bool>) -> String {
 mod tests {
     use super::{
         health_http_response, monitor_receive_loop, monitor_send_loop,
-        prometheus_metrics_from_diagnostics, readiness_http_status,
+        prometheus_metrics_from_diagnostics, readiness_http_status, verify_maintenance_key,
+        MaintenanceAuthError,
     };
     use crate::models::enriched::EnrichedRecord;
-    use crate::models::jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType};
-    use crate::turbocharger::{
+    use crate::models::jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType};    use crate::turbocharger::{
         CacheStateDiagnostics, HealthDiagnostics, HealthStatus, MemoryPeakDiagnostics,
         NotRedisStateDiagnostics, PipelineProgress, PipelineReadinessState,
         ProcessMemoryDiagnostics, ProgressThresholds, ReadinessDiagnostics, SQLiteStateDiagnostics,
@@ -1568,6 +1676,9 @@ mod tests {
                 freelist_ratio: Some(0.25),
                 over_budget: Some(false),
                 over_budget_after_vacuum: Some(true),
+                vacuum_gating_reason: Some(crate::storage::VacuumGatingReason::Window),
+                vacuum_deferred_seconds: Some(3600),
+                vacuum_last_forced_reason: None,
                 collection_error: None,
             },
             not_redis_state: NotRedisStateDiagnostics {
@@ -1658,6 +1769,44 @@ mod tests {
             readiness_http_status(&sample_health(false)),
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    #[test]
+    fn maintenance_key_verification_is_fail_closed() {
+        // No key configured: the endpoint is disabled outright.
+        assert_eq!(
+            verify_maintenance_key(None, None),
+            Err(MaintenanceAuthError::Disabled)
+        );
+        assert_eq!(
+            verify_maintenance_key(None, Some("attacker-supplied")),
+            Err(MaintenanceAuthError::Disabled)
+        );
+        assert_eq!(
+            verify_maintenance_key(Some("   "), Some("attacker-supplied")),
+            Err(MaintenanceAuthError::Disabled)
+        );
+
+        // A configured key requires an exact header match.
+        assert_eq!(verify_maintenance_key(Some("op-key"), Some("op-key")), Ok(()));
+        assert_eq!(
+            verify_maintenance_key(Some("op-key"), None),
+            Err(MaintenanceAuthError::Invalid)
+        );
+        assert_eq!(
+            verify_maintenance_key(Some("op-key"), Some("wrong-key")),
+            Err(MaintenanceAuthError::Invalid)
+        );
+        assert_eq!(
+            verify_maintenance_key(Some("op-key"), Some("op-key-with-suffix")),
+            Err(MaintenanceAuthError::Invalid)
+        );
+        assert_eq!(
+            verify_maintenance_key(Some("op-key"), Some("")),
+            Err(MaintenanceAuthError::Invalid)
+        );
+        // The configured key is trimmed but the presented value is not.
+        assert_eq!(verify_maintenance_key(Some(" op-key "), Some("op-key")), Ok(()));
     }
 
     #[test]

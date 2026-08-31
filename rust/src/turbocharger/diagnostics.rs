@@ -146,6 +146,9 @@ pub struct SQLiteStateDiagnostics {
     pub freelist_ratio: Option<f64>,
     pub over_budget: Option<bool>,
     pub over_budget_after_vacuum: Option<bool>,
+    pub vacuum_gating_reason: Option<crate::storage::VacuumGatingReason>,
+    pub vacuum_deferred_seconds: Option<u64>,
+    pub vacuum_last_forced_reason: Option<crate::storage::VacuumGatingReason>,
     pub collection_error: Option<String>,
 }
 

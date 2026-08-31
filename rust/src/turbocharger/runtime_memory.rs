@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -333,6 +333,220 @@ impl ProcessMemoryBreakdown {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cgroup discovery: the process's memory files are located through its actual
+// cgroup identity (parsed from /proc/self/cgroup) rather than a fixed mount
+// path, with cgroup v1 fallback when no unified-hierarchy line is present.
+// ---------------------------------------------------------------------------
+
+/// Which hierarchy the process's cgroup memory files were located in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CgroupHierarchy {
+    V2,
+    V1,
+}
+
+impl CgroupHierarchy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::V2 => "v2",
+            Self::V1 => "v1",
+        }
+    }
+}
+
+/// Parsed `/proc/self/cgroup` content: the unified-hierarchy path (cgroup v2
+/// `0::<path>` line) and the memory-controller path (cgroup v1
+/// `12:memory:<path>` line), when present.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CgroupIdentity {
+    pub v2_path: Option<String>,
+    pub v1_memory_path: Option<String>,
+}
+
+/// Parses `/proc/self/cgroup` lines of the form `hierarchy:controllers:path`.
+pub fn parse_proc_cgroup(contents: &str) -> CgroupIdentity {
+    let mut identity = CgroupIdentity::default();
+    for line in contents.lines() {
+        let mut fields = line.splitn(3, ':');
+        let Some(hierarchy) = fields.next() else {
+            continue;
+        };
+        let Some(controllers) = fields.next() else {
+            continue;
+        };
+        let Some(path) = fields.next() else {
+            continue;
+        };
+        if hierarchy == "0" && controllers.is_empty() {
+            identity.v2_path.get_or_insert_with(|| path.to_string());
+        } else if controllers.split(',').any(|controller| controller == "memory") {
+            identity
+                .v1_memory_path
+                .get_or_insert_with(|| path.to_string());
+        }
+    }
+    identity
+}
+
+/// A single mounted filesystem entry from `/proc/self/mountinfo`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountEntry {
+    pub mount_point: String,
+    pub fs_type: String,
+    pub super_options: String,
+}
+
+/// Parses `/proc/self/mountinfo` into (mount_point, fs_type, super_options)
+/// triples, skipping malformed lines.
+pub fn parse_mountinfo(contents: &str) -> Vec<MountEntry> {
+    contents
+        .lines()
+        .filter_map(|line| {
+            let (before, after) = line.split_once(" - ")?;
+            let after = after.split_whitespace().collect::<Vec<_>>();
+            let fs_type = after.first()?.to_string();
+            let super_options = after
+                .get(2)
+                .map(|options| options.to_string())
+                .unwrap_or_default();
+            // Optional fields separate the fixed prefix from the mount point
+            // only in the prefix; the mount point is the 5th fixed field.
+            let mount_point = before
+                .split_whitespace()
+                .nth(4)
+                .map(str::to_string)
+                .unwrap_or_default();
+            Some(MountEntry {
+                mount_point,
+                fs_type,
+                super_options,
+            })
+        })
+        .collect()
+}
+
+/// Returns the cgroup v1 memory-controller mount point, if one is present.
+pub fn resolve_v1_memory_mount(entries: &[MountEntry]) -> Option<String> {
+    entries
+        .iter()
+        .find(|entry| {
+            entry.fs_type == "cgroup"
+                && entry
+                    .super_options
+                    .split(',')
+                    .any(|option| option == "memory")
+        })
+        .map(|entry| entry.mount_point.clone())
+}
+
+/// Resolved cgroup memory-file location for this process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CgroupMemoryPaths {
+    pub hierarchy: CgroupHierarchy,
+    /// Directory holding the memory files for this process's cgroup.
+    pub memory_dir: String,
+    /// Human-readable description of the attempted locations (for errors).
+    pub attempted: Vec<String>,
+}
+
+/// Resolves the memory-file directory for the process from its parsed cgroup
+/// identity. `v2_root` and `memory_mount` are injectable so tests can point at
+/// fixture trees; production callers pass `/sys/fs/cgroup` and the v1 memory
+/// controller mount resolved from `/proc/self/mountinfo`.
+pub fn resolve_cgroup_memory_paths(
+    identity: &CgroupIdentity,
+    v2_root: &Path,
+    memory_mount: Option<&Path>,
+) -> Result<CgroupMemoryPaths, String> {
+    let mut attempted = Vec::new();
+
+    if let Some(v2_relative) = identity.v2_path.as_deref() {
+        let memory_dir = v2_root.join(v2_relative.trim_start_matches('/'));
+        let dir_display = memory_dir.display().to_string();
+        attempted.push(format!("v2 {dir_display}/memory.current"));
+        if memory_dir.join("memory.current").is_file() {
+            return Ok(CgroupMemoryPaths {
+                hierarchy: CgroupHierarchy::V2,
+                memory_dir: dir_display,
+                attempted,
+            });
+        }
+    }
+
+    if let Some(v1_relative) = identity.v1_memory_path.as_deref() {
+        if let Some(mount) = memory_mount {
+            let memory_dir = mount.join(v1_relative.trim_start_matches('/'));
+            let dir_display = memory_dir.display().to_string();
+            attempted.push(format!("v1 {dir_display}/memory.usage_in_bytes"));
+            if memory_dir.join("memory.usage_in_bytes").is_file() {
+                return Ok(CgroupMemoryPaths {
+                    hierarchy: CgroupHierarchy::V1,
+                    memory_dir: dir_display,
+                    attempted,
+                });
+            }
+        } else {
+            attempted.push(
+                "v1 memory controller line present but no cgroup memory mount resolved"
+                    .to_string(),
+            );
+        }
+    }
+
+    if attempted.is_empty() {
+        attempted.push(
+            "no unified (0::<path>) or memory-controller line in /proc/self/cgroup".to_string(),
+        );
+    }
+    Err(attempted.join(", "))
+}
+
+/// Resolved cgroup memory paths are cached for the process lifetime: cgroup
+/// membership does not change for a running process, so samples reuse them.
+static RESOLVED_CGROUP_PATHS: OnceLock<Result<CgroupMemoryPaths, String>> = OnceLock::new();
+
+const PROC_CGROUP_PATH: &str = "/proc/self/cgroup";
+const PROC_MOUNTINFO_PATH: &str = "/proc/self/mountinfo";
+
+fn resolve_process_cgroup_paths() -> Result<CgroupMemoryPaths, String> {
+    let mut read_errors: Vec<String> = Vec::new();
+    let identity = match fs::read_to_string(PROC_CGROUP_PATH) {
+        Ok(contents) => parse_proc_cgroup(&contents),
+        Err(error) => {
+            read_errors.push(format!("unable to read {PROC_CGROUP_PATH}: {error}"));
+            CgroupIdentity::default()
+        }
+    };
+    let mount_entries = match fs::read_to_string(PROC_MOUNTINFO_PATH) {
+        Ok(contents) => parse_mountinfo(&contents),
+        Err(error) => {
+            read_errors.push(format!("unable to read {PROC_MOUNTINFO_PATH}: {error}"));
+            Vec::new()
+        }
+    };
+
+    resolve_cgroup_memory_paths(
+        &identity,
+        Path::new("/sys/fs/cgroup"),
+        resolve_v1_memory_mount(&mount_entries)
+            .as_deref()
+            .map(Path::new),
+    )
+    .map_err(|error| {
+        if read_errors.is_empty() {
+            error
+        } else {
+            format!("{}; {}", read_errors.join("; "), error)
+        }
+    })
+}
+
+fn cgroup_memory_paths() -> &'static Result<CgroupMemoryPaths, String> {
+    RESOLVED_CGROUP_PATHS.get_or_init(resolve_process_cgroup_paths)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CgroupMemoryEvents {
     pub low: Option<u64>,
@@ -345,6 +559,8 @@ pub struct CgroupMemoryEvents {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CgroupMemoryDiagnostics {
+    /// Which hierarchy the memory files were read from, when resolvable.
+    pub hierarchy: Option<CgroupHierarchy>,
     pub current_bytes: Option<u64>,
     pub high_bytes: Option<u64>,
     pub max_bytes: Option<u64>,
@@ -358,10 +574,51 @@ pub struct CgroupMemoryDiagnostics {
 
 impl CgroupMemoryDiagnostics {
     pub fn collect() -> Self {
-        Self::collect_from(Path::new("/sys/fs/cgroup"))
+        match cgroup_memory_paths() {
+            Ok(paths) => Self::collect_at(paths),
+            Err(error) => Self {
+                collection_error: Some(error.clone()),
+                ..Self::default()
+            },
+        }
     }
 
-    fn collect_from(root: &Path) -> Self {
+    /// Reads the memory files at the resolved location for the given hierarchy.
+    fn collect_at(paths: &CgroupMemoryPaths) -> Self {
+        let dir = Path::new(&paths.memory_dir);
+        let mut diagnostics = match paths.hierarchy {
+            CgroupHierarchy::V2 => Self::collect_v2_from(dir),
+            CgroupHierarchy::V1 => Self::collect_v1_from(dir),
+        };
+        diagnostics.hierarchy = Some(paths.hierarchy);
+        if !diagnostics.any_value_available() {
+            diagnostics.collection_error = Some(format!(
+                "cgroup {} memory files unavailable at {} (attempted: {})",
+                paths.hierarchy.as_str(),
+                paths.memory_dir,
+                paths.attempted.join(", ")
+            ));
+        }
+        diagnostics
+    }
+
+    fn any_value_available(&self) -> bool {
+        self.current_bytes.is_some()
+            || self.high_bytes.is_some()
+            || self.max_bytes.is_some()
+            || self.high_unlimited.is_some()
+            || self.max_unlimited.is_some()
+            || self.pressure_some_avg10.is_some()
+            || self.pressure_full_avg10.is_some()
+            || self.events.low.is_some()
+            || self.events.high.is_some()
+            || self.events.max.is_some()
+            || self.events.oom.is_some()
+            || self.events.oom_kill.is_some()
+            || self.events.oom_group_kill.is_some()
+    }
+
+    fn collect_v2_from(root: &Path) -> Self {
         let current = read_optional_u64(root.join("memory.current"));
         let high = read_limit(root.join("memory.high"));
         let max = read_limit(root.join("memory.max"));
@@ -374,7 +631,6 @@ impl CgroupMemoryDiagnostics {
                 .ok()
                 .map(|contents| parse_pressure(&contents))
                 .unwrap_or_default();
-        let available = current.is_some() || high.is_some() || max.is_some();
         Self {
             current_bytes: current,
             high_bytes: high.flatten(),
@@ -384,8 +640,41 @@ impl CgroupMemoryDiagnostics {
             pressure_some_avg10,
             pressure_full_avg10,
             events,
-            collection_error: (!available)
-                .then(|| format!("cgroup v2 memory files unavailable at {}", root.display())),
+            ..Self::default()
+        }
+    }
+
+    /// Maps cgroup v1 memory-controller files into the shared diagnostics
+    /// shape. Every field stays `Option`-typed and missing files stay
+    /// `None`; v1 has no `high` watermark (the soft limit is the closest
+    /// equivalent) and its `failcnt` counter maps to the `max` events field.
+    fn collect_v1_from(root: &Path) -> Self {
+        let current = read_optional_u64(root.join("memory.usage_in_bytes"));
+        let max = read_v1_limit(root.join("memory.limit_in_bytes"));
+        let high = read_v1_limit(root.join("memory.soft_limit_in_bytes"));
+        let failcnt = read_optional_u64(root.join("memory.failcnt"));
+        let (pressure_some_avg10, pressure_full_avg10) =
+            fs::read_to_string(root.join("memory.pressure"))
+                .ok()
+                .map(|contents| parse_pressure(&contents))
+                .unwrap_or_default();
+        let events = CgroupMemoryEvents {
+            // v1 counts limit hits in memory.failcnt; this is the closest
+            // equivalent of the v2 `max` events counter. v1 exposes no OOM
+            // kill counters, so those remain explicitly unavailable.
+            max: failcnt,
+            ..CgroupMemoryEvents::default()
+        };
+        Self {
+            current_bytes: current,
+            high_bytes: high.flatten(),
+            max_bytes: max.flatten(),
+            high_unlimited: high.map(|value| value.is_none()),
+            max_unlimited: max.map(|value| value.is_none()),
+            pressure_some_avg10,
+            pressure_full_avg10,
+            events,
+            ..Self::default()
         }
     }
 }
@@ -494,6 +783,10 @@ pub struct MemoryRunConfiguration {
     pub post_cache_entries: usize,
     pub negative_cache_entries: usize,
     pub max_concurrent_requests: usize,
+    /// Replay-phase ceiling for concurrent batches; work bounds are evaluated
+    /// against the effective maximum of this and `max_concurrent_requests`.
+    #[serde(default)]
+    pub replay_max_concurrent_batches: usize,
     pub channel_capacity: usize,
     pub max_ingress_event_bytes: usize,
     pub monitor_broadcast_capacity: usize,
@@ -593,10 +886,13 @@ impl MemoryRunArtifact {
         }
 
         let work_bounds_held = samples.iter().all(|sample| {
+            let effective_max_batches = configuration
+                .replay_max_concurrent_batches
+                .max(configuration.max_concurrent_requests);
             sample.queued_batches.saturating_add(sample.running_batches)
-                <= configuration.max_concurrent_requests
+                <= effective_max_batches
                 && sample.active_permits <= sample.maximum_permits
-                && sample.maximum_permits <= configuration.max_concurrent_requests
+                && sample.maximum_permits <= effective_max_batches
         });
         if !work_bounds_held {
             failures.push("queued or in-flight work exceeded its admission bound".to_string());
@@ -870,6 +1166,17 @@ fn read_limit(path: impl AsRef<Path>) -> Option<Option<u64>> {
     }
 }
 
+/// Reads a cgroup v1 byte-limit file where `"-1"` means unlimited.
+fn read_v1_limit(path: impl AsRef<Path>) -> Option<Option<u64>> {
+    let contents = fs::read_to_string(path).ok()?;
+    let value = contents.trim();
+    if value == "-1" {
+        Some(None)
+    } else {
+        value.parse().ok().map(Some)
+    }
+}
+
 fn parse_cgroup_events(contents: &str) -> CgroupMemoryEvents {
     let mut events = CgroupMemoryEvents::default();
     for line in contents.lines() {
@@ -938,6 +1245,181 @@ mod tests {
         let events = parse_cgroup_events("low 1\nhigh 2\nmax 3\noom 4\noom_kill 5\n");
         assert_eq!(events.oom, Some(4));
         assert_eq!(events.oom_kill, Some(5));
+    }
+
+    fn write_file(dir: &std::path::Path, name: &str, contents: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(name), contents).unwrap();
+    }
+
+    #[test]
+    fn proc_cgroup_parser_reads_nested_v2_paths_and_v1_memory_lines() {
+        let v2 = parse_proc_cgroup(
+            "12:blkio:/user.slice/user-1000.slice\n0::/system.slice/jetstream.service\n",
+        );
+        assert_eq!(
+            v2.v2_path.as_deref(),
+            Some("/system.slice/jetstream.service")
+        );
+        assert_eq!(v2.v1_memory_path, None);
+
+        let v1 = parse_proc_cgroup(
+            "12:cpu,cpuacct:/a/b\n11:memory:/system.slice/jetstream.service\n",
+        );
+        assert_eq!(
+            v1.v1_memory_path.as_deref(),
+            Some("/system.slice/jetstream.service")
+        );
+        assert_eq!(v1.v2_path, None);
+    }
+
+    #[test]
+    fn proc_cgroup_parser_handles_empty_and_absent_files() {
+        assert_eq!(parse_proc_cgroup(""), CgroupIdentity::default());
+        assert_eq!(
+            parse_proc_cgroup("12:cpu:/only-non-memory\n"),
+            CgroupIdentity::default()
+        );
+        assert_eq!(parse_proc_cgroup("malformed-line"), CgroupIdentity::default());
+    }
+
+    #[test]
+    fn mountinfo_parser_locates_v1_memory_controller_mount() {
+        let entries = parse_mountinfo(
+            "36 35 0:31 / /sys/fs/cgroup/memory rw,nosuid,nodev - cgroup cgroup rw,memory\n\
+             37 35 0:32 / /sys/fs/cgroup/cpu rw,nosuid - cgroup cgroup rw,cpu\n",
+        );
+        assert_eq!(
+            resolve_v1_memory_mount(&entries).as_deref(),
+            Some("/sys/fs/cgroup/memory")
+        );
+        // A v2-only mount table resolves no v1 mount.
+        let empty = parse_mountinfo(
+            "36 35 0:31 / /sys/fs/cgroup rw,nosuid - cgroup2 cgroup2 rw\n",
+        );
+        assert_eq!(resolve_v1_memory_mount(&empty), None);
+    }
+
+    #[test]
+    fn cgroup_paths_resolve_nested_v2_and_v1_layouts_with_injected_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let v2_root = temp.path().join("cgroup2");
+        let nested = v2_root.join("system.slice/jetstream.service");
+        write_file(&nested, "memory.current", "42\n");
+
+        let identity = parse_proc_cgroup("0::/system.slice/jetstream.service\n");
+        let resolved =
+            resolve_cgroup_memory_paths(&identity, &v2_root, None).unwrap();
+        assert_eq!(resolved.hierarchy, CgroupHierarchy::V2);
+        assert_eq!(resolved.memory_dir, nested.display().to_string());
+
+        // v1 fallback: memory controller files under the injected mount.
+        let v1_mount = temp.path().join("cgroup/memory");
+        let v1_dir = v1_mount.join("system.slice/jetstream.service");
+        write_file(&v1_dir, "memory.usage_in_bytes", "42\n");
+        let identity = parse_proc_cgroup("11:memory:/system.slice/jetstream.service\n");
+        let resolved =
+            resolve_cgroup_memory_paths(&identity, Path::new("/nonexistent"), Some(&v1_mount))
+                .unwrap();
+        assert_eq!(resolved.hierarchy, CgroupHierarchy::V1);
+        assert_eq!(resolved.memory_dir, v1_dir.display().to_string());
+    }
+
+    #[test]
+    fn cgroup_path_resolution_failure_names_attempted_locations() {
+        let identity = parse_proc_cgroup(
+            "11:memory:/system.slice/service\n0::/system.slice/service\n",
+        );
+        let result =
+            resolve_cgroup_memory_paths(&identity, Path::new("/nonexistent-v2"), None);
+        let error = result.unwrap_err();
+        assert!(error.contains("/nonexistent-v2/system.slice/service/memory.current"));
+        assert!(error.contains("no cgroup memory mount resolved"));
+
+        let empty = resolve_cgroup_memory_paths(&CgroupIdentity::default(), Path::new("/x"), None)
+            .unwrap_err();
+        assert!(empty.contains("no unified"));
+    }
+
+    #[test]
+    fn cgroup_v2_collector_reads_all_dimensions_from_resolved_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("nested/cgroup");
+        write_file(&dir, "memory.current", "1024\n");
+        write_file(&dir, "memory.high", "2048\n");
+        write_file(&dir, "memory.max", "max\n");
+        write_file(&dir, "memory.events", "oom 3\noom_kill 1\n");
+        write_file(
+            &dir,
+            "memory.pressure",
+            "some avg10=1.25 avg60=0.5 avg300=0.1 total=10\nfull avg10=0.75 avg60=0.2 avg300=0.05 total=5\n",
+        );
+
+        let paths = CgroupMemoryPaths {
+            hierarchy: CgroupHierarchy::V2,
+            memory_dir: dir.display().to_string(),
+            attempted: vec!["injected".to_string()],
+        };
+        let diagnostics = CgroupMemoryDiagnostics::collect_at(&paths);
+        assert_eq!(diagnostics.hierarchy, Some(CgroupHierarchy::V2));
+        assert_eq!(diagnostics.current_bytes, Some(1024));
+        assert_eq!(diagnostics.high_bytes, Some(2048));
+        assert_eq!(diagnostics.max_bytes, None);
+        assert_eq!(diagnostics.max_unlimited, Some(true));
+        assert_eq!(diagnostics.pressure_some_avg10, Some(1.25));
+        assert_eq!(diagnostics.events.oom, Some(3));
+        assert_eq!(diagnostics.collection_error, None);
+    }
+
+    #[test]
+    fn cgroup_v1_collector_maps_limit_failcnt_and_pressure() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("memory/service");
+        write_file(&dir, "memory.usage_in_bytes", "2048\n");
+        write_file(&dir, "memory.limit_in_bytes", "-1\n");
+        write_file(&dir, "memory.soft_limit_in_bytes", "4096\n");
+        write_file(&dir, "memory.failcnt", "7\n");
+        write_file(
+            &dir,
+            "memory.pressure",
+            "some avg10=2.5 avg60=0.5 avg300=0.1 total=10\n",
+        );
+
+        let paths = CgroupMemoryPaths {
+            hierarchy: CgroupHierarchy::V1,
+            memory_dir: dir.display().to_string(),
+            attempted: vec!["injected".to_string()],
+        };
+        let diagnostics = CgroupMemoryDiagnostics::collect_at(&paths);
+        assert_eq!(diagnostics.hierarchy, Some(CgroupHierarchy::V1));
+        assert_eq!(diagnostics.current_bytes, Some(2048));
+        assert_eq!(diagnostics.max_bytes, None, "v1 -1 limit means unlimited");
+        assert_eq!(diagnostics.max_unlimited, Some(true));
+        assert_eq!(diagnostics.high_bytes, Some(4096));
+        assert_eq!(diagnostics.events.max, Some(7), "failcnt maps to max events");
+        assert_eq!(diagnostics.events.oom_kill, None, "v1 has no kill counters");
+        assert_eq!(diagnostics.pressure_some_avg10, Some(2.5));
+        assert_eq!(diagnostics.collection_error, None);
+    }
+
+    #[test]
+    fn cgroup_collection_failure_remains_explicit_never_zero() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("empty-cgroup");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let paths = CgroupMemoryPaths {
+            hierarchy: CgroupHierarchy::V2,
+            memory_dir: dir.display().to_string(),
+            attempted: vec!["/injected/memory.current".to_string()],
+        };
+        let diagnostics = CgroupMemoryDiagnostics::collect_at(&paths);
+        assert_eq!(diagnostics.current_bytes, None);
+        assert_eq!(diagnostics.max_bytes, None);
+        assert_eq!(diagnostics.pressure_some_avg10, None);
+        let error = diagnostics.collection_error.expect("error must be explicit");
+        assert!(error.contains("unavailable"));
+        assert!(error.contains("/injected/memory.current"));
     }
 
     #[test]
@@ -1052,6 +1534,7 @@ mod tests {
             post_cache_entries: 10,
             negative_cache_entries: 10,
             max_concurrent_requests: 2,
+            replay_max_concurrent_batches: 2,
             channel_capacity: 2,
             max_ingress_event_bytes: 10,
             monitor_broadcast_capacity: 2,

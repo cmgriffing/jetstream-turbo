@@ -11,5 +11,6 @@ pub use schema::{
 };
 pub use sqlite::{
     CleanupResult, RecordStore, SQLitePragmaConfig, SQLiteStateSnapshot, SQLiteStore,
-    VacuumPendingReason, VacuumRunResult, VacuumState,
+    VacuumExecutionMode, VacuumGatingReason, VacuumPendingReason, VacuumRunPolicy,
+    VacuumRunResult, VacuumState,
 };

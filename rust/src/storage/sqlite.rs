@@ -8,11 +8,11 @@ use crate::storage::schema::{
     SchemaMaintenanceReport, SchemaVerification,
 };
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use simd_json::to_writer as simd_json_to_writer;
 use sqlx::{
-    sqlite::SqliteConnectOptions, sqlite::SqliteJournalMode, sqlite::SqlitePoolOptions, Row,
-    SqliteConnection, SqlitePool,
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
+    Connection, Row, SqliteConnection, SqlitePool,
 };
 use std::collections::HashSet;
 use std::path::Path;
@@ -30,6 +30,57 @@ pub enum VacuumPendingReason {
     Bloat,
 }
 
+/// Execution mode for VACUUM. `FileBackedTempStore` runs VACUUM on a dedicated
+/// maintenance connection whose temp store is file-backed, so the transient
+/// copy cannot allocate database-sized process memory. `PooledMemory` is the
+/// legacy behavior (plain `VACUUM` on a pooled `temp_store = MEMORY`
+/// connection) retained as an explicit operator rollback switch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VacuumExecutionMode {
+    /// Dedicated maintenance connection with `PRAGMA temp_store = FILE`.
+    #[default]
+    FileBackedTempStore,
+    /// Legacy pooled-connection VACUUM (unbounded transient memory).
+    PooledMemory,
+}
+
+impl VacuumExecutionMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FileBackedTempStore => "file_backed_temp_store",
+            Self::PooledMemory => "pooled_memory",
+        }
+    }
+}
+
+/// Why the scheduler deferred a pending VACUUM (or force-ran it past the
+/// maximum-deferral window).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VacuumGatingReason {
+    /// Memory pressure was elevated at scheduling time.
+    MemoryPressure,
+    /// The pipeline was in an active replay/catch-up phase.
+    RecoveryPhase,
+    /// The current UTC hour fell outside the configured low-traffic window.
+    Window,
+    /// The scheduler force-ran the VACUUM past `vacuum_max_defer_hours` or by
+    /// operator override.
+    ForceDefer,
+}
+
+impl VacuumGatingReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MemoryPressure => "memory_pressure",
+            Self::RecoveryPhase => "recovery_phase",
+            Self::Window => "window",
+            Self::ForceDefer => "force_defer",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct VacuumState {
     pub pending: bool,
@@ -42,6 +93,12 @@ pub struct VacuumState {
     pub over_budget: bool,
     /// Whether the database file was still over budget after the most recent VACUUM.
     pub over_budget_after_vacuum: bool,
+    /// Why the scheduler currently defers a pending VACUUM, if it does.
+    pub gating_reason: Option<VacuumGatingReason>,
+    /// Seconds the current pending VACUUM has been deferred so far.
+    pub deferred_seconds: Option<u64>,
+    /// Reason recorded at the most recent forced (past max-defer) VACUUM run.
+    pub last_forced_reason: Option<VacuumGatingReason>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -84,6 +141,9 @@ pub struct SQLiteStateSnapshot {
     pub vacuum_last_run_bytes_reclaimed: Option<i64>,
     pub over_budget: bool,
     pub over_budget_after_vacuum: bool,
+    pub vacuum_gating_reason: Option<VacuumGatingReason>,
+    pub vacuum_deferred_seconds: Option<u64>,
+    pub vacuum_last_forced_reason: Option<VacuumGatingReason>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -91,6 +151,28 @@ pub struct SQLitePragmaConfig {
     pub cache_size_kib: u32,
     pub mmap_size_mb: u64,
     pub journal_size_limit_mb: u64,
+}
+
+/// Execution policy for a single VACUUM run.
+#[derive(Debug, Clone)]
+pub struct VacuumRunPolicy {
+    pub mode: VacuumExecutionMode,
+    /// Directory on the temp volume for file-backed transient state.
+    pub temp_dir: std::path::PathBuf,
+    /// VACUUM is refused in pooled-memory mode above this database size.
+    pub max_in_memory_db_bytes: i64,
+}
+
+impl Default for VacuumRunPolicy {
+    fn default() -> Self {
+        Self {
+            mode: VacuumExecutionMode::default(),
+            temp_dir: std::env::temp_dir(),
+            // 2 GiB: pooled-memory VACUUM above this readily risks the
+            // recovery threshold on the 8 GiB host baseline.
+            max_in_memory_db_bytes: 2 * 1024 * 1024 * 1024,
+        }
+    }
 }
 
 pub trait RecordStore {
@@ -344,6 +426,15 @@ impl SQLiteStore {
         pragma_config: SQLitePragmaConfig,
         db_path: &str,
     ) -> Result<(), sqlx::Error> {
+        Self::apply_pragmas_with_temp_store(conn, pragma_config, db_path, "MEMORY").await
+    }
+
+    async fn apply_pragmas_with_temp_store(
+        conn: &mut SqliteConnection,
+        pragma_config: SQLitePragmaConfig,
+        db_path: &str,
+        temp_store: &str,
+    ) -> Result<(), sqlx::Error> {
         // synchronous = NORMAL: Good performance with WAL mode, still safe
         sqlx::query("PRAGMA synchronous = NORMAL")
             .execute(&mut *conn)
@@ -355,8 +446,7 @@ impl SQLiteStore {
             .execute(&mut *conn)
             .await?;
 
-        // temp_store = MEMORY: Keep temp tables/indexes in memory
-        sqlx::query("PRAGMA temp_store = MEMORY")
+        sqlx::query(&format!("PRAGMA temp_store = {temp_store}"))
             .execute(&mut *conn)
             .await?;
 
@@ -661,16 +751,29 @@ impl SQLiteStore {
         Ok(result.rows_affected() == 1)
     }
 
+    /// Deletes records older than the cutoff in bounded chunks. `pause` is
+    /// consulted before every chunk after the first; when it returns true
+    /// (e.g. memory pressure is elevated) the loop yields and the caller
+    /// resumes on the next scheduling cycle without exceeding the existing
+    /// chunk-delay backoff behavior.
     pub async fn cleanup_old_records(
         &self,
         older_than: DateTime<Utc>,
         chunk_size: u32,
         chunk_delay_ms: u64,
+        pause: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> TurboResult<u64> {
         let older_than_str = older_than.to_rfc3339();
         let mut total_deleted = 0u64;
 
         loop {
+            if total_deleted > 0 && pause.is_some_and(|pause| pause()) {
+                info!(
+                    total_deleted,
+                    "Cleanup chunk loop paused (gating callback signaled); resuming next cycle"
+                );
+                break;
+            }
             let result = sqlx::query(
                 "DELETE FROM records WHERE rowid IN (SELECT rowid FROM records WHERE created_at < ? LIMIT ?)"
             )
@@ -742,6 +845,17 @@ impl SQLiteStore {
             None
         };
         let vacuum_state = self.get_vacuum_state();
+        // The deferral age is derived at read time so diagnostics stay
+        // truthful between scheduler ticks.
+        let vacuum_deferred_seconds = vacuum_state
+            .pending_since
+            .filter(|_| vacuum_state.pending)
+            .map(|since| {
+                Utc::now()
+                    .signed_duration_since(since)
+                    .num_seconds()
+                    .max(0) as u64
+            });
 
         Ok(SQLiteStateSnapshot {
             db_size_bytes,
@@ -764,6 +878,11 @@ impl SQLiteStore {
             vacuum_last_run_bytes_reclaimed: vacuum_state.last_run_bytes_reclaimed,
             over_budget: vacuum_state.over_budget,
             over_budget_after_vacuum: vacuum_state.over_budget_after_vacuum,
+            vacuum_gating_reason: vacuum_state.gating_reason,
+            vacuum_deferred_seconds: vacuum_state
+                .deferred_seconds
+                .or(vacuum_deferred_seconds),
+            vacuum_last_forced_reason: vacuum_state.last_forced_reason,
         })
     }
 
@@ -780,6 +899,73 @@ impl SQLiteStore {
         }
     }
 
+    /// Connects a dedicated single maintenance connection for VACUUM that does
+    /// not inherit the pool's `temp_store = MEMORY` pragma: transient VACUUM
+    /// state is therefore file-backed and bounded by the page cache instead of
+    /// the database size.
+    async fn connect_maintenance_connection(&self) -> TurboResult<SqliteConnection> {
+        let mut connect_options = SqliteConnectOptions::new()
+            .filename(&self.db_path)
+            .busy_timeout(Duration::from_secs(30));
+        if self.db_path != ":memory:" {
+            connect_options = connect_options.journal_mode(SqliteJournalMode::Wal);
+        }
+        let mut conn = SqliteConnection::connect_with(&connect_options).await?;
+        Self::apply_pragmas_with_temp_store(&mut conn, self.pragma_config, &self.db_path, "FILE")
+            .await?;
+        Ok(conn)
+    }
+
+    /// Verifies the temp volume holds enough free space for a transient copy
+    /// of the database (VACUUM's file-backed working set is bounded by the
+    /// freelist, which cannot exceed the database size).
+    pub fn verify_temp_volume_headroom(dir: &Path, required_bytes: i64) -> TurboResult<()> {
+        let available = fs4::available_space(dir).map_err(|error| {
+            crate::models::TurboError::Internal(format!(
+                "unable to read free space on vacuum temp volume {}: {error}",
+                dir.display()
+            ))
+        })?;
+        let required = u64::try_from(required_bytes).unwrap_or(u64::MAX);
+        if available < required {
+            return Err(crate::models::TurboError::Internal(format!(
+                "vacuum temp volume {} has only {} free bytes; {} bytes are required \
+                 for a transient copy of the database",
+                dir.display(),
+                available,
+                required
+            )));
+        }
+        if available < required.saturating_mul(2) {
+            warn!(
+                available_bytes = available,
+                required_bytes = required,
+                "vacuum temp volume headroom is below 2x the database size; VACUUM may fail if growth continues"
+            );
+        }
+        Ok(())
+    }
+
+    /// Records that the scheduler deferred a pending VACUUM for `reason`, so
+    /// diagnostics and gauges report a truthful gating state.
+    pub fn record_vacuum_deferral(&self, reason: VacuumGatingReason) {
+        let mut state = self
+            .vacuum_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.gating_reason = Some(reason);
+    }
+
+    /// Records that a VACUUM was force-run past the deferral window (or by
+    /// operator override), keeping the reason observable after the state clears.
+    pub fn record_vacuum_forced(&self) {
+        let mut state = self
+            .vacuum_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.last_forced_reason = Some(VacuumGatingReason::ForceDefer);
+    }
+
     pub async fn cleanup_with_vacuum(
         &self,
         retention_days: u32,
@@ -787,6 +973,7 @@ impl SQLiteStore {
         vacuum_freelist_ratio: f64,
         cleanup_chunk_size: u32,
         cleanup_chunk_delay_ms: u64,
+        chunk_pause: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> TurboResult<CleanupResult> {
         let initial_size = self.get_db_size().await?;
         let mut total_deleted: u64 = 0;
@@ -802,7 +989,12 @@ impl SQLiteStore {
             for iteration in 0..max_iterations {
                 let cutoff = Utc::now() - chrono::Duration::days(current_retention as i64);
                 let deleted = self
-                    .cleanup_old_records(cutoff, cleanup_chunk_size, cleanup_chunk_delay_ms)
+                    .cleanup_old_records(
+                        cutoff,
+                        cleanup_chunk_size,
+                        cleanup_chunk_delay_ms,
+                        chunk_pause,
+                    )
                     .await?;
                 total_deleted += deleted;
 
@@ -913,25 +1105,58 @@ impl SQLiteStore {
         Ok(reason)
     }
 
-    /// Runs a VACUUM on a dedicated connection, awaited by the caller:
-    /// `PRAGMA wal_checkpoint(TRUNCATE)` first, then `VACUUM`, recording the
-    /// duration and bytes reclaimed from the file-size delta. Clears any
-    /// pending flag on success and tracks whether the file is still over
-    /// budget afterwards.
-    pub async fn run_vacuum(&self, max_size_bytes: i64) -> TurboResult<VacuumRunResult> {
+    /// Runs a VACUUM in the configured execution mode, recording the duration
+    /// and bytes reclaimed from the file-size delta. Clears any pending flag on
+    /// success and tracks whether the file is still over budget afterwards.
+    ///
+    /// `FileBackedTempStore` runs on a dedicated maintenance connection with
+    /// `PRAGMA temp_store = FILE`, bounding transient memory to SQLite page-
+    /// cache size instead of database size. The file-backed mode also verifies
+    /// that the temp volume has headroom for a transient copy of the database;
+    /// `db_path`'s parent directory is used as the fallback temp volume.
+    /// `PooledMemory` retains the legacy pooled-connection behavior and is
+    /// refused above the safety threshold.
+    pub async fn run_vacuum(
+        &self,
+        max_size_bytes: i64,
+        policy: &VacuumRunPolicy,
+    ) -> TurboResult<VacuumRunResult> {
         let started_at = Utc::now();
         let start = Instant::now();
         let size_before = self.get_db_size().await?;
 
-        let mut conn = self.pool.acquire().await?;
-        if let Err(e) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-            .execute(&mut *conn)
-            .await
-        {
-            warn!("wal_checkpoint(TRUNCATE) before VACUUM failed: {e}; continuing");
+        match policy.mode {
+            VacuumExecutionMode::FileBackedTempStore => {
+                Self::verify_temp_volume_headroom(&policy.temp_dir, size_before)?;
+                let mut conn = self.connect_maintenance_connection().await?;
+                if let Err(e) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .execute(&mut conn)
+                    .await
+                {
+                    warn!("wal_checkpoint(TRUNCATE) before VACUUM failed: {e}; continuing");
+                }
+                sqlx::query("VACUUM").execute(&mut conn).await?;
+                conn.close().await?;
+            }
+            VacuumExecutionMode::PooledMemory => {
+                if size_before > policy.max_in_memory_db_bytes {
+                    return Err(crate::models::TurboError::Internal(format!(
+                        "refusing VACUUM with temp_store = MEMORY: database is {} bytes, \
+                         above the pooled-memory safety threshold of {} bytes",
+                        size_before, policy.max_in_memory_db_bytes
+                    )));
+                }
+                let mut conn = self.pool.acquire().await?;
+                if let Err(e) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .execute(&mut *conn)
+                    .await
+                {
+                    warn!("wal_checkpoint(TRUNCATE) before VACUUM failed: {e}; continuing");
+                }
+                sqlx::query("VACUUM").execute(&mut *conn).await?;
+                drop(conn);
+            }
         }
-        sqlx::query("VACUUM").execute(&mut *conn).await?;
-        drop(conn);
 
         let duration = start.elapsed();
         let duration_ms = duration.as_millis() as u64;
@@ -947,6 +1172,8 @@ impl SQLiteStore {
             state.pending = false;
             state.pending_reason = None;
             state.pending_since = None;
+            state.gating_reason = None;
+            state.deferred_seconds = None;
             state.last_run_at = Some(started_at);
             state.last_run_duration_ms = Some(duration_ms);
             state.last_run_bytes_reclaimed = Some(bytes_reclaimed);
@@ -1389,6 +1616,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn crash_inside_coalescing_window_replays_and_filters_committed_events() {
+        // A batch completed and its records were stored, but the durable
+        // checkpoint write was coalesced away before the crash: after the
+        // restart (empty durable checkpoint) the same source events are
+        // recognized as already-committed duplicates and must be filtered
+        // (never re-published), and replaying to completion advances the
+        // durable checkpoint past the coalescing window.
+        let store = create_test_db().await;
+        let first = test_record(1);
+        let second = test_record(2);
+        let first_id = first.source_event_id();
+        let second_id = second.source_event_id();
+        store.store_batch(&[first, second]).await.unwrap();
+
+        // Crash before the coalesced checkpoint write: no durable checkpoint.
+        assert_eq!(store.load_ingestion_checkpoint().await.unwrap(), None);
+
+        // Restarted replay deduplicates against committed work.
+        let completed = store
+            .completed_source_event_ids(&[first_id.clone(), second_id.clone()])
+            .await
+            .unwrap();
+        assert_eq!(
+            completed,
+            HashSet::from([first_id, second_id]),
+            "committed events must be filtered as duplicates, not re-published"
+        );
+
+        // Replay of the coalescing window completes contiguously and out of
+        // the durability path: the durable checkpoint advances.
+        let resumed = test_checkpoint(2, 2_000);
+        assert!(store.advance_ingestion_checkpoint(&resumed).await.unwrap());
+        assert_eq!(
+            store.load_ingestion_checkpoint().await.unwrap(),
+            Some(resumed)
+        );
+    }
+
+    #[tokio::test]
+    async fn vacuum_pooled_memory_mode_refuses_above_safety_threshold() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("pooled-vacuum.db");
+        let pragma_config = test_pragma_config();
+        maintain_test_db(&db_path, pragma_config).await;
+        let store = SQLiteStore::new(&db_path, pragma_config).await.unwrap();
+
+        // Tiny safety threshold: the pooled-memory mode must refuse rather
+        // than allocate unbounded transient memory, and vacuum stays pending.
+        let size = store.get_db_size().await.unwrap();
+        let policy = VacuumRunPolicy {
+            mode: VacuumExecutionMode::PooledMemory,
+            temp_dir: temp_dir.path().to_path_buf(),
+            max_in_memory_db_bytes: size.saturating_sub(1),
+        };
+        let error = store
+            .run_vacuum(i64::MAX, &policy)
+            .await
+            .expect_err("pooled-memory VACUUM above threshold must refuse");
+        assert!(error.to_string().contains("refusing VACUUM"));
+    }
+
+    #[tokio::test]
+    async fn vacuum_file_backed_mode_records_gating_and_result() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("file-backed-vacuum.db");
+        let pragma_config = test_pragma_config();
+        maintain_test_db(&db_path, pragma_config).await;
+        let store = SQLiteStore::new(&db_path, pragma_config).await.unwrap();
+
+        // Simulate scheduler gating: a deferral reason must be observable.
+        store.record_vacuum_deferral(VacuumGatingReason::RecoveryPhase);
+        let snapshot = store.get_state_snapshot().await.unwrap();
+        assert_eq!(
+            snapshot.vacuum_gating_reason,
+            Some(VacuumGatingReason::RecoveryPhase)
+        );
+
+        let policy = VacuumRunPolicy {
+            mode: VacuumExecutionMode::FileBackedTempStore,
+            temp_dir: temp_dir.path().to_path_buf(),
+            max_in_memory_db_bytes: 0,
+        };
+        let run = store
+            .run_vacuum(i64::MAX, &policy)
+            .await
+            .expect("file-backed VACUUM must succeed on a small fixture");
+        assert_eq!(run.bytes_reclaimed, 0);
+
+        // After a successful run the gating reason clears and the result is
+        // recorded.
+        store.record_vacuum_forced();
+        let snapshot = store.get_state_snapshot().await.unwrap();
+        assert_eq!(snapshot.vacuum_gating_reason, None);
+        assert_eq!(
+            snapshot.vacuum_last_forced_reason,
+            Some(VacuumGatingReason::ForceDefer)
+        );
+        assert!(snapshot.vacuum_last_run_at.is_some());
+        assert!(snapshot.vacuum_last_run_duration_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn cleanup_old_records_pauses_between_chunks_when_gated() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("pause-cleanup.db");
+        let pragma_config = test_pragma_config();
+        maintain_test_db(&db_path, pragma_config).await;
+        let store = SQLiteStore::new(&db_path, pragma_config).await.unwrap();
+
+        // Insert 250 backdated records so retention cleanup targets them.
+        let old_time_str = (Utc::now() - Duration::days(10)).to_rfc3339();
+        let now_str = Utc::now().to_rfc3339();
+        for seq in 0..250 {
+            sqlx::query(
+                r#"INSERT INTO records (
+                    at_uri, did, time_us, source_event_id, message, message_metadata,
+                    created_at, hydrated_at, hydration_time_ms, api_calls_count,
+                    cache_hit_rate, cache_hits, cache_misses
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+            )
+            .bind(format!("at://old.bsky.social/app.bsky.feed.post/{seq}"))
+            .bind("did:plc:old")
+            .bind(seq as i64)
+            .bind(format!("old-{seq}"))
+            .bind(r#"{"foo":"bar"}"#)
+            .bind(r#"{}"#)
+            .bind(&old_time_str)
+            .bind(&now_str)
+            .bind(1i64)
+            .bind(1i64)
+            .bind(0.5)
+            .bind(1i64)
+            .bind(1i64)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        }
+
+        // After the first chunk the pause callback signals pressure and the
+        // loop yields with partial progress, resuming on the next cycle
+        // without exceeding the chunk backoff behavior.
+        let pause = || true;
+        let deleted_first_cycle = store
+            .cleanup_old_records(Utc::now() - Duration::days(1), 100, 0, Some(&pause))
+            .await
+            .unwrap();
+        assert!(deleted_first_cycle > 0 && deleted_first_cycle < 250);
+        let remaining = store.count_records().await.unwrap();
+        assert!(remaining > 0);
+
+        // Unpaused cycle drains the rest.
+        let deleted_second_cycle = store
+            .cleanup_old_records(Utc::now() - Duration::days(1), 1000, 0, None)
+            .await
+            .unwrap();
+        assert_eq!(remaining as u64, deleted_second_cycle);
+        assert_eq!(store.count_records().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
     async fn ingestion_checkpoint_survives_store_restart() {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("restart.db");
@@ -1486,7 +1873,7 @@ mod tests {
         let store = create_test_db().await;
 
         let cutoff = Utc::now() - Duration::days(7);
-        let deleted = store.cleanup_old_records(cutoff, 1000, 50).await.unwrap();
+        let deleted = store.cleanup_old_records(cutoff, 1000, 50, None).await.unwrap();
 
         assert_eq!(deleted, 0, "Should delete nothing from empty DB");
 
@@ -1544,7 +1931,7 @@ mod tests {
         .unwrap();
 
         let cutoff = now - Duration::days(7);
-        let deleted = store.cleanup_old_records(cutoff, 1000, 50).await.unwrap();
+        let deleted = store.cleanup_old_records(cutoff, 1000, 50, None).await.unwrap();
 
         assert_eq!(deleted, 1, "Should delete 1 old record");
 
@@ -1591,7 +1978,7 @@ mod tests {
 
         let max_size = size_before / 2;
         let result = store
-            .cleanup_with_vacuum(7, max_size, 0.10, 1000, 50)
+            .cleanup_with_vacuum(7, max_size, 0.10, 1000, 50, None)
             .await
             .unwrap();
 
@@ -1634,7 +2021,7 @@ mod tests {
 
         let large_size = 100_000_000_000i64;
         let result = store
-            .cleanup_with_vacuum(7, large_size, 0.10, 1000, 50)
+            .cleanup_with_vacuum(7, large_size, 0.10, 1000, 50, None)
             .await
             .unwrap();
 
@@ -1691,7 +2078,7 @@ mod tests {
         // Force the database over budget, then run the full cleanup path.
         let max_size_bytes = size_with_data / 2;
         let result = store
-            .cleanup_with_vacuum(7, max_size_bytes, 0.10, 1000, 0)
+            .cleanup_with_vacuum(7, max_size_bytes, 0.10, 1000, 0, None)
             .await
             .unwrap();
 
@@ -1712,7 +2099,7 @@ mod tests {
             "DELETE alone must not shrink the database file"
         );
 
-        let run = store.run_vacuum(max_size_bytes).await.unwrap();
+        let run = store.run_vacuum(max_size_bytes, &VacuumRunPolicy::default()).await.unwrap();
         assert!(
             run.size_after < run.size_before,
             "VACUUM must actually shrink the file ({} -> {})",
@@ -1752,7 +2139,7 @@ mod tests {
         // NONE the file keeps its size and the freed pages sit on the freelist.
         insert_expired_records(&store, 300, 10).await;
         let deleted = store
-            .cleanup_old_records(Utc::now() - chrono::Duration::days(1), 1000, 0)
+            .cleanup_old_records(Utc::now() - chrono::Duration::days(1), 1000, 0, None)
             .await
             .unwrap();
         assert!(deleted > 0);

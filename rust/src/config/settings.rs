@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::hydration::HydrationExecutionMode;
+use crate::storage::VacuumExecutionMode;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Settings {
@@ -46,6 +47,34 @@ pub struct Settings {
     /// Maximum hours a pending VACUUM may be deferred past the window before
     /// it runs regardless (bounds the worst case).
     pub vacuum_max_defer_hours: u64,
+    /// How VACUUM runs. `file_backed_temp_store` uses a dedicated maintenance
+    /// connection so transient state cannot allocate database-sized memory;
+    /// `pooled_memory` is the legacy behavior (rollback switch).
+    pub vacuum_execution_mode: VacuumExecutionMode,
+    /// Directory on the temp volume used for file-backed VACUUM transient
+    /// state. Defaults to the process temp directory when unset.
+    pub vacuum_temp_dir: Option<String>,
+    /// Pooled-memory VACUUM is refused above this database size (safety
+    /// threshold for the legacy mode).
+    pub vacuum_max_pooled_memory_db_mb: u64,
+
+    // Replay concurrency scaling (reuses the pressure-coordinator permit pool;
+    // there is no second semaphore).
+    /// Maximum concurrent batches during replay/catch-up while pressure is
+    /// normal. Scaled up from `max_concurrent_requests`, restored to live
+    /// levels after the pipeline reaches and holds `live`.
+    pub replay_max_concurrent_batches: usize,
+
+    // Checkpoint persistence coalescing.
+    /// Minimum interval between durable `ingestion_checkpoint` writes (0 =
+    /// disabled). Writes additionally trigger on every
+    /// `checkpoint_persist_batch_interval` completions; when both are 0 the
+    /// legacy persist-per-batch behavior is preserved.
+    pub checkpoint_persist_interval_ms: u64,
+    /// Number of batch completions between durable checkpoint writes (0 =
+    /// disabled).
+    pub checkpoint_persist_batch_interval: usize,
+
     pub cleanup_backoff_max_minutes: u64,
     pub cleanup_backoff_reset_count: u32,
     pub cleanup_chunk_size: u32,
@@ -144,6 +173,13 @@ pub struct Settings {
     // PostHog Configuration
     pub posthog_api_key: Option<String>,
     pub posthog_host: Option<String>,
+
+    // Maintenance API
+    /// Shared key required by maintenance endpoints (e.g.
+    /// `POST /maintenance/vacuum` via the `X-Maintenance-Key` header). When
+    /// unset, maintenance endpoints are disabled outright — must be opted
+    /// into explicitly.
+    pub maintenance_api_key: Option<String>,
 }
 
 impl Default for Settings {
@@ -171,6 +207,12 @@ impl Default for Settings {
             vacuum_window_start_hour: 3,
             vacuum_window_end_hour: 5,
             vacuum_max_defer_hours: 6,
+            vacuum_execution_mode: VacuumExecutionMode::default(),
+            vacuum_temp_dir: None,
+            vacuum_max_pooled_memory_db_mb: 2048,
+            replay_max_concurrent_batches: 27,
+            checkpoint_persist_interval_ms: 500,
+            checkpoint_persist_batch_interval: 4,
             cleanup_backoff_max_minutes: 30,
             cleanup_backoff_reset_count: 3,
             cleanup_chunk_size: 1000,
@@ -242,6 +284,7 @@ impl Default for Settings {
             statsd_port: None,
             posthog_api_key: None,
             posthog_host: None,
+            maintenance_api_key: None,
         }
     }
 }
@@ -325,6 +368,27 @@ impl Settings {
 
         if let Ok(max_defer) = std::env::var("VACUUM_MAX_DEFER_HOURS") {
             builder = builder.set_override("vacuum_max_defer_hours", max_defer)?;
+        }
+
+        if let Ok(mode) = std::env::var("VACUUM_EXECUTION_MODE") {
+            builder = builder.set_override("vacuum_execution_mode", mode)?;
+        }
+        if let Ok(temp_dir) = std::env::var("VACUUM_TEMP_DIR") {
+            builder = builder.set_override("vacuum_temp_dir", temp_dir)?;
+        }
+        if let Ok(threshold) = std::env::var("VACUUM_MAX_POOLED_MEMORY_DB_MB") {
+            builder =
+                builder.set_override("vacuum_max_pooled_memory_db_mb", threshold)?;
+        }
+
+        if let Ok(value) = std::env::var("REPLAY_MAX_CONCURRENT_BATCHES") {
+            builder = builder.set_override("replay_max_concurrent_batches", value)?;
+        }
+        if let Ok(value) = std::env::var("CHECKPOINT_PERSIST_INTERVAL_MS") {
+            builder = builder.set_override("checkpoint_persist_interval_ms", value)?;
+        }
+        if let Ok(value) = std::env::var("CHECKPOINT_PERSIST_BATCH_INTERVAL") {
+            builder = builder.set_override("checkpoint_persist_batch_interval", value)?;
         }
 
         if let Ok(backoff_max) = std::env::var("CLEANUP_BACKOFF_MAX_MINUTES") {
@@ -515,8 +579,14 @@ impl Settings {
             builder = builder.set_override("posthog_host", posthog_host)?;
         }
 
+        if let Ok(key) = std::env::var("MAINTENANCE_API_KEY") {
+            builder = builder.set_override("maintenance_api_key", key)?;
+        }
+
         let settings = builder.build()?;
         let mut settings: Settings = settings.try_deserialize()?;
+        settings.maintenance_api_key =
+            normalize_optional_setting(settings.maintenance_api_key);
         settings.retry_base_delay = duration_from_env_ms(
             "BLUESKY_RETRY_BASE_DELAY_MS",
             Settings::default().retry_base_delay,
@@ -603,6 +673,20 @@ impl Settings {
 
         if self.max_concurrent_requests == 0 {
             anyhow::bail!("max_concurrent_requests must be greater than 0");
+        }
+        if self.replay_max_concurrent_batches < self.max_concurrent_requests {
+            anyhow::bail!(
+                "replay_max_concurrent_batches ({}) must be at least the live \
+                 permit count max_concurrent_requests ({})",
+                self.replay_max_concurrent_batches,
+                self.max_concurrent_requests
+            );
+        }
+        if self.checkpoint_persist_interval_ms > 60_000 {
+            anyhow::bail!("checkpoint_persist_interval_ms must be between 0 and 60000");
+        }
+        if self.checkpoint_persist_batch_interval > 1_000 {
+            anyhow::bail!("checkpoint_persist_batch_interval must be between 0 and 1000");
         }
 
         if self.channel_capacity == 0 {
@@ -728,6 +812,33 @@ impl Settings {
             anyhow::bail!("vacuum_max_defer_hours must be greater than 0");
         }
 
+        if self.vacuum_max_pooled_memory_db_mb == 0 {
+            anyhow::bail!("vacuum_max_pooled_memory_db_mb must be greater than 0");
+        }
+        if self.vacuum_execution_mode == VacuumExecutionMode::PooledMemory
+            && (self.max_db_size_mb as u128)
+                > (self.vacuum_max_pooled_memory_db_mb as u128)
+        {
+            anyhow::bail!(
+                "vacuum_execution_mode = pooled_memory is unsafe above vacuum_max_pooled_memory_db_mb ({} MB): \
+                 the configured max_db_size_mb is {} MB; switch vacuum_execution_mode to \
+                 file_backed_temp_store or raise the threshold",
+                self.vacuum_max_pooled_memory_db_mb,
+                self.max_db_size_mb
+            );
+        }
+        if let Some(temp_dir) = self
+            .vacuum_temp_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|dir| !dir.is_empty())
+        {
+            let path = std::path::Path::new(temp_dir);
+            if !path.is_dir() {
+                anyhow::bail!("vacuum_temp_dir ({temp_dir} / VACUUM_TEMP_DIR) must be an existing directory");
+            }
+        }
+
         if self.sqlite_cache_size_kib == 0 {
             anyhow::bail!("sqlite_cache_size_kib must be greater than 0");
         }
@@ -751,13 +862,17 @@ impl Settings {
         if self.in_flight_payload_limit_mb == 0 || self.max_ingress_event_bytes == 0 {
             anyhow::bail!("in-flight payload and ingress event byte limits must be greater than 0");
         }
-        let required_in_flight_bytes = u64::try_from(self.max_concurrent_requests)
+        // The effective maximum batch concurrency during replay is what the
+        // in-flight envelope must cover (task: replay drain convergence).
+        let required_in_flight_bytes = u64::try_from(self.effective_max_batch_concurrency())
             .unwrap_or(u64::MAX)
             .saturating_mul(25)
             .saturating_mul(u64::try_from(self.max_ingress_event_bytes).unwrap_or(u64::MAX));
         if self.in_flight_payload_limit_mb.saturating_mul(1024 * 1024) < required_in_flight_bytes {
             anyhow::bail!(
-                "in_flight_payload_limit_mb must cover max_concurrent_requests * 25 records * max_ingress_event_bytes"
+                "in_flight_payload_limit_mb must cover the effective maximum batch concurrency \
+                 (replay_max_concurrent_batches {}) * 25 records * max_ingress_event_bytes",
+                self.replay_max_concurrent_batches
             );
         }
         if self.conservative_memory_working_set_bytes() > self.memory_envelope().recovery_bytes {
@@ -771,6 +886,13 @@ impl Settings {
         }
 
         Ok(())
+    }
+
+    /// Effective maximum concurrent batches: replay scaling applies from
+    /// process start until `live` is reached again, so the envelope math uses
+    /// the replay ceiling, not the live permit count.
+    pub fn effective_max_batch_concurrency(&self) -> usize {
+        self.replay_max_concurrent_batches.max(self.max_concurrent_requests)
     }
 
     pub fn memory_envelope(&self) -> crate::turbocharger::runtime_memory::MemoryEnvelope {
@@ -928,6 +1050,15 @@ mod tests {
         assert_eq!(settings.vacuum_window_start_hour, 3);
         assert_eq!(settings.vacuum_window_end_hour, 5);
         assert_eq!(settings.vacuum_max_defer_hours, 6);
+        assert_eq!(
+            settings.vacuum_execution_mode,
+            VacuumExecutionMode::FileBackedTempStore
+        );
+        assert_eq!(settings.vacuum_temp_dir, None);
+        assert_eq!(settings.vacuum_max_pooled_memory_db_mb, 2048);
+        assert_eq!(settings.replay_max_concurrent_batches, 27);
+        assert_eq!(settings.checkpoint_persist_interval_ms, 500);
+        assert_eq!(settings.checkpoint_persist_batch_interval, 4);
         assert_eq!(settings.batch_execution_timeout_secs, 60);
         assert_eq!(settings.pipeline_startup_grace_secs, 300);
         assert_eq!(settings.readiness_recovery_successes, 3);
@@ -1094,6 +1225,9 @@ mod tests {
             ("VACUUM_WINDOW_START_HOUR", "1"),
             ("VACUUM_WINDOW_END_HOUR", "2"),
             ("VACUUM_MAX_DEFER_HOURS", "12"),
+            ("VACUUM_EXECUTION_MODE", "file_backed_temp_store"),
+            ("VACUUM_TEMP_DIR", "/tmp"),
+            ("VACUUM_MAX_POOLED_MEMORY_DB_MB", "4096"),
             ("BLUESKY_MAX_RETRIES", "0"),
             ("BLUESKY_RETRY_BASE_DELAY_MS", "25"),
             ("BLUESKY_RETRY_MAX_DELAY_MS", "250"),
@@ -1111,17 +1245,21 @@ mod tests {
             ("USER_CACHE_LIMIT_MB", "111"),
             ("POST_CACHE_LIMIT_MB", "222"),
             ("NEGATIVE_POST_CACHE_LIMIT_MB", "33"),
-            ("MEMORY_RECOVERY_MB", "2500"),
             ("MEMORY_SOFT_PRESSURE_MB", "2800"),
             ("MEMORY_EMERGENCY_MB", "3000"),
             ("MEMORY_EXTERNAL_HARD_LIMIT_MB", "4000"),
             ("MEMORY_HOST_TOTAL_MB", "6000"),
             ("MEMORY_REQUIRED_HOST_HEADROOM_MB", "2000"),
+            ("MEMORY_RECOVERY_MB", "2700"),
             ("MEMORY_PRESSURE_CONFIRMATION_SECS", "7"),
             ("MEMORY_RECOVERY_CONFIRMATION_SECS", "9"),
             ("MEMORY_SAMPLE_INTERVAL_SECS", "2"),
             ("MEMORY_SAMPLE_CAPACITY", "44"),
-            ("IN_FLIGHT_PAYLOAD_LIMIT_MB", "300"),
+            ("IN_FLIGHT_PAYLOAD_LIMIT_MB", "800"),
+            ("REPLAY_MAX_CONCURRENT_BATCHES", "13"),
+            ("CHECKPOINT_PERSIST_INTERVAL_MS", "250"),
+            ("CHECKPOINT_PERSIST_BATCH_INTERVAL", "6"),
+            ("MAINTENANCE_API_KEY", "op-secret"),
             ("MAX_INGRESS_EVENT_BYTES", "1048576"),
             ("MEMORY_PRESSURE_ACTIONS_ENABLED", "true"),
             ("MEMORY_EMERGENCY_EXIT_ENABLED", "true"),
@@ -1153,6 +1291,12 @@ mod tests {
         assert_eq!(settings.vacuum_window_start_hour, 1);
         assert_eq!(settings.vacuum_window_end_hour, 2);
         assert_eq!(settings.vacuum_max_defer_hours, 12);
+        assert_eq!(
+            settings.vacuum_execution_mode,
+            VacuumExecutionMode::FileBackedTempStore
+        );
+        assert_eq!(settings.vacuum_temp_dir.as_deref(), Some("/tmp"));
+        assert_eq!(settings.vacuum_max_pooled_memory_db_mb, 4096);
         assert_eq!(settings.max_retries, 0);
         assert_eq!(settings.retry_base_delay, Duration::from_millis(25));
         assert_eq!(settings.retry_max_delay, Duration::from_millis(250));
@@ -1170,7 +1314,7 @@ mod tests {
         assert_eq!(settings.user_cache_limit_mb, 111);
         assert_eq!(settings.post_cache_limit_mb, 222);
         assert_eq!(settings.negative_post_cache_limit_mb, 33);
-        assert_eq!(settings.memory_recovery_mb, 2500);
+        assert_eq!(settings.memory_recovery_mb, 2700);
         assert_eq!(settings.memory_soft_pressure_mb, 2800);
         assert_eq!(settings.memory_emergency_mb, 3000);
         assert_eq!(settings.memory_external_hard_limit_mb, 4000);
@@ -1178,6 +1322,10 @@ mod tests {
         assert_eq!(settings.memory_sample_capacity, 44);
         assert!(settings.memory_pressure_actions_enabled);
         assert!(settings.memory_emergency_exit_enabled);
+        assert_eq!(settings.replay_max_concurrent_batches, 13);
+        assert_eq!(settings.checkpoint_persist_interval_ms, 250);
+        assert_eq!(settings.checkpoint_persist_batch_interval, 6);
+        assert_eq!(settings.maintenance_api_key.as_deref(), Some("op-secret"));
     }
 
     #[test]
@@ -1252,22 +1400,71 @@ mod tests {
     }
 
     #[test]
-    fn permit_default_of_nine_keeps_payload_coverage_bounded() {
+    fn vacuum_execution_mode_validation_guards_pooled_memory_and_temp_dir() {
+        let _guard = ENV_LOCK.lock().expect("environment test lock poisoned");
+        let base = Settings {
+            stream_name: "test".to_string(),
+            bluesky_handle: "test.bsky.social".to_string(),
+            bluesky_app_password: "password".to_string(),
+            ..Default::default()
+        };
+        assert!(base.validate().is_ok());
+
+        // Legacy pooled-memory mode is refused outright at production scale.
+        let mut pooled_above_threshold = base.clone();
+        pooled_above_threshold.vacuum_execution_mode = VacuumExecutionMode::PooledMemory;
+        assert!(pooled_above_threshold.validate().is_err());
+
+        // Below the safety threshold the legacy mode remains a rollback switch.
+        let mut pooled_below_threshold = pooled_above_threshold.clone();
+        pooled_below_threshold.vacuum_temp_dir = None;
+        pooled_below_threshold.max_db_size_mb = 1024;
+        assert!(pooled_below_threshold.validate().is_ok());
+
+        // A configured temp directory must exist at startup.
+        let mut missing_temp_dir = base.clone();
+        missing_temp_dir.vacuum_temp_dir = Some("/nonexistent-vacuum-temp-dir".to_string());
+        assert!(missing_temp_dir.validate().is_err());
+    }
+
+    #[test]
+    fn vacuum_run_policy_verification_rejects_thin_headroom() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        assert!(crate::storage::SQLiteStore::verify_temp_volume_headroom(
+            temp_dir.path(),
+            0
+        )
+        .is_ok());
+        // A 1-exabyte requirement can never be satisfied by a real volume.
+        assert!(crate::storage::SQLiteStore::verify_temp_volume_headroom(
+            temp_dir.path(),
+            i64::MAX
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn replay_concurrency_defaults_keep_payload_envelope_covered() {
         let settings = Settings {
             stream_name: "test".to_string(),
             bluesky_handle: "test.bsky.social".to_string(),
             bluesky_app_password: "password".to_string(),
             ..Default::default()
         };
-        // The default in-flight payload limit (256 MB) must still cover the
-        // raised permit count: 9 permits * 25 records * 256 KiB ≈ 57.6 MB.
+        // The default in-flight payload limit (256 MB) must cover the raised
+        // replay concurrency: 27 * 25 records * 256 KiB ≈ 177 MB.
         assert!(settings.validate().is_ok());
+        assert!(settings.replay_max_concurrent_batches > settings.max_concurrent_requests);
 
         let mut undersized = settings.clone();
-        undersized.in_flight_payload_limit_mb = 50;
+        undersized.in_flight_payload_limit_mb = 100;
         assert!(
             undersized.validate().is_err(),
-            "50 MB cannot cover 9 permits * 25 records * max_ingress_event_bytes"
+            "100 MB cannot cover replay_max_concurrent_batches * 25 * max_ingress_event_bytes"
         );
+
+        let mut below_live = settings;
+        below_live.replay_max_concurrent_batches = below_live.max_concurrent_requests - 1;
+        assert!(below_live.validate().is_err());
     }
 }

@@ -44,7 +44,7 @@ use tracing::{error, info, trace, warn};
 
 const BATCH_SIZE: usize = 25;
 const BATCH_REPORT_LOG_TARGET: &str = "jetstream_turbo.batch_report";
-// The hydrator can consume up to one profile batch and one post batch per flush.
+/// The hydrator can consume up to one profile batch and one post batch per flush.
 // At 200ms, the time-based path can generate 5 flushes/sec, which maps to 10 API
 // requests/sec in the worst case and fully consumes the shared Bluesky limit.
 // 250ms keeps the timer path below that ceiling and gives partial batches a bit
@@ -119,6 +119,14 @@ pub struct TurboCharger<M, P, Po, S, E> {
     memory_phase: WorkloadPhaseTracker,
     memory_pressure: StdMutex<MemoryPressureCoordinator>,
     memory_pressure_permits: Mutex<Vec<OwnedSemaphorePermit>>,
+    /// Permits withheld from the batch semaphore while the pipeline is in
+    /// live mode, restoring the live ingestion permit count. Released when
+    /// the pipeline enters replay/catch-up with normal pressure.
+    replay_reserved_permits: Mutex<Vec<OwnedSemaphorePermit>>,
+    vacuum_override_requested: AtomicBool,
+    /// Newest contiguous in-memory checkpoint not yet written durably.
+    checkpoint_frontier_pending: StdMutex<Option<crate::models::recovery::IngestionCheckpoint>>,
+    checkpoint_coalescer: StdMutex<CheckpointCoalescer>,
     memory_exit_requested: AtomicBool,
     memory_peak_logged_bytes: AtomicU64,
     memory_last_external_snapshot_unix_seconds: AtomicU64,
@@ -263,8 +271,11 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             .await?,
         );
 
-        // Initialize semaphore for concurrency control
-        let semaphore = Arc::new(Semaphore::new(settings.max_concurrent_requests.max(1)));
+        // Initialize semaphore for concurrency control. Capacity is the
+        // effective replay maximum; live-mode capacity is restored by
+        // withholding permits in `replay_reserved_permits` (one coordinator-
+        // owned pool, no second semaphore).
+        let semaphore = Arc::new(Semaphore::new(settings.effective_max_batch_concurrency().max(1)));
         let memory_pressure = MemoryPressureCoordinator::new(
             settings.memory_envelope(),
             settings.max_concurrent_requests,
@@ -290,6 +301,15 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
         // Initialize monitor broadcast channel
         let (broadcast_sender, _) = broadcast::channel(settings.monitor_broadcast_capacity);
 
+        // VACUUM temp headroom is validated at startup so a pending VACUUM on
+        // a production-sized database cannot hit ENOSPC mid-run.
+        let vacuum_temp_dir = vacuum_temp_dir_path(&settings);
+        let checkpoint_coalescer = CheckpointCoalescer::from_settings(&settings);
+        if settings.vacuum_execution_mode == crate::storage::VacuumExecutionMode::FileBackedTempStore {
+            let db_size = sqlite_store.get_db_size().await?;
+            SQLiteStore::verify_temp_volume_headroom(&vacuum_temp_dir, db_size)?;
+        }
+
         info!("TurboCharger initialized successfully");
 
         Ok(Self {
@@ -312,6 +332,10 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             memory_phase: WorkloadPhaseTracker::default(),
             memory_pressure: StdMutex::new(memory_pressure),
             memory_pressure_permits: Mutex::new(Vec::new()),
+            replay_reserved_permits: Mutex::new(Vec::new()),
+            vacuum_override_requested: AtomicBool::new(false),
+            checkpoint_frontier_pending: StdMutex::new(None),
+            checkpoint_coalescer: StdMutex::new(checkpoint_coalescer),
             memory_exit_requested: AtomicBool::new(false),
             memory_peak_logged_bytes: AtomicU64::new(0),
             memory_last_external_snapshot_unix_seconds: AtomicU64::new(0),
@@ -340,6 +364,9 @@ where
         } else {
             WorkloadPhase::LiveIngestion
         });
+        // Align the batch permit level with the initial phase before the
+        // loop starts accepting work.
+        self.reconcile_batch_permits().await;
         let mut next_ingress_ordinal = checkpoint
             .as_ref()
             .map(|checkpoint| checkpoint.ingress_ordinal.saturating_add(1))
@@ -405,6 +432,11 @@ where
             while let Some(task_result) = batch_tasks.try_join_next() {
                 if let Err(error) = self.handle_batch_task_result(task_result).await {
                     Self::abort_and_drain_batch_tasks(&mut batch_tasks).await;
+                    // Failure-containment boundary: durably persist the
+                    // contiguous frontier so restart replays from it.
+                    if let Err(flush_error) = self.flush_durable_checkpoint().await {
+                        error!(error = %flush_error, "Failed to persist checkpoint at failure boundary");
+                    }
                     return Err(error);
                 }
             }
@@ -412,6 +444,11 @@ where
             if self.memory_exit_requested.load(Ordering::Relaxed) {
                 buffer.clear();
                 Self::abort_and_drain_batch_tasks(&mut batch_tasks).await;
+                // ControlledMemoryExit: always persist the final contiguous
+                // frontier before the controlled shutdown.
+                if let Err(flush_error) = self.flush_durable_checkpoint().await {
+                    error!(error = %flush_error, "Failed to persist checkpoint at controlled memory exit");
+                }
                 return Err(TurboError::ControlledMemoryExit.into());
             }
 
@@ -460,6 +497,10 @@ where
         batch_reporter.log_if_window_has_data();
 
         self.drain_batch_tasks(&mut batch_tasks).await?;
+
+        // Final durable checkpoint on the shutdown path: uncommitted work is
+        // never advanced, and the contiguous frontier is always persisted.
+        self.flush_durable_checkpoint().await?;
 
         error!("Jetstream stream ended unexpectedly");
         Err(TurboError::Internal("Jetstream stream ended".to_string()).into())
@@ -526,6 +567,12 @@ where
         self.settings.recovery_min_delay
     }
 
+    /// Read-only view of the effective settings (for server-side guards such
+    /// as the maintenance shared key).
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
     pub fn start_memory_observer_task(self: &Arc<Self>) {
         let turbocharger = Arc::clone(self);
         tokio::spawn(async move {
@@ -549,7 +596,77 @@ where
     fn transition_memory_phase(&self, phase: WorkloadPhase) {
         if self.memory_phase.transition(phase) {
             info!(phase = ?phase, "Runtime memory workload phase changed");
+            metrics::gauge!("jetstream_turbo_workload_phase", "phase" => phase.as_str(), "active" => "true")
+                .set(1.0);
+            for other in [
+                WorkloadPhase::Startup,
+                WorkloadPhase::LiveIngestion,
+                WorkloadPhase::Replay,
+                WorkloadPhase::Containment,
+                WorkloadPhase::DatabaseContention,
+                WorkloadPhase::Cleanup,
+                WorkloadPhase::Vacuum,
+            ] {
+                if other != phase {
+                    metrics::gauge!(
+                        "jetstream_turbo_workload_phase",
+                        "phase" => other.as_str(),
+                        "active" => "true"
+                    )
+                    .set(0.0);
+                }
+            }
         }
+    }
+
+    /// Adjusts the replay-permit pool for the current phase and pressure
+    /// state: in Replay/CatchingUp with normal pressure the batch semaphore
+    /// runs at the scaled replay ceiling; in live mode the difference is
+    /// withheld so live concurrency matches the validated envelope.
+    async fn reconcile_batch_permits(&self) {
+        let live_permits = self.settings.max_concurrent_requests.max(1);
+        let replay_permits = self
+            .settings
+            .replay_max_concurrent_batches
+            .max(live_permits);
+        let phase = self.memory_phase.current();
+        let pressure_ok = {
+            self.memory_pressure
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .state()
+                == crate::turbocharger::MemoryPressureState::Normal
+        };
+        let effective = replay_permits_target(phase, pressure_ok, live_permits, replay_permits);
+        let mut reserved = self.replay_reserved_permits.lock().await;
+        let desired_reserved = replay_permits.saturating_sub(effective);
+        while reserved.len() < desired_reserved {
+            match Arc::clone(&self.semaphore).try_acquire_owned() {
+                Ok(permit) => reserved.push(permit),
+                Err(_) => break,
+            }
+        }
+        while reserved.len() > desired_reserved {
+            reserved.pop();
+        }
+        let effective_capacity = replay_permits.saturating_sub(reserved.len());
+        drop(reserved);
+        metrics::gauge!("jetstream_turbo_effective_batch_permits")
+            .set(effective_capacity as f64);
+        for phase_value in [
+            WorkloadPhase::Startup,
+            WorkloadPhase::LiveIngestion,
+            WorkloadPhase::Replay,
+        ] {
+            metrics::gauge!("jetstream_turbo_batch_permits_phase", "phase" => phase_value.as_str())
+                .set(if phase == phase_value { 1.0 } else { 0.0 });
+        }
+        trace!(
+            phase = ?phase,
+            pressure_ok,
+            effective_batch_permits = effective_capacity,
+            "Replay batch permits reconciled"
+        );
     }
 
     async fn capture_runtime_memory_sample(&self) -> TurboResult<()> {
@@ -589,6 +706,9 @@ where
         {
             self.transition_memory_phase(WorkloadPhase::LiveIngestion);
         }
+        // Keep replay/live permit levels in sync with the phase and pressure
+        // state; reconciling here bounds convergence lag after transitions.
+        self.reconcile_batch_permits().await;
         let cache = self.hydrator.get_cache().memory_snapshot();
         let coordination = self.bluesky_client.coordination_diagnostics().await;
         let pool = self.sqlite_store.pool_memory_snapshot();
@@ -747,10 +867,29 @@ where
             metrics::counter!("jetstream_turbo_memory_reclaimed_cache_entries_total")
                 .increment(reclaimed_entries as u64);
         }
-        let desired_reserved = self
+        let replay_permits = self
             .settings
-            .max_concurrent_requests
-            .saturating_sub(actions.target_permits);
+            .replay_max_concurrent_batches
+            .max(self.settings.max_concurrent_requests.max(1));
+        let replay_reserved = self.replay_reserved_permits.lock().await.len();
+        // Permits still available to tasks after the replay/live pool takes
+        // its share; the pressure coordinator then reserves more if needed.
+        let available_capacity = replay_permits
+            .saturating_sub(replay_reserved)
+            .max(actions.target_permits.max(1));
+        // Under a normal pressure state the coordinator's permit target is
+        // simply the live count; the replay pool owns capacity adjustments in
+        // that regime, so no pressure reservation is applied.
+        let pressure_state = self
+            .memory_pressure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .state();
+        let desired_reserved = if pressure_state == crate::turbocharger::MemoryPressureState::Normal {
+            0
+        } else {
+            available_capacity.saturating_sub(actions.target_permits)
+        };
         let mut reserved = self.memory_pressure_permits.lock().await;
         while reserved.len() < desired_reserved {
             match Arc::clone(&self.semaphore).try_acquire_owned() {
@@ -930,12 +1069,7 @@ where
 
     async fn persist_batch_completion(&self, completion: BatchCompletion) -> TurboResult<()> {
         let started_at = std::time::Instant::now();
-        let persistence = persist_batch_completion(
-            self.completion_frontier.as_ref(),
-            self.sqlite_store.as_ref(),
-            completion,
-        )
-        .await;
+        let persistence = self.persist_batch_completion_coalesced(completion).await;
         self.progress.record_stage_duration(
             PipelineStage::CheckpointPersistence,
             if persistence.is_ok() {
@@ -945,54 +1079,133 @@ where
             },
             started_at.elapsed(),
         );
-        if let Some(checkpoint) = persistence? {
-            if let Some(recovered) = self.failure_supervisor.observe_checkpoint(&checkpoint) {
-                self.bluesky_client.set_failure_recurrence(0);
-                metrics::gauge!("pipeline_failure_recurrence").set(0.0);
-                metrics::gauge!("pipeline_failure_persistent").set(0.0);
-                info!(
-                    fingerprint = recovered.fingerprint.as_deref(),
-                    final_recurrence = recovered.recurrence,
-                    duration_ms = recovered
-                        .first_occurrence_unix_ms
-                        .zip(recovered.last_occurrence_unix_ms)
-                        .map(|(first, last)| last.saturating_sub(first)),
-                    "Durable checkpoint progress cleared failure containment"
-                );
+        persistence
+    }
+
+    /// Advances the in-memory completion frontier for this completion (never
+    /// past committed work) and stages the newest contiguous checkpoint;
+    /// durable `ingestion_checkpoint` writes are coalesced off the per-batch
+    /// critical path per `checkpoint_persist_*` settings.
+    async fn persist_batch_completion_coalesced(
+        &self,
+        completion: BatchCompletion,
+    ) -> TurboResult<()> {
+        let now = Instant::now();
+        let new_progress = {
+            let mut frontier = self.completion_frontier.lock().await;
+            let mut staged_frontier = frontier.clone();
+            let checkpoint = staged_frontier.record_completed(completion.range)?;
+            let new_progress = checkpoint.is_some();
+            if let Some(checkpoint) = checkpoint {
+                *self
+                    .checkpoint_frontier_pending
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(checkpoint);
             }
-            let became_live = self.progress.checkpoint_committed(
-                checkpoint.cursor.time_us,
-                Duration::from_secs(self.settings.jetstream_committed_lag_threshold_secs),
-                self.settings.jetstream_live_stability_observations,
-            );
-            let now_us = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros()
-                .min(u64::MAX as u128) as u64;
-            let committed_lag_us = now_us.saturating_sub(checkpoint.cursor.time_us);
-            metrics::gauge!("jetstream_last_committed_event_time_us")
-                .set(checkpoint.cursor.time_us as f64);
-            metrics::gauge!("jetstream_committed_lag_seconds")
-                .set(committed_lag_us as f64 / 1_000_000.0);
-            let snapshot = self.progress.snapshot(self.progress_thresholds());
-            metrics::gauge!("jetstream_recovery_phase")
-                .set(recovery_phase_code(snapshot.recovery_phase));
-            info!(
-                recovery_phase = ?snapshot.recovery_phase,
-                committed_event_time_us = checkpoint.cursor.time_us,
-                committed_lag_us,
-                stable_observations = snapshot.live_stability_observations,
-                "Durable Jetstream checkpoint advanced"
-            );
-            if became_live {
-                if let Some(recovery_duration_ms) = snapshot.recovery_duration_ms {
-                    metrics::histogram!("jetstream_recovery_duration_seconds")
-                        .record(recovery_duration_ms as f64 / 1_000.0);
-                }
-            }
+            *frontier = staged_frontier;
+            new_progress
+        };
+        let write_due = {
+            let mut coalescer = self
+                .checkpoint_coalescer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            coalescer.observe(new_progress, now)
+        };
+        if write_due {
+            self.flush_durable_checkpoint().await?;
         }
         Ok(())
+    }
+
+    /// Persists the staged contiguous checkpoint durably (if any) and runs
+    /// post-persistence observability: failure containment recovery, the live
+    /// transition (which also restores live batch concurrency), and gauges.
+    /// The staged checkpoint is restored on write failure so a later flush
+    /// never loses frontier progress.
+    async fn flush_durable_checkpoint(
+        &self,
+    ) -> TurboResult<Option<crate::models::recovery::IngestionCheckpoint>> {
+        let staged = self
+            .checkpoint_frontier_pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let Some(checkpoint) = staged else {
+            self.checkpoint_coalescer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .mark_written(Instant::now());
+            return Ok(None);
+        };
+        if let Err(error) = self
+            .sqlite_store
+            .advance_ingestion_checkpoint(&checkpoint)
+            .await
+        {
+            *self
+                .checkpoint_frontier_pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(checkpoint);
+            return Err(error);
+        }
+        {
+            self.checkpoint_coalescer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .mark_written(Instant::now());
+        }
+
+        if let Some(recovered) = self.failure_supervisor.observe_checkpoint(&checkpoint) {
+            self.bluesky_client.set_failure_recurrence(0);
+            metrics::gauge!("pipeline_failure_recurrence").set(0.0);
+            metrics::gauge!("pipeline_failure_persistent").set(0.0);
+            info!(
+                fingerprint = recovered.fingerprint.as_deref(),
+                final_recurrence = recovered.recurrence,
+                duration_ms = recovered
+                    .first_occurrence_unix_ms
+                    .zip(recovered.last_occurrence_unix_ms)
+                    .map(|(first, last)| last.saturating_sub(first)),
+                "Durable checkpoint progress cleared failure containment"
+            );
+        }
+        let became_live = self.progress.checkpoint_committed(
+            checkpoint.cursor.time_us,
+            Duration::from_secs(self.settings.jetstream_committed_lag_threshold_secs),
+            self.settings.jetstream_live_stability_observations,
+        );
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros()
+            .min(u64::MAX as u128) as u64;
+        let committed_lag_us = now_us.saturating_sub(checkpoint.cursor.time_us);
+        metrics::gauge!("jetstream_last_committed_event_time_us")
+            .set(checkpoint.cursor.time_us as f64);
+        metrics::gauge!("jetstream_committed_lag_seconds")
+            .set(committed_lag_us as f64 / 1_000_000.0);
+        let snapshot = self.progress.snapshot(self.progress_thresholds());
+        metrics::gauge!("jetstream_recovery_phase")
+            .set(recovery_phase_code(snapshot.recovery_phase));
+        info!(
+            recovery_phase = ?snapshot.recovery_phase,
+            committed_event_time_us = checkpoint.cursor.time_us,
+            committed_lag_us,
+            stable_observations = snapshot.live_stability_observations,
+            "Durable Jetstream checkpoint advanced"
+        );
+        if became_live {
+            if let Some(recovery_duration_ms) = snapshot.recovery_duration_ms {
+                metrics::histogram!("jetstream_recovery_duration_seconds")
+                    .record(recovery_duration_ms as f64 / 1_000.0);
+            }
+            // `live` was just reached with the required stability
+            // observations: restore live batch concurrency immediately.
+            self.transition_memory_phase(WorkloadPhase::LiveIngestion);
+            self.reconcile_batch_permits().await;
+        }
+        Ok(Some(checkpoint))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1191,8 +1404,59 @@ fn in_vacuum_window(current_hour: u32, start_hour: u32, end_hour: u32) -> bool {
     }
 }
 
-/// Scheduling decision for a pending VACUUM: run when the current UTC hour is
-/// inside the window, or when the pending age exceeds `max_defer_hours`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VacuumGateDecision {
+    /// Whether the VACUUM should run now.
+    run: bool,
+    /// Whether this run bypassed pressure/phase/window gates (past max-defer
+    /// or operator override); recorded in vacuum state and logs.
+    forced: bool,
+    /// Why the VACUUM was deferred (when `run` is false).
+    deferral_reason: Option<crate::storage::VacuumGatingReason>,
+}
+
+/// Decides whether a pending VACUUM runs now: inside the window with normal
+/// pressure and no active replay, force-run past `vacuum_max_defer_hours`, or
+/// operator override (also counted as forced). Pressure and phase deferrals
+/// count toward the max-defer clock so VACUUM cannot be starved forever.
+#[allow(clippy::too_many_arguments)]
+fn vacuum_gate_decision(
+    now: DateTime<Utc>,
+    pending_since: Option<DateTime<Utc>>,
+    window_start_hour: u32,
+    window_end_hour: u32,
+    max_defer_hours: u64,
+    pressure_elevated: bool,
+    phase_replay: bool,
+    operator_override: bool,
+) -> VacuumGateDecision {
+    let in_window = in_vacuum_window(now.hour(), window_start_hour, window_end_hour);
+    let past_defer = pending_since
+        .map(|since| now.signed_duration_since(since).num_hours() >= max_defer_hours as i64)
+        .unwrap_or(false);
+    let run = operator_override || past_defer || (in_window && !pressure_elevated && !phase_replay);
+    let forced = run && (operator_override || past_defer || pressure_elevated || phase_replay);
+    let deferral_reason = if run {
+        None
+    } else if pressure_elevated {
+        Some(crate::storage::VacuumGatingReason::MemoryPressure)
+    } else if phase_replay {
+        Some(crate::storage::VacuumGatingReason::RecoveryPhase)
+    } else {
+        Some(crate::storage::VacuumGatingReason::Window)
+    };
+    VacuumGateDecision {
+        run,
+        forced,
+        deferral_reason,
+    }
+}
+
+/// Scheduling decision (legacy boolean form, still exercised by tests and
+/// useful for callers that only need the window/defer answer): run when the
+/// current UTC hour is inside the window, or when the pending age exceeds
+/// `max_defer_hours`.
+#[cfg_attr(not(test), allow(dead_code))]
 fn vacuum_should_run_now(
     now: DateTime<Utc>,
     pending_since: Option<DateTime<Utc>>,
@@ -1208,6 +1472,10 @@ fn vacuum_should_run_now(
         .unwrap_or(false)
 }
 
+/// Test-only uncoalesced persistence building block: advances the frontier and
+/// always writes the durable checkpoint. Production code uses the coalesced
+/// `persist_batch_completion_coalesced`/`flush_durable_checkpoint` pair.
+#[cfg(test)]
 async fn persist_batch_completion(
     frontier: &Mutex<CompletionFrontier>,
     sqlite_store: &SQLiteStore,
@@ -1224,6 +1492,96 @@ async fn persist_batch_completion(
         .await?;
     *frontier = staged_frontier;
     Ok(Some(checkpoint))
+}
+
+/// Directory on the temp volume used for file-backed VACUUM transient state;
+/// falls back to the process temp directory when unset.
+fn vacuum_temp_dir_path(settings: &Settings) -> std::path::PathBuf {
+    settings
+        .vacuum_temp_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// Effective batch-permit target for the current phase and pressure state.
+/// Replay/catch-up with normal pressure uses the scaled replay ceiling; every
+/// other state stays at the live permit count (the pressure coordinator further
+/// reduces from there). The anti-oscillation property comes from the live
+/// transition itself requiring `jetstream_live_stability_observations`.
+fn replay_permits_target(
+    phase: WorkloadPhase,
+    pressure_ok: bool,
+    live_permits: usize,
+    replay_permits: usize,
+) -> usize {
+    if phase == WorkloadPhase::Replay && pressure_ok {
+        replay_permits.max(1)
+    } else {
+        live_permits.clamp(1, replay_permits)
+    }
+}
+
+/// Coalescing scheduler for durable `ingestion_checkpoint` writes: the
+/// in-memory completion frontier advances per batch completion, while durable
+/// writes are triggered at most once per interval or per N completions
+/// (whichever comes first). With both thresholds disabled the legacy
+/// persist-per-batch behavior is preserved.
+#[derive(Debug)]
+pub(crate) struct CheckpointCoalescer {
+    interval_ms: Option<u64>,
+    batch_interval: Option<usize>,
+    last_write: Option<Instant>,
+    completions_since_write: usize,
+}
+
+impl CheckpointCoalescer {
+    pub fn new(interval_ms: Option<u64>, batch_interval: Option<usize>) -> Self {
+        Self {
+            interval_ms,
+            batch_interval,
+            last_write: None,
+            completions_since_write: 0,
+        }
+    }
+
+    pub fn from_settings(settings: &Settings) -> Self {
+        Self::new(
+            (settings.checkpoint_persist_interval_ms > 0)
+                .then_some(settings.checkpoint_persist_interval_ms),
+            (settings.checkpoint_persist_batch_interval > 0)
+                .then_some(settings.checkpoint_persist_batch_interval),
+        )
+    }
+
+    /// Observes a completion. `new_progress` is whether this completion
+    /// advanced the contiguous frontier; returns whether a durable write is
+    /// now due.
+    pub fn observe(&mut self, new_progress: bool, now: Instant) -> bool {
+        if !new_progress {
+            return false;
+        }
+        self.completions_since_write = self.completions_since_write.saturating_add(1);
+        if self.interval_ms.is_none() && self.batch_interval.is_none() {
+            return true;
+        }
+        let batch_due = self
+            .batch_interval
+            .is_some_and(|interval| self.completions_since_write >= interval);
+        let interval_due = self.interval_ms.is_some_and(|ms| {
+            self.last_write.is_none_or(|last| {
+                now.duration_since(last) >= Duration::from_millis(ms)
+            })
+        });
+        batch_due || interval_due
+    }
+
+    pub fn mark_written(&mut self, now: Instant) {
+        self.last_write = Some(now);
+        self.completions_since_write = 0;
+    }
 }
 
 fn batch_timeout(batch_id: u64, stage: PipelineStage, timeout_secs: u64) -> TurboError {
@@ -1499,6 +1857,9 @@ where
                 freelist_ratio: snapshot.freelist_ratio,
                 over_budget: Some(snapshot.over_budget),
                 over_budget_after_vacuum: Some(snapshot.over_budget_after_vacuum),
+                vacuum_gating_reason: snapshot.vacuum_gating_reason,
+                vacuum_deferred_seconds: snapshot.vacuum_deferred_seconds,
+                vacuum_last_forced_reason: snapshot.vacuum_last_forced_reason,
                 collection_error: None,
             },
             Err(e) => SQLiteStateDiagnostics {
@@ -1523,6 +1884,9 @@ where
                 freelist_ratio: None,
                 over_budget: None,
                 over_budget_after_vacuum: None,
+                vacuum_gating_reason: None,
+                vacuum_deferred_seconds: None,
+                vacuum_last_forced_reason: None,
                 collection_error: Some(e.to_string()),
             },
         };
@@ -1581,6 +1945,15 @@ where
             );
             let previous_phase = self.memory_phase.current();
             self.transition_memory_phase(WorkloadPhase::Cleanup);
+            // Cleanup chunks pause while memory pressure is elevated and
+            // resume on a later cycle without exceeding backoff behavior.
+            let gauge_pressure = || {
+                self.memory_pressure
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .state()
+                    != crate::turbocharger::MemoryPressureState::Normal
+            };
             let cleanup_result = self
                 .sqlite_store
                 .cleanup_with_vacuum(
@@ -1589,6 +1962,7 @@ where
                     self.settings.vacuum_freelist_ratio,
                     self.settings.cleanup_chunk_size,
                     self.settings.cleanup_chunk_delay_ms,
+                    Some(&gauge_pressure),
                 )
                 .await;
             self.transition_memory_phase(previous_phase);
@@ -1668,10 +2042,23 @@ where
         );
     }
 
-    /// Runs a pending VACUUM when the current UTC hour is inside the configured
-    /// low-traffic window, or when it has been pending longer than
-    /// `vacuum_max_defer_hours`. Records the outcome in the store and updates
-    /// the vacuum gauges.
+    /// Queues a forced VACUUM at the next scheduler tick, bypassing
+    /// pressure/phase/window gates (operator override).
+    pub fn request_operator_vacuum(&self) {
+        self.vacuum_override_requested.store(true, Ordering::SeqCst);
+        info!("Operator VACUUM override requested; the next scheduler tick will run it");
+    }
+
+    fn vacuum_temp_dir_path(&self) -> std::path::PathBuf {
+        vacuum_temp_dir_path(&self.settings)
+    }
+
+    /// Runs a pending VACUUM when the low-traffic window is open, pressure is
+    /// normal, and the pipeline is not in an active replay/catch-up phase; it
+    /// force-runs in the next tick once pending longer than
+    /// `vacuum_max_defer_hours`, or immediately on an operator override. The
+    /// deferral reason and accumulated deferral duration are recorded in the
+    /// vacuum state and the Prometheus gauges.
     async fn maybe_run_pending_vacuum(&self) -> TurboResult<()> {
         let vacuum_state = self.sqlite_store.get_vacuum_state();
 
@@ -1680,44 +2067,70 @@ where
         }
 
         let now = Utc::now();
-        let should_run = vacuum_should_run_now(
+        let operator_override = self
+            .vacuum_override_requested
+            .swap(false, Ordering::SeqCst);
+        let pressure_elevated = {
+            self.memory_pressure
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .state()
+                != crate::turbocharger::MemoryPressureState::Normal
+        };
+        let phase_replay = matches!(self.memory_phase.current(), WorkloadPhase::Replay);
+        let decision = vacuum_gate_decision(
             now,
             vacuum_state.pending_since,
             self.settings.vacuum_window_start_hour,
             self.settings.vacuum_window_end_hour,
             self.settings.vacuum_max_defer_hours,
+            pressure_elevated,
+            phase_replay,
+            operator_override,
         );
 
-        if !should_run {
+        if !decision.run {
+            let reason = decision
+                .deferral_reason
+                .unwrap_or(crate::storage::VacuumGatingReason::Window);
+            self.sqlite_store.record_vacuum_deferral(reason);
             info!(
-                reason = ?vacuum_state.pending_reason,
+                reason = reason.as_str(),
                 pending_hours = vacuum_state
                     .pending_since
                     .map(|since| now.signed_duration_since(since).num_hours()),
-                window = format_args!(
-                    "{}:00-{}:00 UTC",
-                    self.settings.vacuum_window_start_hour,
-                    self.settings.vacuum_window_end_hour
-                ),
-                "VACUUM pending but outside low-traffic window; deferring"
+                "Pending VACUUM deferred by gating"
             );
             self.emit_vacuum_gauges().await;
             return Ok(());
         }
+        if decision.forced {
+            self.sqlite_store.record_vacuum_forced();
+        }
 
         let max_size_bytes = (self.settings.max_db_size_mb as i64) * 1024 * 1024;
+        let policy = crate::storage::VacuumRunPolicy {
+            mode: self.settings.vacuum_execution_mode,
+            temp_dir: self.vacuum_temp_dir_path(),
+            max_in_memory_db_bytes: (self.settings.vacuum_max_pooled_memory_db_mb
+                .saturating_mul(1024 * 1024)) as i64,
+        };
         let previous_phase = self.memory_phase.current();
         self.transition_memory_phase(WorkloadPhase::Vacuum);
-        let run_result = self.sqlite_store.run_vacuum(max_size_bytes).await;
+        let run_result = self.sqlite_store.run_vacuum(max_size_bytes, &policy).await;
         self.transition_memory_phase(previous_phase);
         let run = run_result?;
         info!(
             reason = ?vacuum_state.pending_reason,
+            forced = decision.forced,
+            mode = self.settings.vacuum_execution_mode.as_str(),
             reclaimed_bytes = run.bytes_reclaimed,
             duration_ms = run.duration_ms,
             over_budget_after_vacuum = run.over_budget_after_vacuum,
             "Scheduled VACUUM completed"
         );
+        metrics::gauge!("jetstream_turbo_vacuum_last_forced", "reason" => "force_defer")
+            .set(if decision.forced { 1.0 } else { 0.0 });
         self.emit_vacuum_gauges().await;
         Ok(())
     }
@@ -1738,6 +2151,16 @@ where
                 if let Some(duration_ms) = snapshot.vacuum_last_run_duration_ms {
                     metrics::gauge!("jetstream_turbo_vacuum_last_duration_ms")
                         .set(duration_ms as f64);
+                }
+                if let Some(seconds) = snapshot.vacuum_deferred_seconds {
+                    metrics::gauge!("jetstream_turbo_vacuum_deferred_seconds").set(seconds as f64);
+                }
+                let active_reason = snapshot
+                    .vacuum_gating_reason
+                    .map(|reason| reason.as_str());
+                for reason in ["memory_pressure", "recovery_phase", "window", "force_defer"] {
+                    metrics::gauge!("jetstream_turbo_vacuum_gating_reason", "reason" => reason)
+                        .set(if active_reason == Some(reason) { 1.0 } else { 0.0 });
                 }
                 metrics::gauge!("jetstream_turbo_db_over_budget").set(if snapshot.over_budget {
                     1.0
@@ -2911,5 +3334,217 @@ mod tests {
             (outside_hour + 1) % 24,
             6,
         ));
+    }
+
+    fn vacuum_decide(
+        now: DateTime<Utc>,
+        pending_since: Option<DateTime<Utc>>,
+        pressure_elevated: bool,
+        phase_replay: bool,
+        override_requested: bool,
+    ) -> VacuumGateDecision {
+        vacuum_gate_decision(
+            now,
+            pending_since,
+            3,
+            5,
+            6,
+            pressure_elevated,
+            phase_replay,
+            override_requested,
+        )
+    }
+
+    #[test]
+    fn vacuum_gate_defers_on_overflowing_pressure_and_phase() {
+        // Window is always "open" in these cases because the decision under
+        // test is the pressure/phase gating, not the window clock.
+        let window_open = Utc::now()
+            .with_hour(3)
+            .expect("hour 3 exists");
+        let fresh_pending = Some(window_open);
+
+        let pressure_deferred =
+            vacuum_decide(window_open, fresh_pending, true, false, false);
+        assert!(!pressure_deferred.run);
+        assert!(!pressure_deferred.forced);
+        assert_eq!(
+            pressure_deferred.deferral_reason,
+            Some(crate::storage::VacuumGatingReason::MemoryPressure)
+        );
+
+        let phase_deferred = vacuum_decide(
+            window_open,
+            fresh_pending,
+            false,
+            true,
+            false,
+        );
+        assert!(!phase_deferred.run);
+        assert_eq!(
+            phase_deferred.deferral_reason,
+            Some(crate::storage::VacuumGatingReason::RecoveryPhase)
+        );
+    }
+
+    #[test]
+    fn vacuum_gate_defer_reason_prefers_pressure_over_phase_over_window() {
+        let now = Utc::now()
+            .with_hour(12)
+            .expect("hour 12 exists");
+        let pending = Some(now);
+
+        let both = vacuum_decide(now, pending, true, true, false);
+        assert_eq!(
+            both.deferral_reason,
+            Some(crate::storage::VacuumGatingReason::MemoryPressure)
+        );
+
+        let phase_only = vacuum_decide(now, pending, false, true, false);
+        assert_eq!(
+            phase_only.deferral_reason,
+            Some(crate::storage::VacuumGatingReason::RecoveryPhase)
+        );
+
+        let window_only = vacuum_decide(now, pending, false, false, false);
+        assert_eq!(
+            window_only.deferral_reason,
+            Some(crate::storage::VacuumGatingReason::Window)
+        );
+    }
+
+    #[test]
+    fn vacuum_gate_force_runs_past_max_defer_with_reason_recorded() {
+        let now = Utc::now().with_hour(12).expect("hour 12 exists");
+        let long_deferred = Some(now - chrono::Duration::hours(7));
+
+        // Past vacuum_max_defer_hours the VACUUM force-runs even with
+        // elevated pressure during replay — never starved forever.
+        let forced = vacuum_decide(now, long_deferred, true, true, false);
+        assert!(forced.run);
+        assert!(forced.forced);
+
+        // Fresh pending with pressure and phase gates closed during the
+        // window still runs (window open, nothing deferred).
+    }
+
+    #[test]
+    fn vacuum_gate_honors_operator_override_as_forced() {
+        let now = Utc::now().with_hour(12).expect("hour 12 exists");
+        let override_decision = vacuum_decide(now, Some(now), true, true, true);
+        assert!(override_decision.run);
+        assert!(override_decision.forced);
+    }
+
+    #[test]
+    fn vacuum_gate_runs_when_window_open_pressure_and_normal() {
+        let now = Utc::now().with_hour(3).expect("hour 3 exists");
+        let decision = vacuum_decide(now, Some(now), false, false, false);
+        assert!(decision.run);
+        assert!(!decision.forced);
+        assert_eq!(decision.deferral_reason, None);
+    }
+
+    #[test]
+    fn checkpoint_coalescer_burst_after_first_write_yields_one_more_write() {
+        let mut coalescer = CheckpointCoalescer::new(Some(10_000), Some(4));
+        let start = Instant::now();
+        // The first completing batch writes immediately (durable checkpoint
+        // refresh), then a burst of completions inside the interval coalesces.
+        assert!(coalescer.observe(true, start));
+        coalescer.mark_written(start);
+
+        for _ in 0..3 {
+            assert!(
+                !coalescer.observe(true, start),
+                "a burst inside the batch interval must not write"
+            );
+        }
+
+        // Hitting the completion-count threshold triggers the second write;
+        // a duplicate completion (no frontier progress) never triggers.
+        assert!(coalescer.observe(true, start));
+        coalescer.mark_written(start);
+        assert!(!coalescer.observe(false, start));
+    }
+
+    #[test]
+    fn checkpoint_coalescer_uses_interval_when_completions_are_slow() {
+        let mut coalescer = CheckpointCoalescer::new(Some(500), Some(100));
+        let start = Instant::now();
+        assert!(coalescer.observe(true, start), "first write is immediate");
+        coalescer.mark_written(start);
+
+        // One completion 100ms later: below both thresholds.
+        assert!(!coalescer.observe(true, start + Duration::from_millis(100)));
+        // After 500ms, the interval alone triggers a write.
+        assert!(coalescer.observe(true, start + Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn checkpoint_coalescer_preserves_per_batch_behavior_when_disabled() {
+        let mut coalescer = CheckpointCoalescer::new(None, None);
+        let start = Instant::now();
+        for _ in 0..5 {
+            assert!(coalescer.observe(true, start));
+            coalescer.mark_written(start);
+        }
+    }
+
+    #[test]
+    fn replay_permits_switch_by_phase_and_pressure_without_oscillation() {
+        let live_permits = 9;
+        let replay_permits = 27;
+
+        // Replay with normal pressure: scaled up.
+        assert_eq!(
+            replay_permits_target(WorkloadPhase::Replay, true, live_permits, replay_permits),
+            replay_permits
+        );
+        // Replay while pressure is elevated: live level (pressure coordinator
+        // reduces down from there).
+        assert_eq!(
+            replay_permits_target(WorkloadPhase::Replay, false, live_permits, replay_permits),
+            live_permits
+        );
+        // Live ingestion: restored to the live count.
+        assert_eq!(
+            replay_permits_target(
+                WorkloadPhase::LiveIngestion,
+                true,
+                live_permits,
+                replay_permits
+            ),
+            live_permits
+        );
+        // Startup (no checkpoint): live level.
+        assert_eq!(
+            replay_permits_target(WorkloadPhase::Startup, true, live_permits, replay_permits),
+            live_permits
+        );
+
+        // Hysteresis: the switch from replay -> live only happens through the
+        // LiveIngestion phase, which requires the configured stability
+        // observations; flapping between CachingUp and below-threshold lag
+        // therefore cannot swing the permit level (the phase remains
+        // Replay throughout), and the level itself never climbs between the
+        // two fixed points.
+        let observed = [
+            (WorkloadPhase::Replay, true),
+            (WorkloadPhase::Replay, true),
+            (WorkloadPhase::Replay, false),
+            (WorkloadPhase::DatabaseContention, false),
+            (WorkloadPhase::DatabaseContention, true),
+            (WorkloadPhase::LiveIngestion, true),
+        ]
+        .map(|(phase, pressure_ok)| {
+            replay_permits_target(phase, pressure_ok, live_permits, replay_permits)
+        });
+        for permit_level in observed {
+            assert!(
+                permit_level == live_permits || permit_level == replay_permits,
+                "permit level must be one of the two fixed points, got {permit_level}"
+            );
+        }
     }
 }
