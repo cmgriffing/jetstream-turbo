@@ -113,6 +113,31 @@ export interface StreamStats {
   comparison?: ComparisonEligibility
   comparisons?: PairwiseComparisons
   watermark_skew_threshold_us?: number
+  // Contract v4 episode and attempt counters, reported independently.
+  outage_episodes_a?: number
+  outage_episodes_b?: number
+  outage_episodes_baseline_1?: number
+  outage_episodes_baseline_2?: number
+  reconnect_attempts_a?: number
+  reconnect_attempts_b?: number
+  reconnect_attempts_baseline_1?: number
+  reconnect_attempts_baseline_2?: number
+  idle_episodes_a?: number
+  idle_episodes_b?: number
+  idle_episodes_baseline_1?: number
+  idle_episodes_baseline_2?: number
+  transport_recoveries_a?: number
+  transport_recoveries_b?: number
+  transport_recoveries_baseline_1?: number
+  transport_recoveries_baseline_2?: number
+  delivery_recoveries_a?: number
+  delivery_recoveries_b?: number
+  delivery_recoveries_baseline_1?: number
+  delivery_recoveries_baseline_2?: number
+  delivery_idle_a?: boolean
+  delivery_idle_b?: boolean
+  delivery_idle_baseline_1?: boolean
+  delivery_idle_baseline_2?: boolean
 }
 
 export interface AvailabilityHistory {
@@ -123,6 +148,14 @@ export interface AvailabilityHistory {
   reconnect_reasons: Record<string, number>
   client_recovery_ms: number
   coverage: string
+  /** Reliability contract v4: outage episodes counted on connected-to-disconnected. */
+  outage_episodes?: number
+  /** Reliability contract v4: failed reconnect attempts, independent of episodes. */
+  reconnect_attempts?: number
+  idle_episodes?: number
+  transport_recoveries?: number
+  delivery_recoveries?: number
+  delivery_recovery_ms?: number
 }
 
 export interface ReliabilityHistory {
@@ -216,6 +249,18 @@ export function normalizeUptimeRow(value: unknown): HourlyUptime | null {
     stream_b_downtime_seconds: reliability?.stream_b.transport_down_seconds ?? pickNumber(row, ['stream_b_downtime_seconds', 'downtime_b_seconds']),
     stream_a_disconnects: pickNumber(row, ['stream_a_disconnects', 'disconnects_a']),
     stream_b_disconnects: pickNumber(row, ['stream_b_disconnects', 'disconnects_b']),
+    // v4 contract columns: read only when the row was written under v4+
+    // so legacy disconnect-attempt counts are never aggregated as episodes.
+    stream_a_outage_episodes:
+      typeof row.stream_a_outage_episodes === 'number' ? row.stream_a_outage_episodes : undefined,
+    stream_b_outage_episodes:
+      typeof row.stream_b_outage_episodes === 'number' ? row.stream_b_outage_episodes : undefined,
+    stream_a_reconnect_attempts:
+      typeof row.stream_a_reconnect_attempts === 'number' ? row.stream_a_reconnect_attempts : undefined,
+    stream_b_reconnect_attempts:
+      typeof row.stream_b_reconnect_attempts === 'number' ? row.stream_b_reconnect_attempts : undefined,
+    reliability_contract_version:
+      typeof row.reliability_contract_version === 'number' ? row.reliability_contract_version : undefined,
     stream_a_messages: pickNumber(row, ['stream_a_messages', 'messages_a']),
     stream_b_messages: pickNumber(row, ['stream_b_messages', 'messages_b']),
     baseline_1_seconds: reliability?.baseline_1.transport_up_seconds ?? pickNumber(row, ['baseline_1_seconds']),
@@ -430,8 +475,16 @@ export interface HourlyUptime {
   stream_b_seconds: number
   stream_a_downtime_seconds: number
   stream_b_downtime_seconds: number
+  /** Legacy column: disconnect-attempt counts under contracts <= v3 only. */
   stream_a_disconnects: number
+  /** Legacy column: disconnect-attempt counts under contracts <= v3 only. */
   stream_b_disconnects: number
+  /** Contract v4: outage episodes for this hourly bucket. */
+  stream_a_outage_episodes?: number
+  stream_b_outage_episodes?: number
+  stream_a_reconnect_attempts?: number
+  stream_b_reconnect_attempts?: number
+  reliability_contract_version?: number
   stream_a_messages: number
   stream_b_messages: number
   baseline_1_seconds: number

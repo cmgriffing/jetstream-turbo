@@ -19,9 +19,19 @@ interface StreamCardProps {
   transportUptime?: number;
   deliveryUptime?: number;
   reconnectReason?: string;
-  dataIdleReconnects?: number;
   clientRecoveryMs?: number;
   eventTime?: StreamEventTime;
+  /** Contract v4: connected-to-disconnected episodes. */
+  outageEpisodes?: number;
+  /** Contract v4: failed reconnect attempts, counted independently of episodes. */
+  reconnectAttempts?: number;
+  /** Contract v4: transport recovery events. */
+  transportRecoveries?: number;
+  /** Contract v4: delivery recovery events. */
+  deliveryRecoveries?: number;
+  /** Contract v4: delivery-idle episodes on live sockets. */
+  idleEpisodes?: number;
+  deliveryIdle?: boolean;
 }
 
 function formatDuration(ms: number): string {
@@ -64,9 +74,14 @@ export const StreamCard = memo(function StreamCard({
   transportUptime,
   deliveryUptime,
   reconnectReason,
-  dataIdleReconnects,
   clientRecoveryMs,
   eventTime,
+  outageEpisodes,
+  reconnectAttempts,
+  transportRecoveries,
+  deliveryRecoveries,
+  idleEpisodes,
+  deliveryIdle,
 }: StreamCardProps) {
   const isBaseline = streamId === "baseline-1" || streamId === "baseline-2";
   const completeIdentity = fullName || name;
@@ -195,11 +210,75 @@ export const StreamCard = memo(function StreamCard({
           <p className="monitor-stream-metric-label">Delivery state</p>
           <p className="monitor-stream-metric-value">{deliveryAvailable === undefined ? "Unknown" : deliveryAvailable ? "Delivering" : "Stale"}</p>
         </div>
+        <div className="monitor-stream-metric">
+          <p className="monitor-stream-metric-label">
+            Delivery state
+            <button
+              type="button"
+              className="monitor-tooltip-trigger relative inline-flex cursor-pointer"
+              aria-label="More info about delivery state"
+            >
+              <Info className="h-2.5 w-2.5" aria-hidden="true" />
+              <span className="monitor-tooltip">
+                Delivery idle keeps the socket connected while waiting for records.
+              </span>
+            </button>
+          </p>
+          <p className="monitor-stream-metric-value">
+            {deliveryIdle
+              ? "Delivery idle"
+              : deliveryAvailable === undefined
+                ? "Unknown"
+                : deliveryAvailable
+                  ? "Delivering"
+                  : "Stale"}
+          </p>
+        </div>
+        <div className="monitor-stream-metric">
+          <p className="monitor-stream-metric-label">
+            Outage episodes
+            <button
+              type="button"
+              className="monitor-tooltip-trigger relative inline-flex cursor-pointer"
+              aria-label="More info about outage episodes"
+            >
+              <Info className="h-2.5 w-2.5" aria-hidden="true" />
+              <span className="monitor-tooltip">
+                One episode per connected-to-disconnected transition. Reconnect attempts are counted separately.
+              </span>
+            </button>
+          </p>
+          <p className="monitor-stream-metric-value">
+            {outageEpisodes ?? "--"}
+            {reconnectAttempts !== undefined ? (
+              <span className="monitor-stream-metric-unit">
+                {reconnectAttempts} reconnect attempt{reconnectAttempts === 1 ? "" : "s"}
+              </span>
+            ) : null}
+          </p>
+        </div>
+        <div className="monitor-stream-metric">
+          <p className="monitor-stream-metric-label">Transport / delivery recovery</p>
+          <p className="monitor-stream-metric-value">
+            {transportRecoveries !== undefined || deliveryRecoveries !== undefined ? (
+              <>
+                {transportRecoveries ?? 0}
+                <span className="monitor-stream-metric-unit">transport</span>
+                {deliveryRecoveries ?? 0}
+                <span className="monitor-stream-metric-unit">delivery</span>
+              </>
+            ) : (
+              <span className="monitor-stream-metric-value--empty">--</span>
+            )}
+            {idleEpisodes !== undefined ? (
+              <span className="monitor-stream-metric-unit">{idleEpisodes} idle episode{idleEpisodes === 1 ? "" : "s"}</span>
+            ) : null}
+          </p>
+        </div>
         <div className="monitor-stream-metric monitor-stream-metric--detail">
-          <p className="monitor-stream-metric-label">Recovery / cause</p>
+          <p className="monitor-stream-metric-label">Last transport outcome</p>
           <p className="monitor-stream-metric-value">
             {reconnectReason ? reconnectReason.replace(/_/g, " ") : "--"}
-            {dataIdleReconnects !== undefined ? <span className="monitor-stream-metric-unit">Idle reconnects {dataIdleReconnects}</span> : null}
             {clientRecoveryMs !== undefined ? <span className="monitor-stream-metric-unit">Client recovery {formatDuration(clientRecoveryMs)}</span> : null}
           </p>
         </div>

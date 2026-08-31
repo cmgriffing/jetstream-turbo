@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useMemo } from "react";
 import { Header } from "@/components/Header";
 import { StreamCard } from "@/components/StreamCard";
 import { MetricsTable } from "@/components/MetricsTable";
+import { IncidentSummaryPanel } from "@/components/IncidentSummaryPanel";
 import { StatusIndicator } from "@/components/StatusIndicator";
 import { ConnectionBanner } from "@/components/ConnectionBanner";
 import { UptimeChart24h, RateChart } from "@/components/Charts";
@@ -234,10 +235,15 @@ function App() {
                   uptimeAllTime={stats.uptime_a_all_time}
                   connected={stats.connected_a ?? false}
                   deliveryAvailable={stats.delivery_available_a}
+                  deliveryIdle={stats.delivery_idle_a}
+                  outageEpisodes={stats.outage_episodes_a}
+                  reconnectAttempts={stats.reconnect_attempts_a}
+                  transportRecoveries={stats.transport_recoveries_a}
+                  deliveryRecoveries={stats.delivery_recoveries_a}
+                  idleEpisodes={stats.idle_episodes_a}
                   transportUptime={stats.transport_uptime_a_all_time}
                   deliveryUptime={stats.delivery_uptime_a_all_time}
                   reconnectReason={stats.reconnect_reason_a}
-                  dataIdleReconnects={stats.data_idle_reconnects_a}
                   clientRecoveryMs={stats.client_recovery_a_ms}
                   eventTime={stats.event_time_a}
                 />
@@ -251,10 +257,15 @@ function App() {
                   uptimeAllTime={stats.uptime_b_all_time}
                   connected={stats.connected_b ?? false}
                   deliveryAvailable={stats.delivery_available_b}
+                  deliveryIdle={stats.delivery_idle_b}
+                  outageEpisodes={stats.outage_episodes_b}
+                  reconnectAttempts={stats.reconnect_attempts_b}
+                  transportRecoveries={stats.transport_recoveries_b}
+                  deliveryRecoveries={stats.delivery_recoveries_b}
+                  idleEpisodes={stats.idle_episodes_b}
                   transportUptime={stats.transport_uptime_b_all_time}
                   deliveryUptime={stats.delivery_uptime_b_all_time}
                   reconnectReason={stats.reconnect_reason_b}
-                  dataIdleReconnects={stats.data_idle_reconnects_b}
                   clientRecoveryMs={stats.client_recovery_b_ms}
                   eventTime={stats.event_time_b}
                 />
@@ -278,10 +289,15 @@ function App() {
                   uptimeAllTime={stats.uptime_baseline_1_all_time}
                   connected={stats.connected_baseline_1 ?? false}
                   deliveryAvailable={stats.delivery_available_baseline_1}
+                  deliveryIdle={stats.delivery_idle_baseline_1}
+                  outageEpisodes={stats.outage_episodes_baseline_1}
+                  reconnectAttempts={stats.reconnect_attempts_baseline_1}
+                  transportRecoveries={stats.transport_recoveries_baseline_1}
+                  deliveryRecoveries={stats.delivery_recoveries_baseline_1}
+                  idleEpisodes={stats.idle_episodes_baseline_1}
                   transportUptime={stats.transport_uptime_baseline_1_all_time}
                   deliveryUptime={stats.delivery_uptime_baseline_1_all_time}
                   reconnectReason={stats.reconnect_reason_baseline_1}
-                  dataIdleReconnects={stats.data_idle_reconnects_baseline_1}
                   clientRecoveryMs={stats.client_recovery_baseline_1_ms}
                   eventTime={stats.event_time_baseline_1}
                 />
@@ -296,10 +312,15 @@ function App() {
                   uptimeAllTime={stats.uptime_baseline_2_all_time}
                   connected={stats.connected_baseline_2 ?? false}
                   deliveryAvailable={stats.delivery_available_baseline_2}
+                  deliveryIdle={stats.delivery_idle_baseline_2}
+                  outageEpisodes={stats.outage_episodes_baseline_2}
+                  reconnectAttempts={stats.reconnect_attempts_baseline_2}
+                  transportRecoveries={stats.transport_recoveries_baseline_2}
+                  deliveryRecoveries={stats.delivery_recoveries_baseline_2}
+                  idleEpisodes={stats.idle_episodes_baseline_2}
                   transportUptime={stats.transport_uptime_baseline_2_all_time}
                   deliveryUptime={stats.delivery_uptime_baseline_2_all_time}
                   reconnectReason={stats.reconnect_reason_baseline_2}
-                  dataIdleReconnects={stats.data_idle_reconnects_baseline_2}
                   clientRecoveryMs={stats.client_recovery_baseline_2_ms}
                   eventTime={stats.event_time_baseline_2}
                 />
@@ -410,6 +431,7 @@ function App() {
               baseline2Name={baseline2Name}
               windowLabel={windowLabel}
             />
+            <IncidentSummaryPanel />
           </section>
         </main>
 

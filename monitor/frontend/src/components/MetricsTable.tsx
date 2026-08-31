@@ -141,8 +141,16 @@ function calculateStats(
   const reasonTotals: Record<string, number> = {};
   let clientRecoveryMs = 0;
   let observedReliabilityRows = 0;
-  let disconnectsA = 0;
-  let disconnectsB = 0;
+  // Legacy disconnect-attempt totals (contracts <= v3) live separately from
+  // contract v4 outage-episode/reconnect-attempt counters; they must never be
+  // aggregated together in one presentation number.
+  let legacyDisconnectsA = 0;
+  let legacyDisconnectsB = 0;
+  let outageEpisodesA = 0;
+  let outageEpisodesB = 0;
+  let reconnectAttemptsA = 0;
+  let reconnectAttemptsB = 0;
+  let episodeRows = 0;
 
   data.forEach((row) => {
     const reliability = row.reliability;
@@ -158,8 +166,18 @@ function calculateStats(
     baseline2.uptimeSeconds += toNonNegative(reliability?.baseline_2.transport_up_seconds ?? row.baseline_2_seconds);
     baseline2.downtimeSeconds += toNonNegative(reliability?.baseline_2.transport_down_seconds ?? row.baseline_2_downtime_seconds);
     baseline2.messages += toNonNegative(row.baseline_2_messages);
-    disconnectsA += toNonNegative(row.stream_a_disconnects);
-    disconnectsB += toNonNegative(row.stream_b_disconnects);
+    if (row.reliability_contract_version !== undefined && row.reliability_contract_version >= 4) {
+      outageEpisodesA += toNonNegative(row.stream_a_outage_episodes ?? 0);
+      outageEpisodesB += toNonNegative(row.stream_b_outage_episodes ?? 0);
+      reconnectAttemptsA += toNonNegative(row.stream_a_reconnect_attempts ?? 0);
+      reconnectAttemptsB += toNonNegative(row.stream_b_reconnect_attempts ?? 0);
+      episodeRows += 1;
+    } else {
+      // Contract <= v3 rows count every disconnected status, including failed
+      // handshake attempts, as disconnects; label them as legacy below.
+      legacyDisconnectsA += toNonNegative(row.stream_a_disconnects);
+      legacyDisconnectsB += toNonNegative(row.stream_b_disconnects);
+    }
     if (reliability) {
       observedReliabilityRows += 1;
       deliveryA.uptimeSeconds += toNonNegative(reliability.stream_a.delivery_up_seconds);
@@ -198,8 +216,13 @@ function calculateStats(
     reliabilityCoverage: data.length > 0 ? (observedReliabilityRows / data.length) * 100 : 0,
     reasonTotals,
     clientRecoveryMs,
-    disconnectsA,
-    disconnectsB,
+    legacyDisconnectsA,
+    legacyDisconnectsB,
+    outageEpisodesA,
+    outageEpisodesB,
+    reconnectAttemptsA,
+    reconnectAttemptsB,
+    episodeRows,
     requestedWindow,
   };
 }
@@ -412,21 +435,66 @@ export function MetricsTable({
               </TableCell>
             </TableRow>
 
-            <TableRow className="monitor-metrics-row">
-              <TableCell className="monitor-table-label whitespace-normal">Disconnects</TableCell>
-              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
-                {stats.disconnectsA}
-              </TableCell>
-              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
-                {stats.disconnectsB}
-              </TableCell>
-              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
-                <span className="monitor-stream-metric-value--empty">--</span>
-              </TableCell>
-              <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
-                <span className="monitor-stream-metric-value--empty">--</span>
-              </TableCell>
-            </TableRow>
+            {stats.episodeRows > 0 ? (
+              <>
+                <TableRow className="monitor-metrics-row">
+                  <TableCell className="monitor-table-label whitespace-normal">
+                    Outage episodes
+                    <span className="monitor-table-unit">(one per transport loss)</span>
+                  </TableCell>
+                  <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                    {stats.outageEpisodesA}
+                  </TableCell>
+                  <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                    {stats.outageEpisodesB}
+                  </TableCell>
+                  <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                    <span className="monitor-stream-metric-value--empty">--</span>
+                  </TableCell>
+                  <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                    <span className="monitor-stream-metric-value--empty">--</span>
+                  </TableCell>
+                </TableRow>
+                <TableRow className="monitor-metrics-row">
+                  <TableCell className="monitor-table-label whitespace-normal">
+                    Reconnect attempts
+                    <span className="monitor-table-unit">(not outages)</span>
+                  </TableCell>
+                  <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                    {stats.reconnectAttemptsA}
+                  </TableCell>
+                  <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                    {stats.reconnectAttemptsB}
+                  </TableCell>
+                  <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                    <span className="monitor-stream-metric-value--empty">--</span>
+                  </TableCell>
+                  <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                    <span className="monitor-stream-metric-value--empty">--</span>
+                  </TableCell>
+                </TableRow>
+              </>
+            ) : null}
+            {stats.episodeRows === 0 ? (
+              <TableRow className="monitor-metrics-row">
+                <TableCell className="monitor-table-label whitespace-normal">
+                  Disconnect attempts
+                  <span className="monitor-table-unit">(legacy contract, every failed status</span>
+                </TableCell>
+                <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                  {stats.legacyDisconnectsA}
+                </TableCell>
+                <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                  {stats.legacyDisconnectsB}
+                </TableCell>
+                <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                  <span className="monitor-stream-metric-value--empty">--</span>
+                </TableCell>
+                <TableCell className="monitor-table-value monitor-table-value--numeric text-right whitespace-normal">
+                  <span className="monitor-stream-metric-value--empty">--</span>
+                </TableCell>
+              </TableRow>
+            ) : null}
 
             <TableRow className="monitor-metrics-row">
               <TableCell className="monitor-table-label whitespace-normal">Messages</TableCell>
