@@ -9,6 +9,8 @@ The original source code is available at https://github.com/graze-social/jetstre
 ## Engineering notes
 
 - [Stream comparison and recovery exploration](docs/stream-comparison-recovery-exploration.md) — production evidence and rationale for source-window comparison and convergent Rust recovery.
+- [Operations runbook](docs/operations-runbook.md) — cgroup telemetry verification, VACUUM safety gating and authenticated override (`MAINTENANCE_API_KEY`), replay/checkpoint rollback switches, alert thresholds, and gate artifacts.
+- [Run artifacts](docs/run-artifacts/restore-replay-convergence/) — production-scale memory-gate evidence (convergence, concurrency sweep, baseline comparison).
 
 ## Benchmarks
 

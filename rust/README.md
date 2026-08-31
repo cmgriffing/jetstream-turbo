@@ -107,6 +107,7 @@ dimension fails the canary.
 | `/api/v1/health` | GET | Health check with system status |
 | `/api/v1/stats` | GET | Processing statistics |
 | `/api/v1/metrics` | GET | Prometheus runtime metrics (including rolling 24h process-memory peaks) |
+| `/maintenance/vacuum` | POST | Force-run a pending VACUUM at the next scheduler tick (bypasses pressure/phase/window gates). Authenticated: requires `MAINTENANCE_API_KEY` in the `X-Maintenance-Key` header; disabled (401) when no key is configured — see `docs/operations-runbook.md` |
 
 > **Note:** Most endpoints require the `/api/v1/` prefix. The root `/health` returns 404.
 

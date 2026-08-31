@@ -1,0 +1,26 @@
+{
+  "committed_lag_us": {
+    "samples": {
+      "count": 4,
+      "final": 0,
+      "first": 14310084871
+    }
+  },
+  "peak_rss_bytes": 38141952,
+  "per_concurrency_events_per_second": [
+    [
+      18,
+      37235.76569766793
+    ],
+    [
+      27,
+      83065.67634216772
+    ],
+    [
+      27,
+      60104.763564569264
+    ]
+  ],
+  "scale": "production",
+  "schema_version": 1
+}
