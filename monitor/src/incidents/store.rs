@@ -160,6 +160,14 @@ fn encode_incident_cursor(detected_at: &str, id: &str) -> String {
     format!("v1:{}|{}", detected_at, id)
 }
 
+/// Validate an opaque incident cursor, returning a bounded error message.
+pub fn validate_incident_cursor(cursor: &str) -> Result<(), String> {
+    match decode_incident_cursor(cursor) {
+        Ok(_) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 fn decode_incident_cursor(cursor: &str) -> Result<(String, String)> {
     let rest = cursor
         .strip_prefix("v1:")

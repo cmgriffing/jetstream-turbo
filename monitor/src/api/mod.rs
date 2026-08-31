@@ -1,6 +1,11 @@
 //! Versioned operational API: shared models, handlers, and OpenAPI contract.
 
 pub mod health;
+pub mod incidents;
+pub mod openapi;
+
+/// OpenAPI contract semantic version.
+pub const OPENAPI_CONTRACT_VERSION: &str = "1.0.0";
 
 pub use health::{HealthSnapshot, HealthStatus, StorageHealth, StreamHealth};
 

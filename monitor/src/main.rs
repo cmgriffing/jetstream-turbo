@@ -19,8 +19,9 @@ use jetstream_monitor::{
     websocket,
 };
 use jetstream_monitor::api::{
-    ApiResponse, HealthSnapshot, HealthStatus, StorageHealth, StreamHealth,
+    ApiError, ApiResponse, HealthSnapshot, HealthStatus, StorageHealth, StreamHealth,
 };
+use utoipa::OpenApi;
 use jetstream_monitor::incidents::LedgerHealth;
 use jetstream_monitor::incidents::IncidentId;
 #[allow(unused_imports)]
@@ -28,6 +29,7 @@ use jetstream_monitor::incidents::IncidentEventType as _IE_unused;
 use std::collections::HashMap;
 use std::{sync::Arc, time::Duration};
 
+const API_SERVER_URL: &str = "http://localhost:3001";
 const HOURLY_INTERVAL_SECONDS: u64 = 3600;
 const HOURLY_INTERVAL_SECONDS_I64: i64 = 3600;
 const HOURLY_UPTIME_CONTRACT_VERSION: i64 = 4;
@@ -958,6 +960,8 @@ async fn main() -> Result<()> {
         Ok(response)
     }
 
+    let incident_state_for_router: Arc<jetstream_monitor::incidents::IncidentStore> =
+        Arc::clone(&incident_store);
     let app_state = AppState {
         broadcast_tx: Arc::clone(&broadcast_tx),
         storage: Arc::clone(&storage_arc),
@@ -986,7 +990,20 @@ async fn main() -> Result<()> {
         )
         .route("/api/v1/health", axum::routing::get(get_api_health))
         .route("/api/v1/metrics", axum::routing::get(get_api_metrics))
+        .route("/openapi.json", axum::routing::get(get_openapi))
         .with_state(app_state);
+    let incidents_router = axum::Router::new()
+        .route("/api/v1/incidents", axum::routing::get(jetstream_monitor::api::incidents::incident_list))
+        .route(
+            "/api/v1/incidents/{incidentId}",
+            axum::routing::get(jetstream_monitor::api::incidents::incident_detail),
+        )
+        .route(
+            "/api/v1/incidents/{incidentId}/events",
+            axum::routing::get(jetstream_monitor::api::incidents::incident_events),
+        )
+        .with_state(Arc::clone(&incident_state_for_router));
+    let operational_router = operational_router.merge(incidents_router);
     let app = ws_router
         .merge(operational_router)
         .layer(tower_http::trace::TraceLayer::new_for_http())
@@ -1181,6 +1198,18 @@ async fn get_uptime_detailed(
     axum::Json(detailed)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/health",
+    operation_id = "getHealth",
+    tag = "observability",
+    responses(
+        (status = 200, description = "Monitor operational; status may be healthy or degraded",
+         body = inline(ApiResponse<HealthSnapshot>),
+         headers(("cache-control" = String, description = "no-store"))),
+        (status = 503, description = "Monitor cannot provide trustworthy observation", body = ApiError),
+    )
+)]
 async fn get_api_health(
     axum::extract::State(app): axum::extract::State<AppState>,
 ) -> axum::http::Response<axum::body::Body> {
@@ -1261,6 +1290,52 @@ async fn get_api_health(
         .unwrap()
 }
 
+fn generate_openapi_document() -> utoipa::openapi::OpenApi {
+    ApiDoc::openapi()
+}
+
+#[utoipa::path(
+    get,
+    path = "/openapi.json",
+    operation_id = "getOpenApiDocument",
+    responses(
+        (status = 200, description = "Canonical OpenAPI 3.1 discovery document",
+         content_type = "application/json",
+         headers(
+             ("etag" = String, description = "Contract ETag"),
+             ("cache-control" = String, description = "public, max-age=60"),
+             ("x-monitor-release" = String, description = "Deployed monitor release"),
+         )),
+    ),
+    security(()),
+)]
+async fn get_openapi(
+    axum::extract::State(app): axum::extract::State<AppState>,
+) -> axum::http::Response<axum::body::Body> {
+    let mut doc = generate_openapi_document();
+    jetstream_monitor::api::openapi::set_servers(&mut doc, API_SERVER_URL);
+    let body = jetstream_monitor::api::openapi::render_document(&doc);
+    axum::http::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header("content-type", "application/vnd.oai.openapi+json")
+        .header("etag", jetstream_monitor::api::openapi::contract_etag(&body))
+        .header("cache-control", "public, max-age=60")
+        .header("x-monitor-release", (*app.release).clone())
+        .body(axum::body::Body::from(body))
+        .unwrap()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/metrics",
+    operation_id = "getMetrics",
+    tag = "observability",
+    responses(
+        (status = 200, description = "Prometheus text exposition",
+         content_type = "text/plain; version=0.0.4",
+         headers(("cache-control" = String, description = "no-store"))),
+    )
+)]
 async fn get_api_metrics(axum::extract::State(app): axum::extract::State<AppState>) -> axum::http::Response<axum::body::Body> {
     let body = app.metrics.render();
     axum::http::Response::builder()
@@ -1269,4 +1344,301 @@ async fn get_api_metrics(axum::extract::State(app): axum::extract::State<AppStat
         .header("cache-control", jetstream_monitor::api::NO_STORE)
         .body(axum::body::Body::from(body))
         .unwrap()
+}
+
+/// Canonical OpenAPI 3.1 contract for the operational API.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    info(
+        title = "Jetstream Monitor Operational API",
+        version = jetstream_monitor::api::OPENAPI_CONTRACT_VERSION,
+        description = "Read-only operational surface for the jetstream monitor: monitor self-health, Prometheus metrics, and the durable delivery-disruption incident ledger. The API is unauthenticated and sanitized; deployment may restrict detailed endpoints at the reverse proxy. Pagination uses opaque cursors. Operational endpoints are versioned under /api/v1; breaking changes require a new version.",
+    ),
+    paths(
+        jetstream_monitor::api::incidents::incident_list,
+        jetstream_monitor::api::incidents::incident_detail,
+        jetstream_monitor::api::incidents::incident_events,
+        get_api_health,
+        get_api_metrics,
+        get_openapi,
+    ),
+    components(
+        schemas(
+            jetstream_monitor::api::incidents::IncidentSummaryDto,
+            jetstream_monitor::api::incidents::IncidentListDto,
+            jetstream_monitor::api::incidents::IncidentEventDto,
+            jetstream_monitor::api::incidents::IncidentEventListDto,
+            ApiResponse<jetstream_monitor::api::incidents::IncidentListDto>,
+            ApiResponse<jetstream_monitor::api::incidents::IncidentSummaryDto>,
+            ApiResponse<jetstream_monitor::api::incidents::IncidentEventListDto>,
+            jetstream_monitor::api::health::HealthSnapshot,
+            jetstream_monitor::api::health::HealthStatus,
+            jetstream_monitor::api::health::StorageHealth,
+            jetstream_monitor::api::health::StreamHealth,
+            ApiResponse<HealthSnapshot>,
+            jetstream_monitor::api::ApiError,
+        )
+    ),
+    tags(
+        (name = "incidents", description = "Durable delivery-disruption incidents and their ordered event histories"),
+        (name = "observability", description = "Monitor self-health and Prometheus metrics"),
+    ),
+    security(
+        (),
+    ),
+)]
+struct ApiDoc;
+
+#[cfg(test)]
+mod openapi_tests {
+    use super::*;
+
+    fn document() -> utoipa::openapi::OpenApi {
+        let mut doc = ApiDoc::openapi();
+        jetstream_monitor::api::openapi::set_servers(&mut doc, "http://localhost:3001");
+        doc
+    }
+
+    fn snapshot_path() -> std::path::PathBuf {
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        std::path::Path::new(&manifest_dir).join("openapi/openapi.json")
+    }
+
+    fn normalized_json(doc: &utoipa::openapi::OpenApi) -> String {
+        jetstream_monitor::api::openapi::render_document(doc)
+    }
+
+    #[test]
+    fn contract_is_openapi_31_with_stable_ops() {
+        let raw = serde_json::to_value(document()).unwrap();
+        assert_eq!(raw["openapi"], "3.1.0");
+        let paths = raw["paths"].as_object().unwrap();
+        for path in [
+            "/api/v1/health",
+            "/api/v1/metrics",
+            "/api/v1/incidents",
+            "/api/v1/incidents/{incidentId}",
+            "/api/v1/incidents/{incidentId}/events",
+            "/openapi.json",
+        ] {
+            assert!(paths.contains_key(path), "missing path {path}");
+        }
+        let ops = [
+            "getHealth",
+            "getMetrics",
+            "listIncidents",
+            "getIncident",
+            "listIncidentEvents",
+            "getOpenApiDocument",
+        ];
+        for operation_id in ops {
+            let found = paths.values().any(|p| {
+                p.as_object()
+                    .map(|methods| {
+                        methods.values().any(|v| {
+                            v.get("operationId").and_then(|id| id.as_str()) == Some(operation_id)
+                        })
+                    })
+                    .unwrap_or(false)
+            });
+            assert!(found, "missing operationId {operation_id}");
+        }
+    }
+
+    #[test]
+    fn contract_matches_committed_snapshot() {
+        let doc = document();
+        let rendered = normalized_json(&doc);
+        let path = snapshot_path();
+        match std::env::var("OPENAPI_SNAPSHOT_WRITE").as_deref() {
+            Ok("1") => {
+                let _ = std::fs::create_dir_all(path.parent().unwrap());
+                std::fs::write(&path, format!("{rendered}\n")).unwrap();
+            }
+            _ => {}
+        }
+        let committed = std::fs::read_to_string(&path)
+            .expect("checked-in OpenAPI snapshot must exist; run with OPENAPI_SNAPSHOT_WRITE=1 to refresh");
+        assert_eq!(
+            rendered.trim(),
+            committed.trim(),
+            "runtime OpenAPI drifted from the committed snapshot"
+        );
+    }
+
+    #[test]
+    fn contract_declares_limits_defaults_and_media_types() {
+        let raw = serde_json::to_value(document()).unwrap();
+        let serialized = serde_json::to_string(&raw).unwrap();
+        assert!(serialized.contains("text/plain; version=0.0.4"));
+        assert!(serialized.contains("maximum"));
+        // Production server metadata is declared.
+        assert_eq!(raw["servers"][0]["url"], "http://localhost:3001");
+        // Deployed security posture: no authentication required.
+        assert!(!serialized.contains("\"security\":[{\"apiKeyAuth\""));
+    }
+}
+
+#[cfg(test)]
+mod incident_api_tests {
+    use axum::http::StatusCode;
+    use jetstream_monitor::api::incidents::{
+        build_filter, incident_detail_response, incident_events_response,
+        list_incidents_response, IncidentListQuery,
+    };
+    use jetstream_monitor::incidents::store::IncidentStore;
+    use jetstream_monitor::incidents::{
+        HandshakeFailureReason, IncidentEvent, IncidentEventType, IncidentId, IncidentTrigger,
+        IncidentTrigger as _, MonitorIdentity,
+    };
+    use std::str::FromStr;
+
+    async fn temp_store(name: &str) -> IncidentStore {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("incident-api-{name}-{nanos}.db"));
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let options = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
+            .unwrap()
+            .foreign_keys(true)
+            .create_if_missing(true);
+        let pool = sqlx::SqlitePool::connect_with(options).await.unwrap();
+        IncidentStore::new(pool).await.unwrap()
+    }
+
+    async fn seed(store: &IncidentStore, id: &str, stream: &str, silences: u64) {
+        let identity = MonitorIdentity {
+            process_epoch: "test".to_string(),
+            release: "0.1.0".to_string(),
+        };
+        let incident = IncidentId::from_string(id).unwrap();
+        store
+            .open_incident(
+                &incident,
+                stream,
+                IncidentTrigger::DeliveryIdle,
+                chrono::Utc::now(),
+                Some(chrono::Utc::now() - chrono::Duration::seconds(30)),
+                1,
+                &identity,
+            )
+            .await
+            .unwrap();
+        if silences > 0 {
+            store
+                .append_event(
+                    &incident,
+                    IncidentEvent {
+                        sequence: 1,
+                        event_type: IncidentEventType::ReconnectAttemptFailed,
+                        occurred_at: chrono::Utc::now(),
+                        reason: Some(HandshakeFailureReason::ConnectTimeout.as_str().to_string()),
+                        attempt_ordinal: Some(1),
+                        scheduled_delay_ms: Some(1_000),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    async fn body_json(response: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(
+            response.into_body(),
+            usize::MAX,
+        )
+        .await
+        .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn invalid_limit_and_cursor_return_400() {
+        let store = temp_store("invalid-params").await;
+        let mut query = IncidentListQuery {
+            limit: Some(999),
+            ..Default::default()
+        };
+        let response = list_incidents_response(&store, &query).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        query.cursor = Some("not-a-cursor".to_string());
+        let response = list_incidents_response(&store, &query).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn paging_without_gaps_or_duplicates_and_invalid_event_cursors() {
+        let store = temp_store("paging").await;
+        let seeds = [
+            ("01ARZ3NDEKTSV4RRFFQ69G5FAZ", "a", 0u64),
+            ("01ARZ3NDEKTSV4RRFFQ69G5FBX", "a", 1),
+            ("01ARZ3NDEKTSV4RRFFQ69G5FCX", "b", 2),
+        ];
+        for (id, stream, attempts) in seeds {
+            seed(&store, id, stream, attempts).await;
+        }
+
+        // Page through the cursor chain without gaps or duplicates.
+        let mut seen = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let query = IncidentListQuery {
+                cursor: cursor.clone(),
+                limit: Some(2),
+                ..Default::default()
+            };
+            let response = list_incidents_response(&store, &query).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(
+                response
+                    .headers()
+                    .get("cache-control")
+                    .map(|v| v == "no-store")
+                    .unwrap_or(false)
+            );
+            let json = body_json(response).await;
+            for incident in json["data"]["incidents"].as_array().unwrap() {
+                seen.push(incident["id"].as_str().unwrap().to_string());
+            }
+            match json["data"]["next_cursor"].as_str().map(str::to_string) {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(seen.len(), 3);
+        assert_eq!(
+            seen.iter().collect::<std::collections::HashSet<_>>().len(),
+            seen.len()
+        );
+
+        // Events page without gaps or duplicates.
+        let response =
+            incident_events_response(&store, "01ARZ3NDEKTSV4RRFFQ69G5FBX", None, None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        let events = json["data"]["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["sequence"], 1);
+
+        // Unknown incident -> 404 for detail and events.
+        let response = incident_detail_response(&store, "01ARZ3NDEKTSV4RRFFQ69G5FZX").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response =
+            incident_events_response(&store, "01ARZ3NDEKTSV4RRFFQ69G5FZX", None, None).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        // Stream filter narrows results.
+        let filter = build_filter(Some("b"), None, None, None, None, None).unwrap();
+        let query = IncidentListQuery {
+            stream: filter.stream_id.clone(),
+            ..Default::default()
+        };
+        let response = list_incidents_response(&store, &query).await;
+        let json = body_json(response).await;
+        assert_eq!(json["data"]["incidents"].as_array().unwrap().len(), 1);
+        assert_eq!(json["data"]["incidents"][0]["stream_id"], "b");
+    }
 }
