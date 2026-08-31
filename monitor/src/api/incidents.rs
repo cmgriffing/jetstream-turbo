@@ -10,8 +10,6 @@ use super::{ApiError, ApiResponse, NO_STORE};
 use crate::incidents::store::{IncidentFilter, IncidentPage};
 use crate::incidents::{IncidentId, IncidentState, IncidentSummary, IncidentTrigger};
 
-
-
 /// Default page size for incident lists.
 pub const INCIDENT_LIST_DEFAULT_LIMIT: usize = 50;
 /// Maximum page size for incident lists.
@@ -98,7 +96,9 @@ fn parse_time_raw(raw: Option<&str>, label: &str) -> Result<Option<DateTime<Utc>
         Some(value) => DateTime::parse_from_rfc3339(value)
             .map(|dt| dt.with_timezone(&Utc))
             .map(Some)
-            .map_err(|_| ApiError::invalid_request(format!("{label} must be an RFC 3339 timestamp"))),
+            .map_err(|_| {
+                ApiError::invalid_request(format!("{label} must be an RFC 3339 timestamp"))
+            }),
     }
 }
 
@@ -112,10 +112,9 @@ pub fn build_filter(
 ) -> Result<IncidentFilter, ApiError> {
     let min_silence_ms = match min_silence_ms {
         None => None,
-        Some(value) => value
-            .parse::<u64>()
-            .map(Some)
-            .map_err(|_| ApiError::invalid_request("min_silence_ms must be a non-negative integer"))?,
+        Some(value) => value.parse::<u64>().map(Some).map_err(|_| {
+            ApiError::invalid_request("min_silence_ms must be a non-negative integer")
+        })?,
     };
     Ok(IncidentFilter {
         stream_id: parse_stream(stream)?,
@@ -232,7 +231,10 @@ pub async fn list_incidents_response(
     store: &crate::incidents::IncidentStore,
     query: &IncidentListQuery,
 ) -> Response {
-    if query.limit.is_some_and(|limit| limit > INCIDENT_LIST_MAX_LIMIT) {
+    if query
+        .limit
+        .is_some_and(|limit| limit > INCIDENT_LIST_MAX_LIMIT)
+    {
         return api_error_response(&ApiError::invalid_request(format!(
             "limit must not exceed {INCIDENT_LIST_MAX_LIMIT}"
         )));
@@ -382,10 +384,12 @@ pub async fn incident_events_response(
 }
 
 pub fn parse_event_limit(raw: Option<&str>) -> Result<usize, ApiError> {
-    parse_limit(raw, INCIDENT_EVENTS_DEFAULT_LIMIT, INCIDENT_EVENTS_MAX_LIMIT)
+    parse_limit(
+        raw,
+        INCIDENT_EVENTS_DEFAULT_LIMIT,
+        INCIDENT_EVENTS_MAX_LIMIT,
+    )
 }
-
-
 
 /// Validated query parameters for the incident list endpoint.
 #[derive(Debug, Clone, Default, serde::Deserialize, utoipa::IntoParams)]
@@ -419,10 +423,7 @@ impl IncidentQueryParams {
             stream: parse_stream(self.stream.as_deref())?,
             state: parse_state(self.state.as_deref())?,
             trigger: parse_trigger(self.trigger.as_deref())?,
-            detected_from: parse_time_raw(
-                self.detected_from.as_deref(),
-                "detected_from",
-            )?,
+            detected_from: parse_time_raw(self.detected_from.as_deref(), "detected_from")?,
             detected_to: parse_time_raw(self.detected_to.as_deref(), "detected_to")?,
             min_silence_ms: self.min_silence_ms,
         })
@@ -518,5 +519,11 @@ pub async fn incident_events(
     Path(incident_id): Path<String>,
     Query(params): Query<IncidentEventsQuery>,
 ) -> Response {
-    incident_events_response(&store, &incident_id, params.limit.map(|v| v.to_string()).as_deref(), params.cursor.map(|v| v.to_string()).as_deref()).await
+    incident_events_response(
+        &store,
+        &incident_id,
+        params.limit.map(|v| v.to_string()).as_deref(),
+        params.cursor.map(|v| v.to_string()).as_deref(),
+    )
+    .await
 }

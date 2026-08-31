@@ -475,6 +475,7 @@ impl Storage {
         Ok(rows)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn save_hourly_uptime(
         &self,
         hour: DateTime<Utc>,
@@ -711,8 +712,7 @@ impl Storage {
                 && !row.reliability_json.is_empty()
             {
                 "observed_episodes".to_string()
-            } else if row.reliability_contract_version
-                >= SOURCE_WINDOW_RELIABILITY_CONTRACT_VERSION
+            } else if row.reliability_contract_version >= SOURCE_WINDOW_RELIABILITY_CONTRACT_VERSION
                 && !row.reliability_json.is_empty()
             {
                 "observed".to_string()

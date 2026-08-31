@@ -6,8 +6,8 @@
 //! effects from it.
 
 use chrono::{DateTime, Duration, Utc};
-use tracing::{info, warn};
 use std::time::Instant;
+use tracing::{info, warn};
 
 use super::transition::{DeliveryState, StreamEvent, StreamTransition, TransportState};
 use super::{ConnectionStatus, ReconnectReason, StreamId, StreamMessage};
@@ -138,8 +138,7 @@ impl TransitionProcessor {
                 effects.push(Effect::Record(record));
             }
             StreamEvent::Transition(transition) => {
-                effects =
-                    self.apply_transition(transition, wall_now);
+                effects = self.apply_transition(transition, wall_now);
             }
         }
         effects
@@ -223,7 +222,8 @@ impl TransitionProcessor {
                     "delivery idle detected on responsive socket"
                 );
                 effects.push(Effect::IdleEpisode { silence_ms });
-                let last_useful_record_at = Some(wall_now - Duration::milliseconds(silence_ms as i64));
+                let last_useful_record_at =
+                    Some(wall_now - Duration::milliseconds(silence_ms as i64));
                 self.open_incident(
                     IncidentTrigger::DeliveryIdle,
                     last_useful_record_at,
@@ -459,7 +459,9 @@ mod tests {
         let effects = run(
             &mut proc,
             vec![
-                StreamEvent::Transition(StreamTransition::HandshakeSucceeded { connect_time_ms: 12 }),
+                StreamEvent::Transition(StreamTransition::HandshakeSucceeded {
+                    connect_time_ms: 12,
+                }),
                 StreamEvent::Transition(StreamTransition::DeliveryResumed),
                 StreamEvent::Record(StreamMessage {
                     stream_id: StreamId::A,
@@ -492,7 +494,9 @@ mod tests {
         let mut effects = run(
             &mut proc,
             vec![
-                StreamEvent::Transition(StreamTransition::HandshakeSucceeded { connect_time_ms: 5 }),
+                StreamEvent::Transition(StreamTransition::HandshakeSucceeded {
+                    connect_time_ms: 5,
+                }),
                 StreamEvent::Transition(StreamTransition::DeliveryResumed),
                 StreamEvent::Transition(StreamTransition::DeliveryIdle { silence_ms: 30_000 }),
             ],
@@ -550,7 +554,9 @@ mod tests {
         run(
             &mut proc,
             vec![
-                StreamEvent::Transition(StreamTransition::HandshakeSucceeded { connect_time_ms: 5 }),
+                StreamEvent::Transition(StreamTransition::HandshakeSucceeded {
+                    connect_time_ms: 5,
+                }),
                 StreamEvent::Transition(StreamTransition::DeliveryResumed),
                 StreamEvent::Transition(StreamTransition::DeliveryIdle { silence_ms: 30_000 }),
             ],
@@ -577,14 +583,16 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, Effect::Incident(IncidentCommand::Resolve { .. })))
             .count();
-        assert_eq!(resolves, 1, "idle race should resolve the first incident once");
+        assert_eq!(
+            resolves, 1,
+            "idle race should resolve the first incident once"
+        );
         let opens = effects
             .iter()
             .filter(|e| matches!(e, Effect::Incident(IncidentCommand::Open { .. })))
             .count();
         assert_eq!(
-            opens,
-            1,
+            opens, 1,
             "duplicate idle transitions must not open a second incident for the same window"
         );
         assert_eq!(proc.delivery_state(), DeliveryState::Idle);
@@ -598,7 +606,9 @@ mod tests {
         run(
             &mut proc,
             vec![
-                StreamEvent::Transition(StreamTransition::HandshakeSucceeded { connect_time_ms: 1 }),
+                StreamEvent::Transition(StreamTransition::HandshakeSucceeded {
+                    connect_time_ms: 1,
+                }),
                 StreamEvent::Transition(StreamTransition::DeliveryResumed),
             ],
             0,
@@ -613,7 +623,9 @@ mod tests {
                 failed_attempt(1),
                 failed_attempt(2),
                 failed_attempt(3),
-                StreamEvent::Transition(StreamTransition::HandshakeSucceeded { connect_time_ms: 8 }),
+                StreamEvent::Transition(StreamTransition::HandshakeSucceeded {
+                    connect_time_ms: 8,
+                }),
             ],
             10,
         );
@@ -628,16 +640,14 @@ mod tests {
         );
         // The recovering connect is counted as the final attempt in the
         // transport-recovered event, then attempt accounting resets.
-        let recovered = effects
-            .iter()
-            .find_map(|e| match e {
-                Effect::Incident(IncidentCommand::AppendEvent { event, .. }) => {
-                    matches!(event.event_type, IncidentEventType::TransportRecovered)
-                        .then(|| event.attempt_ordinal)
-                        .flatten()
-                }
-                _ => None,
-            });
+        let recovered = effects.iter().find_map(|e| match e {
+            Effect::Incident(IncidentCommand::AppendEvent { event, .. }) => {
+                matches!(event.event_type, IncidentEventType::TransportRecovered)
+                    .then(|| event.attempt_ordinal)
+                    .flatten()
+            }
+            _ => None,
+        });
         assert_eq!(recovered, Some(4));
         assert_eq!(proc.outage_attempts(), 0);
         assert_eq!(proc.transport_state(), TransportState::Connected);
@@ -649,18 +659,26 @@ mod tests {
         run(
             &mut proc,
             vec![
-                StreamEvent::Transition(StreamTransition::HandshakeSucceeded { connect_time_ms: 1 }),
+                StreamEvent::Transition(StreamTransition::HandshakeSucceeded {
+                    connect_time_ms: 1,
+                }),
                 StreamEvent::Transition(StreamTransition::TransportLost {
                     reason: crate::incidents::TransportLossReason::LivenessDeadline,
                     outage_elapsed_ms: None,
                 }),
                 failed_attempt(1),
                 failed_attempt(2),
-                StreamEvent::Transition(StreamTransition::HandshakeSucceeded { connect_time_ms: 3 }),
+                StreamEvent::Transition(StreamTransition::HandshakeSucceeded {
+                    connect_time_ms: 3,
+                }),
             ],
             0,
         );
-        assert_eq!(proc.outage_attempts(), 0, "attempts reset on transport recovery");
+        assert_eq!(
+            proc.outage_attempts(),
+            0,
+            "attempts reset on transport recovery"
+        );
 
         let effects = run(
             &mut proc,

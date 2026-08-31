@@ -1,4 +1,11 @@
 use anyhow::Result;
+use jetstream_monitor::api::{
+    ApiError, ApiResponse, HealthSnapshot, HealthStatus, StorageHealth, StreamHealth,
+};
+#[allow(unused_imports)]
+use jetstream_monitor::incidents::IncidentEventType as _IE_unused;
+use jetstream_monitor::incidents::IncidentId;
+use jetstream_monitor::incidents::LedgerHealth;
 use jetstream_monitor::{
     config::Settings,
     diagnostics::DiagnosticLogger,
@@ -18,16 +25,9 @@ use jetstream_monitor::{
     telemetry::Metrics,
     websocket,
 };
-use jetstream_monitor::api::{
-    ApiError, ApiResponse, HealthSnapshot, HealthStatus, StorageHealth, StreamHealth,
-};
-use utoipa::OpenApi;
-use jetstream_monitor::incidents::LedgerHealth;
-use jetstream_monitor::incidents::IncidentId;
-#[allow(unused_imports)]
-use jetstream_monitor::incidents::IncidentEventType as _IE_unused;
 use std::collections::HashMap;
 use std::{sync::Arc, time::Duration};
+use utoipa::OpenApi;
 
 const API_SERVER_URL: &str = "http://localhost:3001";
 const HOURLY_INTERVAL_SECONDS: u64 = 3600;
@@ -174,7 +174,10 @@ fn availability_interval(
         outage_episodes: delta_counter(current.outage_episodes, previous.outage_episodes),
         reconnect_attempts: delta_counter(current.reconnect_attempts, previous.reconnect_attempts),
         idle_episodes: delta_counter(current.idle_episodes, previous.idle_episodes),
-        transport_recoveries: delta_counter(current.transport_recoveries, previous.transport_recoveries),
+        transport_recoveries: delta_counter(
+            current.transport_recoveries,
+            previous.transport_recoveries,
+        ),
         delivery_recoveries: delta_counter(
             current.delivery_recoveries,
             previous.delivery_recoveries,
@@ -358,7 +361,8 @@ async fn main() -> Result<()> {
     let stream_idle_timeout = Duration::from_secs(settings.stream_idle_timeout_seconds.max(1));
     let connect_timeout = Duration::from_secs(settings.connection_timeout_seconds.max(1));
     let heartbeat_interval = Duration::from_secs(settings.heartbeat_interval_seconds.max(1));
-    let liveness_deadline = Duration::from_secs(settings.transport_liveness_deadline_seconds.max(1));
+    let liveness_deadline =
+        Duration::from_secs(settings.transport_liveness_deadline_seconds.max(1));
     let backoff = BackoffPolicy::new(
         Duration::from_secs(settings.reconnect_backoff_min_seconds.max(1)),
         Duration::from_secs(settings.reconnect_backoff_max_seconds.max(1)),
@@ -386,9 +390,7 @@ async fn main() -> Result<()> {
                 age_started: None,
                 last_record_at: None,
                 active_incident_id: None,
-                liveness: Some(Arc::new(
-                    jetstream_monitor::stream::LivenessClock::new(),
-                )),
+                liveness: Some(Arc::new(jetstream_monitor::stream::LivenessClock::new())),
             },
         );
     }
@@ -534,6 +536,7 @@ async fn main() -> Result<()> {
             TransitionProcessor::new(StreamId::Baseline2),
         ];
 
+        #[allow(clippy::too_many_arguments)]
         async fn apply_stream_event(
             index: usize,
             event: StreamEvent,
@@ -592,7 +595,10 @@ async fn main() -> Result<()> {
                     Effect::OutageStarted => metrics.record_transport_outage(),
                     Effect::AttemptFailed { .. } => {
                         metrics.record_reconnect_attempt();
-                        uptime.write().unwrap().record_reconnect_attempt(status_stream_id);
+                        uptime
+                            .write()
+                            .unwrap()
+                            .record_reconnect_attempt(status_stream_id);
                     }
                     Effect::IdleEpisode { silence_ms } => {
                         metrics.record_idle_episode();
@@ -704,13 +710,14 @@ async fn main() -> Result<()> {
         let broadcast_for_ops = Arc::clone(&broadcast_tx);
         let hourly_for_gauge = Arc::clone(&hourly_health);
         let ledger_for_gauge = Arc::clone(&ledger_health);
-        let process_started_at = process_started_at;
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             loop {
                 interval.tick().await;
                 metrics_for_ops.set_process_start_seconds_ago(
-                    (chrono::Utc::now() - process_started_at).num_seconds().max(0) as u64,
+                    (chrono::Utc::now() - process_started_at)
+                        .num_seconds()
+                        .max(0) as u64,
                 );
                 metrics_for_ops
                     .set_dashboard_subscribers(broadcast_for_ops.receiver_count() as i64);
@@ -813,13 +820,21 @@ async fn main() -> Result<()> {
                         interval_metrics.baseline_2_downtime_seconds,
                         interval_metrics.baseline_1_messages,
                         interval_metrics.baseline_2_messages,
-                        current_availability.0.outage_episodes
+                        current_availability
+                            .0
+                            .outage_episodes
                             .saturating_sub(previous_availability.0.outage_episodes),
-                        current_availability.1.outage_episodes
+                        current_availability
+                            .1
+                            .outage_episodes
                             .saturating_sub(previous_availability.1.outage_episodes),
-                        current_availability.0.reconnect_attempts
+                        current_availability
+                            .0
+                            .reconnect_attempts
                             .saturating_sub(previous_availability.0.reconnect_attempts),
-                        current_availability.1.reconnect_attempts
+                        current_availability
+                            .1
+                            .reconnect_attempts
                             .saturating_sub(previous_availability.1.reconnect_attempts),
                         HOURLY_UPTIME_CONTRACT_VERSION,
                     )
@@ -993,7 +1008,10 @@ async fn main() -> Result<()> {
         .route("/openapi.json", axum::routing::get(get_openapi))
         .with_state(app_state);
     let incidents_router = axum::Router::new()
-        .route("/api/v1/incidents", axum::routing::get(jetstream_monitor::api::incidents::incident_list))
+        .route(
+            "/api/v1/incidents",
+            axum::routing::get(jetstream_monitor::api::incidents::incident_list),
+        )
         .route(
             "/api/v1/incidents/{incidentId}",
             axum::routing::get(jetstream_monitor::api::incidents::incident_detail),
@@ -1226,7 +1244,12 @@ async fn get_api_health(
         (StreamId::Baseline2, "baseline2"),
     ] {
         let availability = app.uptime.read().unwrap().availability_snapshot(stream_id);
-        let lag_us = app.uptime.read().unwrap().event_time_snapshot(stream_id).source_lag_us;
+        let lag_us = app
+            .uptime
+            .read()
+            .unwrap()
+            .event_time_snapshot(stream_id)
+            .source_lag_us;
         let entry = match ops.streams.get(&stream_id) {
             Some(entry) => entry,
             None => continue,
@@ -1240,12 +1263,9 @@ async fn get_api_health(
                 .age_started
                 .map(|t| t.elapsed().as_secs())
                 .unwrap_or(0),
-            last_useful_record_age_seconds: entry
-                .last_record_at
-                .map(|t| t.elapsed().as_secs()),
+            last_useful_record_age_seconds: entry.last_record_at.map(|t| t.elapsed().as_secs()),
             last_pong_age_seconds: entry.liveness.as_ref().and_then(|c| c.age_seconds()),
-            source_lag_seconds: lag_us
-                .map(|us| us / 1_000_000),
+            source_lag_seconds: lag_us.map(|us| us / 1_000_000),
             connection_epoch: 0,
             reconnect_attempts: availability.reconnect_attempts,
             outage_elapsed_ms: availability.outage_elapsed_ms,
@@ -1280,8 +1300,8 @@ async fn get_api_health(
         HealthStatus::Unhealthy => axum::http::StatusCode::SERVICE_UNAVAILABLE,
         _ => axum::http::StatusCode::OK,
     };
-    let body = serde_json::to_string(&ApiResponse { data: snapshot })
-        .unwrap_or_else(|_| "{}".to_string());
+    let body =
+        serde_json::to_string(&ApiResponse { data: snapshot }).unwrap_or_else(|_| "{}".to_string());
     axum::http::Response::builder()
         .status(status_code)
         .header("content-type", "application/json")
@@ -1318,7 +1338,10 @@ async fn get_openapi(
     axum::http::Response::builder()
         .status(axum::http::StatusCode::OK)
         .header("content-type", "application/vnd.oai.openapi+json")
-        .header("etag", jetstream_monitor::api::openapi::contract_etag(&body))
+        .header(
+            "etag",
+            jetstream_monitor::api::openapi::contract_etag(&body),
+        )
         .header("cache-control", "public, max-age=60")
         .header("x-monitor-release", (*app.release).clone())
         .body(axum::body::Body::from(body))
@@ -1336,7 +1359,9 @@ async fn get_openapi(
          headers(("cache-control" = String, description = "no-store"))),
     )
 )]
-async fn get_api_metrics(axum::extract::State(app): axum::extract::State<AppState>) -> axum::http::Response<axum::body::Body> {
+async fn get_api_metrics(
+    axum::extract::State(app): axum::extract::State<AppState>,
+) -> axum::http::Response<axum::body::Body> {
     let body = app.metrics.render();
     axum::http::Response::builder()
         .status(axum::http::StatusCode::OK)
@@ -1450,15 +1475,13 @@ mod openapi_tests {
         let doc = document();
         let rendered = normalized_json(&doc);
         let path = snapshot_path();
-        match std::env::var("OPENAPI_SNAPSHOT_WRITE").as_deref() {
-            Ok("1") => {
-                let _ = std::fs::create_dir_all(path.parent().unwrap());
-                std::fs::write(&path, format!("{rendered}\n")).unwrap();
-            }
-            _ => {}
+        if std::env::var("OPENAPI_SNAPSHOT_WRITE").as_deref() == Ok("1") {
+            let _ = std::fs::create_dir_all(path.parent().unwrap());
+            std::fs::write(&path, format!("{rendered}\n")).unwrap();
         }
-        let committed = std::fs::read_to_string(&path)
-            .expect("checked-in OpenAPI snapshot must exist; run with OPENAPI_SNAPSHOT_WRITE=1 to refresh");
+        let committed = std::fs::read_to_string(&path).expect(
+            "checked-in OpenAPI snapshot must exist; run with OPENAPI_SNAPSHOT_WRITE=1 to refresh",
+        );
         assert_eq!(
             rendered.trim(),
             committed.trim(),
@@ -1483,13 +1506,13 @@ mod openapi_tests {
 mod incident_api_tests {
     use axum::http::StatusCode;
     use jetstream_monitor::api::incidents::{
-        build_filter, incident_detail_response, incident_events_response,
-        list_incidents_response, IncidentListQuery,
+        build_filter, incident_detail_response, incident_events_response, list_incidents_response,
+        IncidentListQuery,
     };
     use jetstream_monitor::incidents::store::IncidentStore;
     use jetstream_monitor::incidents::{
         HandshakeFailureReason, IncidentEvent, IncidentEventType, IncidentId, IncidentTrigger,
-        IncidentTrigger as _, MonitorIdentity,
+        MonitorIdentity,
     };
     use std::str::FromStr;
 
@@ -1545,12 +1568,9 @@ mod incident_api_tests {
     }
 
     async fn body_json(response: axum::response::Response) -> serde_json::Value {
-        let bytes = axum::body::to_bytes(
-            response.into_body(),
-            usize::MAX,
-        )
-        .await
-        .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
 
@@ -1592,13 +1612,11 @@ mod incident_api_tests {
             };
             let response = list_incidents_response(&store, &query).await;
             assert_eq!(response.status(), StatusCode::OK);
-            assert!(
-                response
-                    .headers()
-                    .get("cache-control")
-                    .map(|v| v == "no-store")
-                    .unwrap_or(false)
-            );
+            assert!(response
+                .headers()
+                .get("cache-control")
+                .map(|v| v == "no-store")
+                .unwrap_or(false));
             let json = body_json(response).await;
             for incident in json["data"]["incidents"].as_array().unwrap() {
                 seen.push(incident["id"].as_str().unwrap().to_string());

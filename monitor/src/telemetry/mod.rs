@@ -6,7 +6,6 @@ use prometheus::{
 };
 use std::collections::HashMap;
 
-
 /// Bounded metric label values must come from these stable identifiers only.
 pub fn stream_label(stream_id: crate::stream::StreamId) -> &'static str {
     match stream_id {
@@ -47,9 +46,7 @@ pub struct Metrics {
 impl Metrics {
     pub fn new(process_epoch: String) -> Self {
         let base = |name: &str, help: &str| Opts::new(name, help);
-        let label_opts = |name: &str, help: &str| {
-            base(name, help).const_labels(HashMap::new())
-        };
+        let label_opts = |name: &str, help: &str| base(name, help).const_labels(HashMap::new());
         let _ = label_opts;
         let registry = Registry::new();
 
@@ -293,11 +290,7 @@ impl Metrics {
             .set(value);
     }
 
-    pub fn set_last_useful_record_age(
-        &self,
-        stream_id: crate::stream::StreamId,
-        age_seconds: u64,
-    ) {
+    pub fn set_last_useful_record_age(&self, stream_id: crate::stream::StreamId, age_seconds: u64) {
         self.last_useful_record_age_seconds
             .with_label_values(&[stream_label(stream_id)])
             .set(age_seconds as i64);
@@ -309,11 +302,7 @@ impl Metrics {
             .set(age_seconds as i64);
     }
 
-    pub fn set_connection_epoch(
-        &self,
-        stream_id: crate::stream::StreamId,
-        epoch: u64,
-    ) {
+    pub fn set_connection_epoch(&self, stream_id: crate::stream::StreamId, epoch: u64) {
         self.connection_epoch
             .with_label_values(&[stream_label(stream_id)])
             .set(epoch as i64);
@@ -324,8 +313,7 @@ impl Metrics {
     }
 
     pub fn set_hourly_snapshot_age(&self, age_seconds: u64) {
-        self.hourly_snapshot_age_seconds
-            .set(age_seconds as i64);
+        self.hourly_snapshot_age_seconds.set(age_seconds as i64);
     }
 
     pub fn set_dashboard_subscribers(&self, count: i64) {
@@ -342,16 +330,17 @@ impl Metrics {
     }
 
     pub fn set_hourly_last_success_age(&self, age_seconds: u64) {
-        self.hourly_last_success_age_seconds
-            .set(age_seconds as i64);
+        self.hourly_last_success_age_seconds.set(age_seconds as i64);
     }
 
     pub fn observe_transport_recovery(&self, seconds: f64) {
-        self.transport_recovery_seconds.observe(seconds.clamp(0.0, 10_000.0));
+        self.transport_recovery_seconds
+            .observe(seconds.clamp(0.0, 10_000.0));
     }
 
     pub fn observe_delivery_recovery(&self, seconds: f64) {
-        self.delivery_recovery_seconds.observe(seconds.clamp(0.0, 86_400.0));
+        self.delivery_recovery_seconds
+            .observe(seconds.clamp(0.0, 86_400.0));
     }
 
     pub fn observe_data_gap(&self, seconds: f64) {
@@ -392,8 +381,14 @@ mod tests {
         metrics.record_idle_episode();
         metrics.record_useful_record();
         metrics.record_incident_storage_failure();
-        metrics.set_transport_state(crate::stream::StreamId::A, crate::stream::TransportState::Connected);
-        metrics.set_delivery_state(crate::stream::StreamId::A, crate::stream::DeliveryState::Delivering);
+        metrics.set_transport_state(
+            crate::stream::StreamId::A,
+            crate::stream::TransportState::Connected,
+        );
+        metrics.set_delivery_state(
+            crate::stream::StreamId::A,
+            crate::stream::DeliveryState::Delivering,
+        );
         metrics.set_last_useful_record_age(crate::stream::StreamId::A, 3);
         metrics.set_last_pong_age(crate::stream::StreamId::A, 1);
         metrics.set_source_lag(crate::stream::StreamId::A, 2);
@@ -433,11 +428,17 @@ mod tests {
     #[test]
     fn stream_labels_are_bounded_and_exclude_sensitive_values() {
         let metrics = Metrics::new("test-epoch".to_string());
-        metrics.set_transport_state(crate::stream::StreamId::Baseline1, crate::stream::TransportState::Connected);
+        metrics.set_transport_state(
+            crate::stream::StreamId::Baseline1,
+            crate::stream::TransportState::Connected,
+        );
         let out = metrics.render();
         assert!(out.contains("stream=\"baseline1\""));
         for forbidden in ["ws://", "http", "did:", "Bearer", "password"] {
-            assert!(!out.contains(forbidden), "output must not contain {forbidden}");
+            assert!(
+                !out.contains(forbidden),
+                "output must not contain {forbidden}"
+            );
         }
     }
 

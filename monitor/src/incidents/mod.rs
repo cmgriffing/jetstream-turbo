@@ -239,10 +239,7 @@ mod health_tests {
         assert_eq!(health.last_success_age_seconds(Utc::now()), None);
 
         health.record_success(Utc::now() - chrono::Duration::seconds(10));
-        assert_eq!(
-            health.last_success_age_seconds(Utc::now()),
-            Some(10)
-        );
+        assert_eq!(health.last_success_age_seconds(Utc::now()), Some(10));
 
         health.record_failure(Utc::now());
         assert!(!health.healthy());

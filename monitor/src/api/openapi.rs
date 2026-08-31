@@ -2,21 +2,16 @@
 
 /// Regenerate the canonical OpenAPI document with the given server URL.
 /// The document itself must be defined where the handler paths live.
-pub fn set_servers(
-    doc: &mut utoipa::openapi::OpenApi,
-    api_server_url: &str,
-) {
+pub fn set_servers(doc: &mut utoipa::openapi::OpenApi, api_server_url: &str) {
     doc.info.version = crate::api::OPENAPI_CONTRACT_VERSION.to_string();
-    doc.servers = Some(vec![
-        utoipa::openapi::server::ServerBuilder::new()
-            .url(api_server_url)
-            .description(Some(
-                "Deployed monitor location; the API is unauthenticated and may be \
+    doc.servers = Some(vec![utoipa::openapi::server::ServerBuilder::new()
+        .url(api_server_url)
+        .description(Some(
+            "Deployed monitor location; the API is unauthenticated and may be \
                  restricted at the reverse proxy."
-                    .to_string(),
-            ))
-            .build(),
-    ]);
+                .to_string(),
+        ))
+        .build()]);
 }
 
 /// Serialize the canonical document deterministically (sorted keys).

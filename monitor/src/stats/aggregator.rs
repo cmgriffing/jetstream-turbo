@@ -1490,7 +1490,7 @@ impl UptimeTracker {
         let uptime_a = 100.0 - ((downtime_a as f64 / server_run_time as f64) * 100.0);
         let uptime_b = 100.0 - ((downtime_b as f64 / server_run_time as f64) * 100.0);
 
-        (uptime_a.max(0.0).min(100.0), uptime_b.max(0.0).min(100.0))
+        (uptime_a.clamp(0.0, 100.0), uptime_b.clamp(0.0, 100.0))
     }
 
     pub fn get_metrics_snapshot(&self) -> UptimeMetricsSnapshot {
@@ -1621,7 +1621,7 @@ impl UptimeTracker {
         let down_2 = Self::baseline_downtime_seconds(&self.baseline_2, now);
         let up_1 = 100.0 - ((down_1 as f64 / server_run_time as f64) * 100.0);
         let up_2 = 100.0 - ((down_2 as f64 / server_run_time as f64) * 100.0);
-        (up_1.max(0.0).min(100.0), up_2.max(0.0).min(100.0))
+        (up_1.clamp(0.0, 100.0), up_2.clamp(0.0, 100.0))
     }
 
     pub fn get_baseline_1_streak(&self) -> f64 {
@@ -2117,9 +2117,7 @@ mod tests {
 
 #[cfg(test)]
 mod episode_tests {
-    use super::{
-        ComparisonIneligibilityReason, ReconnectReason, UptimeTracker,
-    };
+    use super::{ReconnectReason, UptimeTracker};
     use crate::stream::{ConnectionStatus, SourceEventObservation, StreamId, StreamMessage};
     use std::time::Duration;
 
@@ -2190,13 +2188,20 @@ mod episode_tests {
 
         let availability = tracker.availability_snapshot(StreamId::B);
         assert_eq!(availability.reconnect_attempts, 2);
-        assert_eq!(availability.outage_episodes, 0, "no prior session means no outage");
+        assert_eq!(
+            availability.outage_episodes, 0,
+            "no prior session means no outage"
+        );
         assert_eq!(availability.transport_recovery_ms, 0);
         assert!(!availability.observation_coverage_known);
 
         // When the first connection eventually succeeds, coverage starts.
         tracker.handle_connection_status(status_connected(StreamId::B, 3));
-        assert!(tracker.availability_snapshot(StreamId::B).observation_coverage_known);
+        assert!(
+            tracker
+                .availability_snapshot(StreamId::B)
+                .observation_coverage_known
+        );
     }
 
     #[test]
@@ -2221,16 +2226,20 @@ mod episode_tests {
         let after_transport = tracker.availability_snapshot(StreamId::A);
         assert_eq!(after_transport.outage_episodes, 1);
         assert!(after_transport.transport_connected);
-        assert!(!after_transport.delivery_available,
-            "transport recovered while delivery remains unavailable");
+        assert!(
+            !after_transport.delivery_available,
+            "transport recovered while delivery remains unavailable"
+        );
 
         // First useful record completes delivery recovery.
         std::thread::sleep(Duration::from_millis(2));
         tracker.record_total_count(StreamId::A, 2);
         let after_delivery = tracker.availability_snapshot(StreamId::A);
         assert!(after_delivery.delivery_available);
-        assert!(after_delivery.delivery_recovery_ms > after_transport.transport_recovery_ms.min(1) ||
-                after_delivery.delivery_recovery_ms >= 1);
+        assert!(
+            after_delivery.delivery_recovery_ms > after_transport.transport_recovery_ms.min(1)
+                || after_delivery.delivery_recovery_ms >= 1
+        );
         assert!(after_delivery.transport_connected);
     }
 
@@ -2257,9 +2266,11 @@ mod episode_tests {
             comparison.reason,
             Some(super::ComparisonIneligibilityReason::IdleDelivery)
         ));
-        assert!(tracker
-            .availability_snapshot(StreamId::A)
-            .transport_connected);
+        assert!(
+            tracker
+                .availability_snapshot(StreamId::A)
+                .transport_connected
+        );
 
         // Delivery recovery opens a fresh epoch.
         let now_us = chrono::Utc::now().timestamp_micros() as u64;
@@ -2285,7 +2296,10 @@ mod episode_tests {
         std::thread::sleep(Duration::from_millis(2));
         tracker.record_total_count(StreamId::A, 2);
         let after = tracker.availability_snapshot(StreamId::A);
-        assert_eq!(after.outage_episodes, 0, "idle episode creates zero outages");
+        assert_eq!(
+            after.outage_episodes, 0,
+            "idle episode creates zero outages"
+        );
         assert_eq!(after.transport_recoveries, 0);
         assert_eq!(after.idle_episodes, 1);
         assert!(after.transport_recovery_ms == 0);

@@ -161,10 +161,7 @@ impl Settings {
                 "reconnect_backoff_max_seconds",
                 default_reconnect_backoff_max_seconds(),
             )?
-            .set_default(
-                "incident_retention_days",
-                default_incident_retention_days(),
-            )?
+            .set_default("incident_retention_days", default_incident_retention_days())?
             .set_default("monitor_release", default_monitor_release())?
             .set_default("api_server_url", default_api_server_url())?
             .set_default(
@@ -226,7 +223,10 @@ impl Settings {
     }
 }
 
-fn validate_liveness_settings(heartbeat_seconds: u64, liveness_deadline_seconds: u64) -> Result<()> {
+fn validate_liveness_settings(
+    heartbeat_seconds: u64,
+    liveness_deadline_seconds: u64,
+) -> Result<()> {
     if heartbeat_seconds == 0 {
         anyhow::bail!("heartbeat_interval_seconds must be greater than zero");
     }
@@ -243,7 +243,9 @@ fn validate_backoff_settings(min_seconds: u64, max_seconds: u64) -> Result<()> {
         anyhow::bail!("reconnect_backoff_min_seconds must be greater than zero");
     }
     if max_seconds < min_seconds {
-        anyhow::bail!("reconnect_backoff_max_seconds must not be less than reconnect_backoff_min_seconds");
+        anyhow::bail!(
+            "reconnect_backoff_max_seconds must not be less than reconnect_backoff_min_seconds"
+        );
     }
     if max_seconds == 0 {
         anyhow::bail!("reconnect_backoff_max_seconds must be greater than zero");

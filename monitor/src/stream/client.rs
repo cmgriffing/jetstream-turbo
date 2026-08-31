@@ -118,7 +118,7 @@ fn portable_source_identity(source: &serde_json::Value) -> Option<String> {
 fn push_identity_component(identity: &mut String, component: &str) {
     identity.push('|');
     identity.push_str(&component.len().to_string());
-    identity.push_str(&component);
+    identity.push_str(component);
 }
 
 fn observe_source_event_now(text: &str) -> Option<SourceEventObservation> {
@@ -178,9 +178,8 @@ enum SessionEnd {
     LivenessDeadline,
 }
 
-type WsStream = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Shared clock of the latest peer-liveness evidence for one stream client.
 #[derive(Debug, Default)]
@@ -217,7 +216,7 @@ fn map_loss_reason(end: SessionEnd) -> TransportLossReason {
     }
 }
 
-/// Run a single connected session until the transport ends.
+/// Run a single connected session. until the transport ends.
 ///
 /// Sends proactive Ping frames on the heartbeat cadence, treats any peer
 /// frame as liveness evidence, and emits delivery-idle transitions without
@@ -465,8 +464,7 @@ impl StreamClient {
                 info!(stream = ?stream_id, "connecting to stream endpoint");
                 let connect_start = Instant::now();
 
-                let handshake =
-                    tokio::time::timeout(connect_timeout, connect_async(&url)).await;
+                let handshake = tokio::time::timeout(connect_timeout, connect_async(&url)).await;
 
                 match handshake {
                     Ok(Ok((ws_stream, _))) => {
@@ -479,9 +477,9 @@ impl StreamClient {
                             pending_delay = None;
                         }
                         outage_started = None;
-                        send(StreamEvent::Transition(StreamTransition::HandshakeSucceeded {
-                            connect_time_ms,
-                        }));
+                        send(StreamEvent::Transition(
+                            StreamTransition::HandshakeSucceeded { connect_time_ms },
+                        ));
 
                         let end = run_session(
                             ws_stream,
@@ -549,9 +547,8 @@ impl StreamClient {
 }
 #[cfg(test)]
 mod fixtures {
-    use super::{StreamClient, StreamId, StreamEvent, StreamTransition};
+    use super::{StreamClient, StreamEvent, StreamId, StreamTransition};
     use futures::SinkExt;
-    use std::time::Duration;
     use tokio::net::TcpListener;
     use tokio_tungstenite::tungstenite::Message;
 
@@ -571,28 +568,41 @@ mod fixtures {
     }
 
     /// Assert no transport-lost transition arrives within `quiet` millis.
-    async fn expect_quiet_transport(stream: &mut (impl futures::Stream<Item = StreamEvent> + Unpin), quiet: u64) {
+    async fn expect_quiet_transport(
+        stream: &mut (impl futures::Stream<Item = StreamEvent> + Unpin),
+        quiet: u64,
+    ) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(quiet);
         let mut saw_handshake = false;
         while std::time::Instant::now() < deadline {
-            match tokio::time::timeout(deadline - std::time::Instant::now(), futures::StreamExt::next(stream)).await {
+            match tokio::time::timeout(
+                deadline - std::time::Instant::now(),
+                futures::StreamExt::next(stream),
+            )
+            .await
+            {
                 Err(_) => return,
-                Ok(Some(StreamEvent::Transition(StreamTransition::HandshakeSucceeded { .. }))) if !saw_handshake => {
+                Ok(Some(StreamEvent::Transition(StreamTransition::HandshakeSucceeded {
+                    ..
+                }))) if !saw_handshake => {
                     saw_handshake = true;
                 }
-                Ok(Some(StreamEvent::Transition(
-                    StreamTransition::DeliveryResumed,
-                ))) => {}
+                Ok(Some(StreamEvent::Transition(StreamTransition::DeliveryResumed))) => {}
                 Ok(Some(StreamEvent::Transition(StreamTransition::DeliveryIdle { .. }))) => {}
                 Ok(Some(other)) => panic!("unexpected event during quiet window: {other:?}"),
                 Ok(None) => panic!("stream ended during quiet window"),
             }
         }
-        assert!(saw_handshake, "expected a handshake before the quiet window");
+        assert!(
+            saw_handshake,
+            "expected a handshake before the quiet window"
+        );
     }
 
     async fn bind_listener() -> (TcpListener, String) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fixture");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fixture");
         let addr = listener.local_addr().expect("addr").to_string();
         (listener, format!("ws://{addr}"))
     }
@@ -603,10 +613,14 @@ mod fixtures {
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept");
             let mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> =
-                tokio_tungstenite::accept_async(stream).await.expect("handshake");
+                tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("handshake");
             // Deliver one useful record then go quiet; pings are auto-ponged
             // by tungstenite when reading.
-            ws.send(Message::Text(r#"{"time_us":100}"#.into())).await.ok();
+            ws.send(Message::Text(r#"{"time_us":100}"#.into()))
+                .await
+                .ok();
             // Keep responding to pings for the remainder of the fixture window.
             while let Ok(Some(_)) = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
@@ -625,8 +639,7 @@ mod fixtures {
         let resumed = next_transition(&mut events).await;
         assert!(matches!(
             resumed,
-            StreamTransition::DeliveryResumed
-                | StreamTransition::HandshakeSucceeded { .. }
+            StreamTransition::DeliveryResumed | StreamTransition::HandshakeSucceeded { .. }
         ));
         // Drain the handshake/idle sequence; the socket must remain connected:
         // an idle transition may arrive, but no transport loss, and no second
@@ -680,7 +693,9 @@ mod fixtures {
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept fixture");
             let mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> =
-                tokio_tungstenite::accept_async(stream).await.expect("handshake");
+                tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("handshake");
             while let Some(Ok(msg)) = futures::StreamExt::next(&mut ws).await {
                 if matches!(msg, Message::Ping(_)) {
                     tokio::time::sleep(std::time::Duration::from_millis(60)).await;
@@ -709,7 +724,9 @@ mod fixtures {
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept fixture");
             let mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> =
-                tokio_tungstenite::accept_async(stream).await.expect("handshake");
+                tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("handshake");
             ws.send(Message::Text(r#"{"time_us":1}"#.into())).await.ok();
             tokio::time::sleep(std::time::Duration::from_millis(120)).await;
             let _ = ws.send(Message::Close(None)).await;
@@ -745,7 +762,9 @@ mod fixtures {
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept fixture");
             let ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> =
-                tokio_tungstenite::accept_async(stream).await.expect("handshake");
+                tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("handshake");
             // Abruptly close the TCP connection to force a socket read failure.
             tokio::time::sleep(std::time::Duration::from_millis(120)).await;
             drop(ws);
@@ -823,11 +842,17 @@ mod fixtures {
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept fixture");
             let mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> =
-                tokio_tungstenite::accept_async(stream).await.expect("handshake");
-            ws.send(Message::Text(r#"{"time_us":100}"#.into())).await.ok();
+                tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("handshake");
+            ws.send(Message::Text(r#"{"time_us":100}"#.into()))
+                .await
+                .ok();
             // Stay silent past the idle deadline, then resume on the same socket.
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            ws.send(Message::Text(r#"{"time_us":340}"#.into())).await.ok();
+            ws.send(Message::Text(r#"{"time_us":340}"#.into()))
+                .await
+                .ok();
             // Keep responding to pings for the remainder of the fixture window.
             while let Ok(Some(_)) = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
@@ -854,7 +879,9 @@ mod fixtures {
             )
             .await
             {
-                Ok(Some(StreamEvent::Transition(StreamTransition::HandshakeSucceeded { .. }))) => {
+                Ok(Some(StreamEvent::Transition(StreamTransition::HandshakeSucceeded {
+                    ..
+                }))) => {
                     handshakes += 1;
                 }
                 Ok(Some(StreamEvent::Transition(StreamTransition::DeliveryResumed))) => {
@@ -865,15 +892,21 @@ mod fixtures {
                 Ok(Some(StreamEvent::Transition(StreamTransition::TransportLost { .. }))) => {
                     saw_loss = true;
                 }
-                Ok(Some(StreamEvent::Transition(
-                    StreamTransition::ReconnectAttemptFailed { .. },
-                ))) => {}
+                Ok(Some(StreamEvent::Transition(StreamTransition::ReconnectAttemptFailed {
+                    ..
+                }))) => {}
                 Ok(None) => panic!("stream ended early"),
                 Err(_) => break,
             }
         }
-        assert_eq!(handshakes, 1, "socket must not reconnect during delivery idle");
+        assert_eq!(
+            handshakes, 1,
+            "socket must not reconnect during delivery idle"
+        );
         assert!(!saw_loss, "no transport loss on a responsive idle socket");
-        assert!(saw_resume_after_idle, "delivery must resume on the same socket");
+        assert!(
+            saw_resume_after_idle,
+            "delivery must resume on the same socket"
+        );
     }
 }

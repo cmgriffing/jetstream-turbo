@@ -44,6 +44,15 @@ pub struct EventPage {
     pub next_cursor: Option<i64>,
 }
 
+type EventRow = (
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+);
+
 #[derive(Debug, sqlx::FromRow)]
 struct SummaryRow {
     id: String,
@@ -175,10 +184,7 @@ fn decode_incident_cursor(cursor: &str) -> Result<(String, String)> {
     let (time, id) = rest
         .rsplit_once('|')
         .ok_or_else(|| anyhow::anyhow!("invalid cursor shape"))?;
-    if id.is_empty()
-        || id.len() != 26
-        || !id.bytes().all(|b| b.is_ascii_alphanumeric())
-    {
+    if id.is_empty() || id.len() != 26 || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
         return Err(anyhow::anyhow!("invalid cursor id"));
     }
     DateTime::parse_from_rfc3339(time).map_err(|_| anyhow::anyhow!("invalid cursor timestamp"))?;
@@ -387,7 +393,12 @@ impl IncidentStore {
         };
         let total_silence_ms = summary
             .last_useful_record_at
-            .map(|start| resolved_at.signed_duration_since(start).num_milliseconds().max(0))
+            .map(|start| {
+                resolved_at
+                    .signed_duration_since(start)
+                    .num_milliseconds()
+                    .max(0)
+            })
             .unwrap_or_else(|| {
                 resolved_at
                     .signed_duration_since(summary.detected_at)
@@ -549,10 +560,14 @@ impl IncidentStore {
             query.push(" AND stream_id = ").push_bind(stream.clone());
         }
         if let Some(state) = filter.state {
-            query.push(" AND state = ").push_bind(state_str(state).to_string());
+            query
+                .push(" AND state = ")
+                .push_bind(state_str(state).to_string());
         }
         if let Some(trigger) = filter.trigger {
-            query.push(" AND trigger = ").push_bind(trigger_str(trigger).to_string());
+            query
+                .push(" AND trigger = ")
+                .push_bind(trigger_str(trigger).to_string());
         }
         if let Some(from) = filter.detected_from {
             query.push(" AND detected_at >= ").push_bind(rfc3339(from));
@@ -561,7 +576,9 @@ impl IncidentStore {
             query.push(" AND detected_at <= ").push_bind(rfc3339(to));
         }
         if let Some(min) = filter.min_silence_ms {
-            query.push(" AND total_silence_ms >= ").push_bind(min as i64);
+            query
+                .push(" AND total_silence_ms >= ")
+                .push_bind(min as i64);
         }
         if let Some((time, id)) = &cursor_vals {
             query
@@ -634,15 +651,16 @@ impl IncidentStore {
             r#"
                 SELECT sequence, event_type, occurred_at, reason, attempt_ordinal, scheduled_delay_ms
                 FROM monitor_incident_events
-                WHERE incident_id = "#
+                WHERE incident_id = "#,
         );
         query.push_bind(incident_id.as_str());
         if let Some(after) = after_sequence {
             query.push(" AND sequence > ").push_bind(after);
         }
-        query.push(" ORDER BY sequence ASC LIMIT ").push_bind(limit as i64 + 1);
-        let rows: Vec<(i64, String, String, Option<String>, Option<i64>, Option<i64>)> =
-            query.build_query_as().fetch_all(&self.pool).await?;
+        query
+            .push(" ORDER BY sequence ASC LIMIT ")
+            .push_bind(limit as i64 + 1);
+        let rows: Vec<EventRow> = query.build_query_as().fetch_all(&self.pool).await?;
 
         let mut events = Vec::with_capacity(rows.len());
         for (sequence, event_type_str, occurred_at, reason, attempt_ordinal, scheduled_delay_ms) in
@@ -693,30 +711,20 @@ mod tests {
     use crate::incidents::{HandshakeFailureReason, MonitorIdentity};
     use std::str::FromStr;
 
-    fn temp_pool(test_name: &str) -> (SqlitePool, String) {
+    async fn new_store(test_name: &str) -> (IncidentStore, SqlitePool) {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!("incident-ledger-{test_name}-{nanos}.db"));
-        let url = format!("sqlite://{}?mode=rwc", path.display());
-        let options = sqlx::sqlite::SqliteConnectOptions::from_str(&url)
-            .unwrap()
-            .foreign_keys(true)
-            .create_if_missing(true);
-        // Pool creation happens inside each async test via store_for.
-        let pool = {
-            // Defer connection to the async test context.
-            let url = url.clone();
-            futures::executor::block_on(async move {
-                SqlitePool::connect_with(options).await.unwrap()
-            })
-        };
-        (pool, url)
-    }
-
-    async fn store_for(test_name: &str) -> (IncidentStore, SqlitePool) {
-        let (pool, _url) = temp_pool(test_name);
+        let options = sqlx::sqlite::SqliteConnectOptions::from_str(&format!(
+            "sqlite://{}?mode=rwc",
+            path.display()
+        ))
+        .unwrap()
+        .foreign_keys(true)
+        .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await.unwrap();
         let store = IncidentStore::new(pool.clone()).await.unwrap();
         (store, pool)
     }
@@ -764,7 +772,7 @@ mod tests {
 
     #[tokio::test]
     async fn attempt_events_update_summary_atomically() -> Result<()> {
-        let (store, _pool) = store_for("attempt-summary").await;
+        let (store, _pool) = new_store("attempt-summary").await;
         let incident = open_test_incident(&store, "a", "01ARZ3NDEKTSV4RRFFQ69G5FAZ").await;
 
         attempt_event(&store, &incident, 1).await;
@@ -779,7 +787,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_sequence_is_rejected() -> Result<()> {
-        let (store, _pool) = store_for("duplicate-sequence").await;
+        let (store, _pool) = new_store("duplicate-sequence").await;
         let incident = open_test_incident(&store, "a", "01ARZ3NDEKTSV4RRFFQ69G5FBX").await;
 
         attempt_event(&store, &incident, 1).await;
@@ -797,7 +805,10 @@ mod tests {
             )
             .await;
 
-        assert!(duplicate.is_err(), "unique (incident_id, sequence) must reject");
+        assert!(
+            duplicate.is_err(),
+            "unique (incident_id, sequence) must reject"
+        );
         // The failed insert must not have incremented the summary.
         let summary = store.get_incident(&incident).await?.expect("exists");
         assert_eq!(summary.reconnect_attempts, 1);
@@ -806,7 +817,7 @@ mod tests {
 
     #[tokio::test]
     async fn restart_reconciliation_marks_incomplete_with_observation_gap() -> Result<()> {
-        let (store, _pool) = store_for("restart-reconcile").await;
+        let (store, _pool) = new_store("restart-reconcile").await;
         let incident = open_test_incident(&store, "b", "01ARZ3NDEKTSV4RRFFQ69G5FCX").await;
 
         let reconciled = store
@@ -827,13 +838,18 @@ mod tests {
         );
 
         // Running reconciliation again must not find anything open.
-        assert_eq!(store.reconcile_open_incidents(&identity(), Utc::now()).await?, 0);
+        assert_eq!(
+            store
+                .reconcile_open_incidents(&identity(), Utc::now())
+                .await?,
+            0
+        );
         Ok(())
     }
 
     #[tokio::test]
     async fn retention_removes_expired_terminal_incidents_transactionally() -> Result<()> {
-        let (store, _pool) = store_for("retention-cascade").await;
+        let (store, _pool) = new_store("retention-cascade").await;
         let old_incident = open_test_incident(&store, "a", "01ARZ3NDEKTSV4RRFFQ69G5FDX").await;
         attempt_event(&store, &old_incident, 1).await;
 
@@ -859,14 +875,17 @@ mod tests {
             .await?
             .events
             .is_empty());
-        let open_summary = store.get_incident(&_open_incident).await?.expect("open kept");
+        let open_summary = store
+            .get_incident(&_open_incident)
+            .await?
+            .expect("open kept");
         assert_eq!(open_summary.state, IncidentState::Open);
         Ok(())
     }
 
     #[tokio::test]
     async fn keyset_pagination_walks_without_gaps_or_duplicates() -> anyhow::Result<()> {
-        let (store, _pool) = store_for("keyset-paging").await;
+        let (store, _pool) = new_store("keyset-paging").await;
         let mut ids = Vec::new();
         for (index, id) in [
             "01ARZ3NDEKTSV4RRFFQ69G5FFX",
@@ -882,7 +901,8 @@ mod tests {
             let incident = open_test_incident(&store, "a", id).await;
             // Stagger detected_at by creation order through updates.
             let mut summary = store.get_incident(&incident).await.unwrap().unwrap();
-            summary.detected_at = Utc::now() - chrono::Duration::minutes(10) + chrono::Duration::seconds(index as i64);
+            summary.detected_at = Utc::now() - chrono::Duration::minutes(10)
+                + chrono::Duration::seconds(index as i64);
             summary.updated_at = summary.detected_at;
             store.update_summary(&summary).await.unwrap();
             ids.push(incident);
@@ -904,7 +924,10 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 6, "all incidents paged exactly once");
-        assert_eq!(seen.iter().collect::<std::collections::HashSet<_>>().len(), seen.len());
+        assert_eq!(
+            seen.iter().collect::<std::collections::HashSet<_>>().len(),
+            seen.len()
+        );
 
         // Newest-first keyset ordering.
         let ordered: Vec<String> = store
@@ -927,7 +950,7 @@ mod tests {
     async fn filters_apply_before_cursor_pages() -> anyhow::Result<()> {
         use crate::incidents::IncidentState;
 
-        let (store, _pool) = store_for("filters").await;
+        let (store, _pool) = new_store("filters").await;
         let a = open_test_incident(&store, "a", "01ARZ3NDEKTSV4RRFFQ69G5FMX").await;
         let b = open_test_incident(&store, "b", "01ARZ3NDEKTSV4RRFFQ69G5FNX").await;
         store.resolve_incident(&b, Utc::now()).await?;
@@ -936,9 +959,7 @@ mod tests {
             stream_id: Some("a".to_string()),
             ..Default::default()
         };
-        let page = store
-            .list_incidents(&stream_filter, 50, None)
-            .await?;
+        let page = store.list_incidents(&stream_filter, 50, None).await?;
         assert_eq!(page.incidents.len(), 1);
         assert_eq!(page.incidents[0].id, a);
 
@@ -964,7 +985,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_incident_returns_none() -> anyhow::Result<()> {
-        let (store, _pool) = store_for("unknown-incident").await;
+        let (store, _pool) = new_store("unknown-incident").await;
         let unknown = IncidentId::from_string("01ARZ3NDEKTSV4RRFFQ69G5FOX").unwrap();
         assert!(store.get_incident(&unknown).await?.is_none());
         Ok(())
