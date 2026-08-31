@@ -3,12 +3,16 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, SqlitePool};
 use std::collections::HashMap;
+use std::str::FromStr;
 
 use crate::stats::{ComparisonEligibility, PairwiseComparisons, StreamEventTimeSnapshot};
 
 const LEGACY_UPTIME_CONTRACT_VERSION: i64 = 1;
 const INTERVAL_UPTIME_CONTRACT_VERSION: i64 = 3;
 const SOURCE_WINDOW_RELIABILITY_CONTRACT_VERSION: i64 = 3;
+/// v4: outage episodes and reconnect attempts are reported independently;
+/// legacy disconnect counts must never be aggregated with episode counts.
+pub const OUTAGE_EPISODE_RELIABILITY_CONTRACT_VERSION: i64 = 4;
 const HOURLY_WINDOW_SECONDS: i64 = 3600;
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -60,6 +64,14 @@ pub struct HourlyUptime {
     pub reliability_contract_version: i64,
     #[sqlx(default)]
     pub reliability_classification: String,
+    #[sqlx(default)]
+    pub stream_a_outage_episodes: i64,
+    #[sqlx(default)]
+    pub stream_b_outage_episodes: i64,
+    #[sqlx(default)]
+    pub stream_a_reconnect_attempts: i64,
+    #[sqlx(default)]
+    pub stream_b_reconnect_attempts: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -71,6 +83,22 @@ pub struct AvailabilityHistory {
     pub reconnect_reasons: HashMap<String, u64>,
     pub client_recovery_ms: u64,
     pub coverage: String,
+    /// Contract v4 counters: connected-to-disconnected outage episodes.
+    #[serde(default)]
+    pub outage_episodes: u64,
+    /// Contract v4 counters: failed reconnect attempts, reported independently.
+    #[serde(default)]
+    pub reconnect_attempts: u64,
+    /// Contract v4 counters: delivery-idle episodes on live sockets.
+    #[serde(default)]
+    pub idle_episodes: u64,
+    #[serde(default)]
+    pub transport_recoveries: u64,
+    #[serde(default)]
+    pub delivery_recoveries: u64,
+    /// Cumulative delivery recovery duration (ms) from disruption to record.
+    #[serde(default)]
+    pub delivery_recovery_ms: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -123,7 +151,10 @@ pub struct Storage {
 
 impl Storage {
     pub async fn new(database_url: &str) -> Result<Self> {
-        let pool = SqlitePool::connect(database_url).await?;
+        let options = sqlx::sqlite::SqliteConnectOptions::from_str(database_url)?
+            .foreign_keys(true)
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await?;
 
         sqlx::query(
             r#"
@@ -179,6 +210,10 @@ impl Storage {
                 baseline_2_downtime_seconds INTEGER NOT NULL DEFAULT 0,
                 baseline_1_messages INTEGER NOT NULL DEFAULT 0,
                 baseline_2_messages INTEGER NOT NULL DEFAULT 0,
+                stream_a_outage_episodes INTEGER NOT NULL DEFAULT 0,
+                stream_b_outage_episodes INTEGER NOT NULL DEFAULT 0,
+                stream_a_reconnect_attempts INTEGER NOT NULL DEFAULT 0,
+                stream_b_reconnect_attempts INTEGER NOT NULL DEFAULT 0,
                 metrics_contract_version INTEGER NOT NULL DEFAULT 1,
                 reliability_json TEXT NOT NULL DEFAULT '',
                 reliability_contract_version INTEGER NOT NULL DEFAULT 0,
@@ -338,6 +373,31 @@ impl Storage {
             .execute(&pool).await.ok();
 
         sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN stream_a_outage_episodes INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+        sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN stream_b_outage_episodes INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+        sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN stream_a_reconnect_attempts INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+        sqlx::query(
+            "ALTER TABLE hourly_uptime ADD COLUMN stream_b_reconnect_attempts INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&pool)
+        .await
+        .ok();
+
+        sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS lifetime_totals (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -351,6 +411,11 @@ impl Storage {
         .await?;
 
         Ok(Self { pool })
+    }
+
+    /// Cloned handle to the shared SQLite pool for additional stores.
+    pub fn pool(&self) -> SqlitePool {
+        self.pool.clone()
     }
 
     pub async fn save_hourly(
@@ -433,6 +498,10 @@ impl Storage {
         baseline_2_downtime_seconds: u64,
         baseline_1_messages: u64,
         baseline_2_messages: u64,
+        stream_a_outage_episodes: u64,
+        stream_b_outage_episodes: u64,
+        stream_a_reconnect_attempts: u64,
+        stream_b_reconnect_attempts: u64,
         metrics_contract_version: i64,
     ) -> Result<()> {
         let hour_str = hour.format("%Y-%m-%d %H:00:00").to_string();
@@ -450,9 +519,11 @@ impl Storage {
                 baseline_1_seconds, baseline_2_seconds,
                 baseline_1_downtime_seconds, baseline_2_downtime_seconds,
                 baseline_1_messages, baseline_2_messages,
+                stream_a_outage_episodes, stream_b_outage_episodes,
+                stream_a_reconnect_attempts, stream_b_reconnect_attempts,
                 metrics_contract_version
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(hour) DO UPDATE SET
                 stream_a_seconds = excluded.stream_a_seconds,
                 stream_b_seconds = excluded.stream_b_seconds,
@@ -474,6 +545,10 @@ impl Storage {
                 baseline_2_downtime_seconds = excluded.baseline_2_downtime_seconds,
                 baseline_1_messages = excluded.baseline_1_messages,
                 baseline_2_messages = excluded.baseline_2_messages,
+                stream_a_outage_episodes = excluded.stream_a_outage_episodes,
+                stream_b_outage_episodes = excluded.stream_b_outage_episodes,
+                stream_a_reconnect_attempts = excluded.stream_a_reconnect_attempts,
+                stream_b_reconnect_attempts = excluded.stream_b_reconnect_attempts,
                 metrics_contract_version = excluded.metrics_contract_version,
                 updated_at = CURRENT_TIMESTAMP
             "#,
@@ -499,6 +574,10 @@ impl Storage {
         .bind(baseline_2_downtime_seconds as i64)
         .bind(baseline_1_messages as i64)
         .bind(baseline_2_messages as i64)
+        .bind(stream_a_outage_episodes as i64)
+        .bind(stream_b_outage_episodes as i64)
+        .bind(stream_a_reconnect_attempts as i64)
+        .bind(stream_b_reconnect_attempts as i64)
         .bind(metrics_contract_version)
         .execute(&self.pool)
         .await?;
@@ -514,7 +593,7 @@ impl Storage {
         let hour_str = hour.format("%Y-%m-%d %H:00:00").to_string();
         let reliability_json = serde_json::to_string(reliability)?;
         sqlx::query(
-            "UPDATE hourly_uptime SET reliability_json = ?, reliability_contract_version = 3, updated_at = CURRENT_TIMESTAMP WHERE hour = ?",
+            "UPDATE hourly_uptime SET reliability_json = ?, reliability_contract_version = 4, updated_at = CURRENT_TIMESTAMP WHERE hour = ?",
         )
         .bind(reliability_json)
         .bind(hour_str)
@@ -628,6 +707,11 @@ impl Storage {
         for mut row in rows {
             let original = row.clone();
             row.reliability_classification = if row.reliability_contract_version
+                >= OUTAGE_EPISODE_RELIABILITY_CONTRACT_VERSION
+                && !row.reliability_json.is_empty()
+            {
+                "observed_episodes".to_string()
+            } else if row.reliability_contract_version
                 >= SOURCE_WINDOW_RELIABILITY_CONTRACT_VERSION
                 && !row.reliability_json.is_empty()
             {
@@ -769,6 +853,10 @@ mod tests {
                 0,
                 0,
                 0,
+                0,
+                0,
+                0,
+                0,
                 INTERVAL_UPTIME_CONTRACT_VERSION,
             )
             .await?;
@@ -789,6 +877,10 @@ mod tests {
                 5.5,
                 15,
                 16,
+                0,
+                0,
+                0,
+                0,
                 0,
                 0,
                 0,
@@ -864,8 +956,8 @@ mod tests {
             row.metrics_contract_version,
             INTERVAL_UPTIME_CONTRACT_VERSION
         );
-        assert_eq!(row.reliability_classification, "observed");
-        assert_eq!(row.reliability_contract_version, 3);
+        assert_eq!(row.reliability_classification, "observed_episodes");
+        assert_eq!(row.reliability_contract_version, 4);
         let reliability: ReliabilityHistory = serde_json::from_str(&row.reliability_json)?;
         assert_eq!(reliability.stream_a.transport_up_seconds, 3200);
         assert_eq!(reliability.stream_a.delivery_down_seconds, 400);

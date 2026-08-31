@@ -452,6 +452,23 @@ struct AvailabilityState {
     client_recovery_ms: u64,
     last_reason: Option<ReconnectReason>,
     reason_counts: HashMap<String, u64>,
+    /// Independent counters: an outage is only counted on a
+    /// connected-to-disconnected transition.
+    outage_episodes: u64,
+    reconnect_attempts: u64,
+    idle_episodes: u64,
+    transport_recoveries: u64,
+    delivery_recoveries: u64,
+    /// Original boundary of the ongoing outage, preserved across attempts.
+    outage_boundary: Option<Instant>,
+    /// Cumulative transport recovery duration from outage boundary to handshake.
+    transport_recovery_ms: u64,
+    /// Cumulative delivery recovery duration from disruption to first record.
+    delivery_recovery_ms: u64,
+    /// True between a delivery-idle detection and the next useful record.
+    delivery_idle: bool,
+    /// True once transport has ever connected; initial failures keep unknown coverage.
+    ever_connected: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -465,6 +482,20 @@ pub struct AvailabilitySnapshot {
     pub client_recovery_ms: u64,
     pub last_reason: Option<ReconnectReason>,
     pub reason_counts: HashMap<String, u64>,
+    pub outage_episodes: u64,
+    pub reconnect_attempts: u64,
+    pub idle_episodes: u64,
+    pub transport_recoveries: u64,
+    pub delivery_recoveries: u64,
+    pub delivery_idle: bool,
+    /// Cumulative transport recovery duration (ms) across episodes.
+    pub transport_recovery_ms: u64,
+    /// Cumulative delivery recovery duration (ms) from disruption to record.
+    pub delivery_recovery_ms: u64,
+    /// Current outage duration in ms while a transport outage is ongoing.
+    pub outage_elapsed_ms: u64,
+    /// False until the first successful transport connection.
+    pub observation_coverage_known: bool,
 }
 
 impl AvailabilitySnapshot {
@@ -562,9 +593,18 @@ impl AvailabilityState {
                         .transport_down_seconds
                         .saturating_add(now.duration_since(start).as_secs());
                 }
+                // Transport recovery ends at handshake success, measured from
+                // the original outage boundary (never from a later attempt).
+                if let Some(boundary) = self.outage_boundary.take() {
+                    self.transport_recoveries = self.transport_recoveries.saturating_add(1);
+                    self.transport_recovery_ms = self
+                        .transport_recovery_ms
+                        .saturating_add(now.duration_since(boundary).as_millis() as u64);
+                }
                 self.transport_up_started = Some(now);
             }
             self.transport_connected = true;
+            self.ever_connected = true;
         } else {
             if self.transport_connected {
                 if let Some(start) = self.transport_up_started.take() {
@@ -572,6 +612,9 @@ impl AvailabilityState {
                         .transport_up_seconds
                         .saturating_add(now.duration_since(start).as_secs());
                 }
+                // An outage episode begins only on connected-to-disconnected.
+                self.outage_episodes = self.outage_episodes.saturating_add(1);
+                self.outage_boundary = Some(now);
             }
             self.transport_connected = false;
             if status.client_recovery {
@@ -579,22 +622,44 @@ impl AvailabilityState {
                 self.transport_down_started = None;
             } else {
                 self.transport_down_started.get_or_insert(now);
+                self.mark_delivery_down(now);
             }
         }
 
         if status.delivery_available {
             self.mark_delivery(now);
         } else if self.delivery_available {
+            self.mark_delivery_down(now);
+        }
+    }
+
+    /// Record a failed reconnect attempt without disturbing episode boundaries.
+    pub(super) fn record_reconnect_attempt(&mut self) {
+        self.reconnect_attempts = self.reconnect_attempts.saturating_add(1);
+    }
+
+    /// Record a delivery-idle detection on a heartbeat-responsive socket.
+    /// The disruption is measured from the last useful record.
+    pub(super) fn record_delivery_idle(&mut self, silence_ms: u64, now: Instant) {
+        if self.delivery_available {
+            self.mark_delivery_down(now);
+        }
+        self.delivery_idle = true;
+        self.idle_episodes = self.idle_episodes.saturating_add(1);
+        let _ = silence_ms;
+    }
+
+    fn mark_delivery_down(&mut self, now: Instant) {
+        self.delivery_idle = false;
+        if self.delivery_available {
             if let Some(start) = self.delivery_up_started.take() {
                 self.delivery_up_seconds = self
                     .delivery_up_seconds
                     .saturating_add(now.duration_since(start).as_secs());
             }
             self.delivery_available = false;
-            self.delivery_down_started.get_or_insert(now);
-        } else {
-            self.delivery_down_started.get_or_insert(now);
         }
+        self.delivery_down_started.get_or_insert(now);
     }
 
     fn mark_delivery(&mut self, now: Instant) {
@@ -603,9 +668,16 @@ impl AvailabilityState {
                 self.delivery_down_seconds = self
                     .delivery_down_seconds
                     .saturating_add(now.duration_since(start).as_secs());
+                // Delivery recovery is measured from the original disruption
+                // boundary to the first useful record.
+                self.delivery_recoveries = self.delivery_recoveries.saturating_add(1);
+                self.delivery_recovery_ms = self
+                    .delivery_recovery_ms
+                    .saturating_add(now.duration_since(start).as_millis() as u64);
             }
             self.delivery_up_started = Some(now);
         }
+        self.delivery_idle = false;
         self.delivery_available = true;
     }
 
@@ -645,6 +717,19 @@ impl AvailabilityState {
             client_recovery_ms,
             last_reason: self.last_reason,
             reason_counts: self.reason_counts.clone(),
+            outage_episodes: self.outage_episodes,
+            reconnect_attempts: self.reconnect_attempts,
+            idle_episodes: self.idle_episodes,
+            transport_recoveries: self.transport_recoveries,
+            delivery_recoveries: self.delivery_recoveries,
+            delivery_idle: self.delivery_idle,
+            transport_recovery_ms: self.transport_recovery_ms,
+            delivery_recovery_ms: self.delivery_recovery_ms,
+            outage_elapsed_ms: self
+                .outage_boundary
+                .map(|start| now.duration_since(start).as_millis() as u64)
+                .unwrap_or(0),
+            observation_coverage_known: self.ever_connected,
         }
     }
 }
@@ -945,6 +1030,38 @@ impl UptimeTracker {
             StreamId::Baseline1 => self.baseline_1.total_messages += 1,
             StreamId::Baseline2 => self.baseline_2.total_messages += 1,
         }
+    }
+
+    /// Independent reconnect-attempt counter; attempts never affect outage
+    /// episode boundaries or timestamps.
+    pub fn record_reconnect_attempt(&mut self, stream_id: StreamId) {
+        let now = Instant::now();
+        match stream_id {
+            StreamId::A => self.availability_a.record_reconnect_attempt(),
+            StreamId::B => self.availability_b.record_reconnect_attempt(),
+            StreamId::Baseline1 => self.baseline_1.availability.record_reconnect_attempt(),
+            StreamId::Baseline2 => self.baseline_2.availability.record_reconnect_attempt(),
+        }
+        self.refresh_comparison_epochs();
+    }
+
+    /// Delivery-idle detection: the disruption began at the last useful record
+    /// and was detected now. The connected socket is not closed.
+    pub fn record_delivery_idle(&mut self, stream_id: StreamId, silence_ms: u64) {
+        let now = Instant::now();
+        match stream_id {
+            StreamId::A => self.availability_a.record_delivery_idle(silence_ms, now),
+            StreamId::B => self.availability_b.record_delivery_idle(silence_ms, now),
+            StreamId::Baseline1 => self
+                .baseline_1
+                .availability
+                .record_delivery_idle(silence_ms, now),
+            StreamId::Baseline2 => self
+                .baseline_2
+                .availability
+                .record_delivery_idle(silence_ms, now),
+        }
+        self.refresh_comparison_epochs();
     }
 
     pub fn record_total_count(&mut self, stream_id: StreamId, total_count: u64) {
@@ -1947,5 +2064,183 @@ mod tests {
             Some(ReconnectReason::HandshakeFailure)
         );
         assert_eq!(availability.reason_counts.get("handshakefailure"), Some(&1));
+    }
+}
+
+#[cfg(test)]
+mod episode_tests {
+    use super::{
+        ComparisonIneligibilityReason, ReconnectReason, UptimeTracker,
+    };
+    use crate::stream::{ConnectionStatus, SourceEventObservation, StreamId, StreamMessage};
+    use std::time::Duration;
+
+    fn observed_message(stream_id: StreamId, source_time_us: u64, now_us: u64) -> StreamMessage {
+        StreamMessage {
+            stream_id,
+            count: 1,
+            delivery_latency_us: Some(now_us.saturating_sub(source_time_us)),
+            source_event: Some(SourceEventObservation {
+                source_time_us,
+                observed_at_us: now_us,
+                lag_us: now_us.saturating_sub(source_time_us),
+                clock_skew_us: 0,
+                source_event_id: Some(format!("event-{source_time_us}")),
+            }),
+        }
+    }
+
+    fn status_connected(stream_id: StreamId, connect_time_ms: u64) -> ConnectionStatus {
+        ConnectionStatus {
+            stream_id,
+            connected: true,
+            connected_at: None,
+            connect_time_ms: Some(connect_time_ms),
+            delivery_available: false,
+            reconnect_reason: None,
+            client_recovery: false,
+        }
+    }
+
+    fn status_lost(stream_id: StreamId, reason: ReconnectReason) -> ConnectionStatus {
+        ConnectionStatus {
+            stream_id,
+            connected: false,
+            connected_at: None,
+            connect_time_ms: None,
+            delivery_available: false,
+            reconnect_reason: Some(reason),
+            client_recovery: false,
+        }
+    }
+
+    #[test]
+    fn repeated_failures_within_one_outage_keep_one_episode() {
+        let mut tracker = UptimeTracker::new();
+        tracker.handle_connection_status(status_connected(StreamId::A, 5));
+        tracker.handle_connection_status(status_lost(StreamId::A, ReconnectReason::SocketRead));
+        // Three failed reconnect attempts: episodes must not increase.
+        tracker.record_reconnect_attempt(StreamId::A);
+        tracker.record_reconnect_attempt(StreamId::A);
+        tracker.record_reconnect_attempt(StreamId::A);
+        std::thread::sleep(Duration::from_millis(2));
+        tracker.handle_connection_status(status_connected(StreamId::A, 6));
+
+        let availability = tracker.availability_snapshot(StreamId::A);
+        assert_eq!(availability.outage_episodes, 1);
+        assert_eq!(availability.reconnect_attempts, 3);
+        assert_eq!(availability.transport_recoveries, 1);
+        assert!(availability.transport_recovery_ms >= 1);
+        assert!(availability.observation_coverage_known);
+    }
+
+    #[test]
+    fn initial_failures_remain_unknown_coverage_without_invented_outage() {
+        let mut tracker = UptimeTracker::new();
+        tracker.record_reconnect_attempt(StreamId::B);
+        tracker.record_reconnect_attempt(StreamId::B);
+
+        let availability = tracker.availability_snapshot(StreamId::B);
+        assert_eq!(availability.reconnect_attempts, 2);
+        assert_eq!(availability.outage_episodes, 0, "no prior session means no outage");
+        assert_eq!(availability.transport_recovery_ms, 0);
+        assert!(!availability.observation_coverage_known);
+
+        // When the first connection eventually succeeds, coverage starts.
+        tracker.handle_connection_status(status_connected(StreamId::B, 3));
+        assert!(tracker.availability_snapshot(StreamId::B).observation_coverage_known);
+    }
+
+    #[test]
+    fn transport_recovery_can_precede_delivery_recovery() {
+        let mut tracker = UptimeTracker::new();
+        tracker.handle_connection_status(status_connected(StreamId::A, 1));
+        tracker.record_total_count(StreamId::A, 1);
+
+        // Transport fails, then reconnects, but records do not resume yet.
+        tracker.handle_connection_status(status_lost(StreamId::A, ReconnectReason::PeerClose));
+        std::thread::sleep(Duration::from_millis(2));
+        tracker.handle_connection_status(ConnectionStatus {
+            stream_id: StreamId::A,
+            connected: true,
+            connected_at: None,
+            connect_time_ms: Some(4),
+            delivery_available: false,
+            reconnect_reason: None,
+            client_recovery: false,
+        });
+
+        let after_transport = tracker.availability_snapshot(StreamId::A);
+        assert_eq!(after_transport.outage_episodes, 1);
+        assert!(after_transport.transport_connected);
+        assert!(!after_transport.delivery_available,
+            "transport recovered while delivery remains unavailable");
+
+        // First useful record completes delivery recovery.
+        std::thread::sleep(Duration::from_millis(2));
+        tracker.record_total_count(StreamId::A, 2);
+        let after_delivery = tracker.availability_snapshot(StreamId::A);
+        assert!(after_delivery.delivery_available);
+        assert!(after_delivery.delivery_recovery_ms > after_transport.transport_recovery_ms.min(1) ||
+                after_delivery.delivery_recovery_ms >= 1);
+        assert!(after_delivery.transport_connected);
+    }
+
+    #[test]
+    fn heartbeat_responsive_idle_ends_epoch_and_delivery_recovery_restarts_it() {
+        let mut tracker = UptimeTracker::with_event_time_thresholds(
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+        );
+        tracker.handle_connection_status(status_connected(StreamId::A, 1));
+        tracker.handle_connection_status(status_connected(StreamId::B, 1));
+        let now_us = chrono::Utc::now().timestamp_micros() as u64;
+        tracker.record_stream_message(&observed_message(StreamId::A, now_us - 1_000, now_us));
+        tracker.record_stream_message(&observed_message(StreamId::B, now_us - 1_000, now_us));
+        let first_epoch = tracker.pairwise_comparisons().primary.epoch_id;
+
+        // Stream A turns connected-but-idle: comparison must end even though
+        // transport stays connected.
+        tracker.record_delivery_idle(StreamId::A, 30_000);
+        let comparison = tracker.pairwise_comparisons().primary;
+        assert!(!comparison.eligible);
+        assert!(matches!(
+            comparison.reason,
+            Some(super::ComparisonIneligibilityReason::IdleDelivery)
+        ));
+        assert!(tracker
+            .availability_snapshot(StreamId::A)
+            .transport_connected);
+
+        // Delivery recovery opens a fresh epoch.
+        let now_us = chrono::Utc::now().timestamp_micros() as u64;
+        tracker.record_stream_message(&observed_message(StreamId::A, now_us - 1_000, now_us));
+        let after = tracker.pairwise_comparisons().primary;
+        assert!(after.epoch_id > first_epoch, "fresh epoch after recovery");
+    }
+
+    #[test]
+    fn same_socket_idle_recovery_records_zero_transport_outages() {
+        let mut tracker = UptimeTracker::new();
+        tracker.handle_connection_status(status_connected(StreamId::A, 1));
+        tracker.record_total_count(StreamId::A, 1);
+
+        tracker.record_delivery_idle(StreamId::A, 30_000);
+        let mid = tracker.availability_snapshot(StreamId::A);
+        assert!(mid.transport_connected);
+        assert!(!mid.delivery_available);
+        assert!(mid.delivery_idle);
+        assert_eq!(mid.idle_episodes, 1);
+
+        // Useful record returns on the same socket.
+        std::thread::sleep(Duration::from_millis(2));
+        tracker.record_total_count(StreamId::A, 2);
+        let after = tracker.availability_snapshot(StreamId::A);
+        assert_eq!(after.outage_episodes, 0, "idle episode creates zero outages");
+        assert_eq!(after.transport_recoveries, 0);
+        assert_eq!(after.idle_episodes, 1);
+        assert!(after.transport_recovery_ms == 0);
+        assert!(after.delivery_available);
     }
 }

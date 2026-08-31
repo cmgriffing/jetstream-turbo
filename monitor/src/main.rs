@@ -2,6 +2,7 @@ use anyhow::Result;
 use jetstream_monitor::{
     config::Settings,
     diagnostics::DiagnosticLogger,
+    incidents::{IncidentStore, MonitorIdentity},
     stats::{
         comparison_eligibility, AvailabilitySnapshot, ObservationConfig, StatsAggregator,
         StreamStatsInternal, UptimeDetailedStats, UptimeMetricsSnapshot, UptimeTracker,
@@ -10,14 +11,22 @@ use jetstream_monitor::{
         AvailabilityHistory, EventTimeHistory, HourlyStat, HourlyUptime, ReliabilityHistory,
         Storage, UptimeResponse,
     },
-    stream::{StreamClient, StreamId},
+    stream::{
+        BackoffPolicy, Effect, IncidentCommand, StreamClient, StreamEvent, StreamId,
+        TransitionProcessor,
+    },
+    telemetry::Metrics,
     websocket,
 };
+use jetstream_monitor::incidents::LedgerHealth;
+use jetstream_monitor::incidents::IncidentId;
+#[allow(unused_imports)]
+use jetstream_monitor::incidents::IncidentEventType as _IE_unused;
 use std::{sync::Arc, time::Duration};
 
 const HOURLY_INTERVAL_SECONDS: u64 = 3600;
 const HOURLY_INTERVAL_SECONDS_I64: i64 = 3600;
-const HOURLY_UPTIME_CONTRACT_VERSION: i64 = 3;
+const HOURLY_UPTIME_CONTRACT_VERSION: i64 = 4;
 const BASELINE_1_URL: &str =
     "wss://jetstream.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post";
 const BASELINE_2_URL: &str =
@@ -102,7 +111,23 @@ fn availability_interval(
         ),
         reconnect_reasons,
         client_recovery_ms: delta_counter(current.client_recovery_ms, previous.client_recovery_ms),
-        coverage: "observed".to_string(),
+        coverage: if current.observation_coverage_known {
+            "observed".to_string()
+        } else {
+            "unknown".to_string()
+        },
+        outage_episodes: delta_counter(current.outage_episodes, previous.outage_episodes),
+        reconnect_attempts: delta_counter(current.reconnect_attempts, previous.reconnect_attempts),
+        idle_episodes: delta_counter(current.idle_episodes, previous.idle_episodes),
+        transport_recoveries: delta_counter(current.transport_recoveries, previous.transport_recoveries),
+        delivery_recoveries: delta_counter(
+            current.delivery_recoveries,
+            previous.delivery_recoveries,
+        ),
+        delivery_recovery_ms: delta_counter(
+            current.delivery_recovery_ms,
+            previous.delivery_recovery_ms,
+        ),
     }
 }
 
@@ -241,6 +266,7 @@ async fn main() -> Result<()> {
         lifetime_a,
         lifetime_b
     );
+    let storage_arc = Arc::new(storage);
 
     let stats_internal = Arc::new(std::sync::RwLock::new(StreamStatsInternal::default()));
     stats_internal
@@ -276,83 +302,237 @@ async fn main() -> Result<()> {
 
     let stream_idle_timeout = Duration::from_secs(settings.stream_idle_timeout_seconds.max(1));
     let connect_timeout = Duration::from_secs(settings.connection_timeout_seconds.max(1));
+    let heartbeat_interval = Duration::from_secs(settings.heartbeat_interval_seconds.max(1));
+    let liveness_deadline = Duration::from_secs(settings.transport_liveness_deadline_seconds.max(1));
+    let backoff = BackoffPolicy::new(
+        Duration::from_secs(settings.reconnect_backoff_min_seconds.max(1)),
+        Duration::from_secs(settings.reconnect_backoff_max_seconds.max(1)),
+    );
 
     let diagnostics = Arc::new(DiagnosticLogger::new(
         settings.diagnostics_log_path.clone(),
         settings.diagnostics_log_max_bytes,
     ));
+    let _diagnostics = diagnostics;
 
     let client_a = StreamClient::new(settings.stream_a_url.clone(), StreamId::A)
         .with_idle_timeout(stream_idle_timeout)
+        .with_heartbeat_interval(heartbeat_interval)
+        .with_liveness_deadline(liveness_deadline)
         .with_connect_timeout(connect_timeout)
-        .with_diagnostics(Arc::clone(&diagnostics));
+        .with_backoff_policy(backoff);
     let client_b = StreamClient::new(settings.stream_b_url.clone(), StreamId::B)
         .with_idle_timeout(stream_idle_timeout)
+        .with_heartbeat_interval(heartbeat_interval)
+        .with_liveness_deadline(liveness_deadline)
         .with_connect_timeout(connect_timeout)
-        .with_diagnostics(Arc::clone(&diagnostics));
+        .with_backoff_policy(backoff);
     let client_baseline_1 = StreamClient::new(BASELINE_1_URL.to_string(), StreamId::Baseline1)
         .with_idle_timeout(stream_idle_timeout)
+        .with_heartbeat_interval(heartbeat_interval)
+        .with_liveness_deadline(liveness_deadline)
         .with_connect_timeout(connect_timeout)
-        .with_diagnostics(Arc::clone(&diagnostics));
+        .with_backoff_policy(backoff);
     let client_baseline_2 = StreamClient::new(BASELINE_2_URL.to_string(), StreamId::Baseline2)
         .with_idle_timeout(stream_idle_timeout)
+        .with_heartbeat_interval(heartbeat_interval)
+        .with_liveness_deadline(liveness_deadline)
         .with_connect_timeout(connect_timeout)
-        .with_diagnostics(Arc::clone(&diagnostics));
+        .with_backoff_policy(backoff);
+
+    // Process identity, metrics, and the durable incident ledger.
+    let monitor_identity = MonitorIdentity {
+        process_epoch: IncidentId::generate().as_str().to_string(),
+        release: settings.monitor_release.clone(),
+    };
+    let metrics = Arc::new(Metrics::new(monitor_identity.process_epoch.clone()));
+    let incident_store = Arc::new(
+        IncidentStore::new(storage_arc.pool().clone())
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!("Failed to initialize incident ledger storage: {}", e);
+                std::process::exit(1);
+            }),
+    );
+
+    // Reconcile incidents left open by a previous process before observing.
+    match incident_store
+        .reconcile_open_incidents(&monitor_identity, chrono::Utc::now())
+        .await
+    {
+        Ok(n) if n > 0 => tracing::warn!("Marked {} inherited open incidents incomplete", n),
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!("Failed to reconcile open incidents at startup: {}", e);
+            metrics.record_incident_storage_failure();
+        }
+    }
+
+    let ledger_health = Arc::new(LedgerHealth::default());
+    let (incident_tx, mut incident_rx) = tokio::sync::mpsc::unbounded_channel::<IncidentCommand>();
+    {
+        let store = Arc::clone(&incident_store);
+        let identity = monitor_identity.clone();
+        let metrics = Arc::clone(&metrics);
+        let health = Arc::clone(&ledger_health);
+        tokio::spawn(async move {
+            while let Some(command) = incident_rx.recv().await {
+                if let Err(error) = apply_incident_command(&store, &command, &identity).await {
+                    health.record_failure(chrono::Utc::now());
+                    metrics.record_incident_storage_failure();
+                    tracing::error!(
+                        target: "monitor::ledger",
+                        error = %error,
+                        operation = command.name(),
+                        "incident persistence failed"
+                    );
+                } else {
+                    health.record_success(chrono::Utc::now());
+                }
+            }
+        });
+    }
+
+    // Periodic retention cleanup for terminal-state incidents.
+    {
+        let store = Arc::clone(&incident_store);
+        let retention_days = settings.incident_retention_days.max(1);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                interval.tick().await;
+                match store.retention_cleanup(retention_days).await {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(target: "monitor::ledger", removed = n, "retention cleanup removed expired incidents")
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::error!(target: "monitor::ledger", error = %error, "retention cleanup failed")
+                    }
+                }
+            }
+        });
+    }
 
     let stats_for_stream = Arc::clone(&stats_internal);
     let uptime_for_status: Arc<std::sync::RwLock<UptimeTracker>> = Arc::clone(&uptime_tracker);
     tokio::spawn(async move {
         use futures::StreamExt;
-        let (mut stream_a, mut status_a) = client_a.stream_with_status();
-        let (mut stream_b, mut status_b) = client_b.stream_with_status();
-        let (mut stream_b1, mut status_b1) = client_baseline_1.stream_with_status();
-        let (mut stream_b2, mut status_b2) = client_baseline_2.stream_with_status();
+        let mut stream_a = Box::pin(client_a.stream());
+        let mut stream_b = Box::pin(client_b.stream());
+        let mut stream_b1 = Box::pin(client_baseline_1.stream());
+        let mut stream_b2 = Box::pin(client_baseline_2.stream());
+
+        let mut processors = [
+            TransitionProcessor::new(StreamId::A),
+            TransitionProcessor::new(StreamId::B),
+            TransitionProcessor::new(StreamId::Baseline1),
+            TransitionProcessor::new(StreamId::Baseline2),
+        ];
+
+        async fn apply_stream_event(
+            index: usize,
+            event: StreamEvent,
+            processors: &mut [TransitionProcessor; 4],
+            uptime: &std::sync::RwLock<UptimeTracker>,
+            stats_internal: &std::sync::RwLock<StreamStatsInternal>,
+            incident_tx: &tokio::sync::mpsc::UnboundedSender<IncidentCommand>,
+            metrics: &Metrics,
+        ) {
+            let wall_now = chrono::Utc::now();
+            let stream_of_index = processors[index].stream_id();
+            let status_stream_id = processors[index].stream_id();
+            let effects = processors[index].process(event, wall_now);
+            for effect in effects {
+                match effect {
+                    Effect::ConnectionStatus(status) => {
+                        uptime.write().unwrap().handle_connection_status(status);
+                    }
+                    Effect::Record(record) => {
+                        metrics.record_useful_record();
+                        let delivery_latency_us = record.delivery_latency_us;
+                        uptime.write().unwrap().record_stream_message(&record);
+                        match record.stream_id {
+                            StreamId::A | StreamId::B => {
+                                if let Some(lat) = delivery_latency_us {
+                                    uptime
+                                        .write()
+                                        .unwrap()
+                                        .record_delivery_latency(record.stream_id, lat);
+                                }
+                                stats_internal.write().unwrap().update(record);
+                            }
+                            StreamId::Baseline1 | StreamId::Baseline2 => {}
+                        }
+                    }
+                    Effect::Incident(command) => {
+                        let _ = incident_tx.send(command);
+                    }
+                    Effect::OutageStarted => metrics.record_transport_outage(),
+                    Effect::AttemptFailed { .. } => {
+                        metrics.record_reconnect_attempt();
+                        uptime.write().unwrap().record_reconnect_attempt(status_stream_id);
+                    }
+                    Effect::IdleEpisode { silence_ms } => {
+                        metrics.record_idle_episode();
+                        uptime
+                            .write()
+                            .unwrap()
+                            .record_delivery_idle(stream_of_index, silence_ms);
+                    }
+                }
+            }
+            metrics.set_transport_state(
+                processors[index].stream_id(),
+                processors[index].transport_state(),
+            );
+            metrics.set_delivery_state(
+                processors[index].stream_id(),
+                processors[index].delivery_state(),
+            );
+        }
 
         loop {
             tokio::select! {
-                Some(msg) = stream_a.next() => {
-                    let delivery_latency_us = msg.delivery_latency_us;
-                    let mut tracker = uptime_for_status.write().unwrap();
-                    tracker.record_stream_message(&msg);
-                    if let Some(lat) = delivery_latency_us {
-                        tracker.record_delivery_latency(StreamId::A, lat);
-                    }
-                    drop(tracker);
-                    stats_for_stream.write().unwrap().update(msg);
+                Some(event) = stream_a.next() => {
+                    apply_stream_event(0,
+                        event,
+                        &mut processors,
+                        &uptime_for_status,
+                        &stats_for_stream,
+                        &incident_tx,
+                        &metrics,
+                    ).await;
                 }
-                Some(msg) = stream_b.next() => {
-                    let delivery_latency_us = msg.delivery_latency_us;
-                    let mut tracker = uptime_for_status.write().unwrap();
-                    tracker.record_stream_message(&msg);
-                    if let Some(lat) = delivery_latency_us {
-                        tracker.record_delivery_latency(StreamId::B, lat);
-                    }
-                    drop(tracker);
-                    stats_for_stream.write().unwrap().update(msg);
+                Some(event) = stream_b.next() => {
+                    apply_stream_event(1,
+                        event,
+                        &mut processors,
+                        &uptime_for_status,
+                        &stats_for_stream,
+                        &incident_tx,
+                        &metrics,
+                    ).await;
                 }
-                Some(msg) = stream_b1.next() => {
-                    uptime_for_status
-                        .write()
-                        .unwrap()
-                        .record_stream_message(&msg);
+                Some(event) = stream_b1.next() => {
+                    apply_stream_event(2,
+                        event,
+                        &mut processors,
+                        &uptime_for_status,
+                        &stats_for_stream,
+                        &incident_tx,
+                        &metrics,
+                    ).await;
                 }
-                Some(msg) = stream_b2.next() => {
-                    uptime_for_status
-                        .write()
-                        .unwrap()
-                        .record_stream_message(&msg);
-                }
-                Some(status) = status_a.next() => {
-                    uptime_for_status.write().unwrap().handle_connection_status(status);
-                }
-                Some(status) = status_b.next() => {
-                    uptime_for_status.write().unwrap().handle_connection_status(status);
-                }
-                Some(status) = status_b1.next() => {
-                    uptime_for_status.write().unwrap().handle_connection_status(status);
-                }
-                Some(status) = status_b2.next() => {
-                    uptime_for_status.write().unwrap().handle_connection_status(status);
+                Some(event) = stream_b2.next() => {
+                    apply_stream_event(3,
+                        event,
+                        &mut processors,
+                        &uptime_for_status,
+                        &stats_for_stream,
+                        &incident_tx,
+                        &metrics,
+                    ).await;
                 }
                 else => break,
             }
@@ -363,7 +543,6 @@ async fn main() -> Result<()> {
 
     let stats_for_storage = Arc::clone(&stats_internal);
     let uptime_for_storage: Arc<std::sync::RwLock<UptimeTracker>> = Arc::clone(&uptime_tracker);
-    let storage_arc = Arc::new(storage);
     let storage_for_api = Arc::clone(&storage_arc);
     let uptime_for_api: Arc<std::sync::RwLock<UptimeTracker>> = Arc::clone(&uptime_tracker);
     tokio::spawn(async move {
@@ -450,6 +629,14 @@ async fn main() -> Result<()> {
                         interval_metrics.baseline_2_downtime_seconds,
                         interval_metrics.baseline_1_messages,
                         interval_metrics.baseline_2_messages,
+                        current_availability.0.outage_episodes
+                            .saturating_sub(previous_availability.0.outage_episodes),
+                        current_availability.1.outage_episodes
+                            .saturating_sub(previous_availability.1.outage_episodes),
+                        current_availability.0.reconnect_attempts
+                            .saturating_sub(previous_availability.0.reconnect_attempts),
+                        current_availability.1.reconnect_attempts
+                            .saturating_sub(previous_availability.1.reconnect_attempts),
                         HOURLY_UPTIME_CONTRACT_VERSION,
                     )
                     .await
@@ -602,6 +789,58 @@ async fn main() -> Result<()> {
 
     axum::serve(listener, app).await?;
 
+    Ok(())
+}
+
+/// Apply one ordered incident command to the durable store.
+async fn apply_incident_command(
+    store: &IncidentStore,
+    command: &IncidentCommand,
+    identity: &MonitorIdentity,
+) -> anyhow::Result<()> {
+    match command {
+        IncidentCommand::Open {
+            incident_id,
+            stream,
+            trigger,
+            detected_at,
+            last_useful_record_at,
+            connection_epoch,
+        } => {
+            store
+                .open_incident(
+                    incident_id,
+                    stream,
+                    *trigger,
+                    *detected_at,
+                    *last_useful_record_at,
+                    *connection_epoch,
+                    identity,
+                )
+                .await?;
+        }
+        IncidentCommand::AppendEvent { incident_id, event } => {
+            store.append_event(incident_id, event.clone()).await?;
+        }
+        IncidentCommand::TransportRecovered {
+            incident_id,
+            recovered_at,
+        } => {
+            store
+                .record_transport_recovered(incident_id, *recovered_at)
+                .await?;
+        }
+        IncidentCommand::Resolve {
+            incident_id,
+            resolved_at,
+        } => {
+            store.resolve_incident(incident_id, *resolved_at).await?;
+        }
+        IncidentCommand::ReconcileOpen { .. } => {
+            // Startup reconciliation runs directly, not through the queue.
+            let _ = identity;
+        }
+    }
     Ok(())
 }
 

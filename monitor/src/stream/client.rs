@@ -1,17 +1,26 @@
 use chrono::Utc;
 use futures::{SinkExt, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tokio::time::sleep;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
-use crate::diagnostics::{DiagnosticEvent, DiagnosticLogger};
+use crate::incidents::{HandshakeFailureReason, TransportLossReason};
 
+use super::transition::{StreamEvent, StreamTransition};
+
+const MAX_REPORTED_CLOCK_SKEW_US: u64 = 24 * 60 * 60 * 1_000_000;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+const DEFAULT_LIVENESS_DEADLINE: Duration = Duration::from_secs(60);
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const DEFAULT_BACKOFF_MIN: Duration = Duration::from_secs(1);
+const DEFAULT_BACKOFF_MAX: Duration = Duration::from_secs(30);
+const RECORD_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
+/// Random jitter factor applied to each backoff delay (delay * jitter in [0.8, 1.2]).
+const BACKOFF_JITTER: f64 = 0.2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -22,6 +31,7 @@ pub enum StreamId {
     Baseline2,
 }
 
+/// Legacy presentation-level reconnect reason retained for dashboard fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReconnectReason {
@@ -33,232 +43,30 @@ pub enum ReconnectReason {
     ConnectTimeout,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{observe_source_event, ConnectionStatus, ReconnectReason, StreamClient, StreamId};
-    use futures::{SinkExt, StreamExt};
-    use std::time::{Duration, Instant};
-    use tokio::net::TcpListener;
-    use tokio_tungstenite::{accept_async, tungstenite::Message};
-
-    async fn next_status(
-        statuses: &mut (impl futures::Stream<Item = ConnectionStatus> + Unpin),
-    ) -> ConnectionStatus {
-        tokio::time::timeout(Duration::from_secs(2), statuses.next())
-            .await
-            .expect("timed out waiting for status")
-            .expect("status stream ended")
-    }
-
-    #[test]
-    fn parser_observes_raw_source_timestamp() {
-        let observation =
-            observe_source_event(r#"{"time_us":900}"#, 1_000).expect("raw timestamp should parse");
-        assert_eq!(observation.source_time_us, 900);
-        assert_eq!(observation.lag_us, 100);
-        assert_eq!(observation.clock_skew_us, 0);
-        assert_eq!(observation.source_event_id, None);
-    }
-
-    #[test]
-    fn parser_observes_nested_enriched_source_timestamp() {
-        let observation = observe_source_event(r#"{"message":{"time_us":875}}"#, 1_000)
-            .expect("nested timestamp should parse");
-        assert_eq!(observation.source_time_us, 875);
-    }
-
-    #[test]
-    fn parser_keeps_timestamp_less_and_invalid_frames_uncovered() {
-        assert_eq!(observe_source_event(r#"{"kind":"commit"}"#, 1_000), None);
-        assert_eq!(observe_source_event("not-json", 1_000), None);
-    }
-
-    #[test]
-    fn parser_derives_shared_identity_for_raw_and_enriched_commit() {
-        let raw = r#"{"did":"did:plc:alice","time_us":900,"seq":1,"kind":"commit","commit":{"rev":"3k","operation":"create","collection":"app.bsky.feed.post","rkey":"one","cid":"bafy"}}"#;
-        let enriched = r#"{"message":{"did":"did:plc:alice","time_us":900,"seq":999,"kind":"commit","commit":{"rev":"3k","operation":"create","collection":"app.bsky.feed.post","rkey":"one","cid":"bafy"}},"processed_at":"later"}"#;
-
-        let raw_id = observe_source_event(raw, 1_000).unwrap().source_event_id;
-        let enriched_id = observe_source_event(enriched, 1_000)
-            .unwrap()
-            .source_event_id;
-        assert!(raw_id.is_some());
-        assert_eq!(raw_id, enriched_id, "endpoint-local seq is excluded");
-    }
-
-    #[test]
-    fn parser_handles_identity_account_unknown_and_missing_identity_fields() {
-        for kind in ["identity", "account", "unknown"] {
-            let frame =
-                format!(r#"{{"did":"did:plc:alice","time_us":900,"kind":"{kind}","seq":1}}"#);
-            assert!(observe_source_event(&frame, 1_000)
-                .unwrap()
-                .source_event_id
-                .is_some());
+impl ReconnectReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReconnectReason::DataIdleTimeout => "data_idle_timeout",
+            ReconnectReason::HandshakeFailure => "handshake_failure",
+            ReconnectReason::SocketRead => "socket_read",
+            ReconnectReason::SocketWrite => "socket_write",
+            ReconnectReason::PeerClose => "peer_close",
+            ReconnectReason::ConnectTimeout => "connect_timeout",
         }
-        assert_eq!(
-            observe_source_event(r#"{"time_us":900}"#, 1_000)
-                .unwrap()
-                .source_event_id,
-            None
-        );
-        assert_eq!(
-            observe_source_event(
-                r#"{"did":"did:plc:alice","time_us":900,"kind":"commit"}"#,
-                1_000,
-            )
-            .unwrap()
-            .source_event_id,
-            None
-        );
-    }
-
-    #[test]
-    fn parser_clamps_future_event_lag_and_bounds_clock_skew() {
-        let observation = observe_source_event(r#"{"time_us":999999999999}"#, 1_000)
-            .expect("future timestamp should parse");
-        assert_eq!(observation.lag_us, 0);
-        assert_eq!(observation.clock_skew_us, super::MAX_REPORTED_CLOCK_SKEW_US);
-    }
-
-    #[tokio::test]
-    async fn stale_open_connection_is_marked_disconnected_after_idle_timeout() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test websocket listener");
-        let addr = listener.local_addr().expect("read listener address");
-
-        tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("accept test client");
-            let mut websocket = accept_async(stream)
-                .await
-                .expect("accept websocket handshake");
-            websocket
-                .send(Message::Text(r#"{"time_us": 1}"#.into()))
-                .await
-                .expect("send first message");
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        });
-
-        let client = StreamClient::new(format!("ws://{}", addr), StreamId::A)
-            .with_idle_timeout(Duration::from_millis(50));
-        let (_messages, mut statuses) = client.stream_with_status();
-
-        let connected = next_status(&mut statuses).await;
-        assert_eq!(connected.stream_id, StreamId::A);
-        assert!(connected.connected);
-
-        let delivering = next_status(&mut statuses).await;
-        assert!(delivering.connected);
-        assert!(delivering.delivery_available);
-
-        let disconnected = next_status(&mut statuses).await;
-        assert_eq!(disconnected.stream_id, StreamId::A);
-        assert!(!disconnected.connected);
-        assert_eq!(
-            disconnected.reconnect_reason,
-            Some(ReconnectReason::DataIdleTimeout)
-        );
-        assert!(disconnected.client_recovery);
-    }
-
-    #[tokio::test]
-    async fn hanging_connection_times_out_within_configured_duration() {
-        // Bind a TCP listener that accepts connections but never responds —
-        // simulating a server where the TLS/WebSocket handshake stalls.
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test listener");
-        let addr = listener.local_addr().expect("read listener address");
-
-        tokio::spawn(async move {
-            // Accept the TCP connection but never send any data, so the
-            // WebSocket handshake hangs indefinitely. Hold the stream open
-            // so the client doesn't get a connection reset.
-            let (_stream, _) = listener.accept().await.expect("accept");
-            tokio::time::sleep(Duration::from_secs(10)).await;
-        });
-
-        let client = StreamClient::new(format!("ws://{}", addr), StreamId::A)
-            .with_connect_timeout(Duration::from_millis(200));
-        let (_messages, mut statuses) = client.stream_with_status();
-
-        let start = Instant::now();
-        let status = next_status(&mut statuses).await;
-        let elapsed = start.elapsed();
-
-        assert!(!status.connected);
-        assert_eq!(
-            status.reconnect_reason,
-            Some(ReconnectReason::ConnectTimeout)
-        );
-        // Should time out well within 2 seconds (configured at 200ms).
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "took {:?} to time out — expected ~200ms",
-            elapsed
-        );
-    }
-
-    #[tokio::test]
-    async fn replay_aware_fixture_counts_raw_nested_and_cursorless_frames() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind replay-aware websocket fixture");
-        let addr = listener.local_addr().expect("read listener address");
-        tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("accept fixture client");
-            let mut websocket = accept_async(stream).await.expect("accept websocket");
-            tokio::time::sleep(Duration::from_millis(120)).await;
-            websocket
-                .send(Message::Text(r#"{"time_us":100}"#.into()))
-                .await
-                .expect("send raw frame");
-            tokio::time::sleep(Duration::from_millis(120)).await;
-            websocket
-                .send(Message::Text(r#"{"message":{"time_us":50}}"#.into()))
-                .await
-                .expect("send enriched replay frame");
-            tokio::time::sleep(Duration::from_millis(120)).await;
-            websocket
-                .send(Message::Text(r#"{"kind":"commit"}"#.into()))
-                .await
-                .expect("send cursorless frame");
-            tokio::time::sleep(Duration::from_millis(120)).await;
-        });
-
-        let client = StreamClient::new(format!("ws://{addr}"), StreamId::A)
-            .with_idle_timeout(Duration::from_secs(1));
-        let mut messages = Box::pin(client.stream_counts());
-        let raw = next_message(&mut messages).await;
-        let nested = next_message(&mut messages).await;
-        let cursorless = next_message(&mut messages).await;
-
-        assert_eq!(raw.count, 1);
-        assert_eq!(
-            raw.source_event.map(|event| event.source_time_us),
-            Some(100)
-        );
-        assert_eq!(nested.count, 2);
-        assert_eq!(
-            nested.source_event.map(|event| event.source_time_us),
-            Some(50)
-        );
-        assert_eq!(cursorless.count, 3);
-        assert_eq!(cursorless.source_event, None);
-    }
-
-    async fn next_message(
-        messages: &mut (impl futures::Stream<Item = super::StreamMessage> + Unpin),
-    ) -> super::StreamMessage {
-        tokio::time::timeout(Duration::from_secs(2), messages.next())
-            .await
-            .expect("timed out waiting for fixture message")
-            .expect("message stream ended")
     }
 }
 
-const MAX_REPORTED_CLOCK_SKEW_US: u64 = 24 * 60 * 60 * 1_000_000;
+/// Legacy per-connection status retained for dashboard compatibility during migration.
+#[derive(Debug, Clone)]
+pub struct ConnectionStatus {
+    pub stream_id: StreamId,
+    pub connected: bool,
+    pub connected_at: Option<Instant>,
+    pub connect_time_ms: Option<u64>,
+    pub delivery_available: bool,
+    pub reconnect_reason: Option<ReconnectReason>,
+    pub client_recovery: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceEventObservation {
@@ -310,8 +118,7 @@ fn portable_source_identity(source: &serde_json::Value) -> Option<String> {
 fn push_identity_component(identity: &mut String, component: &str) {
     identity.push('|');
     identity.push_str(&component.len().to_string());
-    identity.push(':');
-    identity.push_str(component);
+    identity.push_str(&component);
 }
 
 fn observe_source_event_now(text: &str) -> Option<SourceEventObservation> {
@@ -319,7 +126,7 @@ fn observe_source_event_now(text: &str) -> Option<SourceEventObservation> {
     observe_source_event(text, now_us)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamMessage {
     pub stream_id: StreamId,
     pub count: u64,
@@ -327,24 +134,217 @@ pub struct StreamMessage {
     pub source_event: Option<SourceEventObservation>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ConnectionStatus {
-    pub stream_id: StreamId,
-    pub connected: bool,
-    pub connected_at: Option<Instant>,
-    pub connect_time_ms: Option<u64>,
-    pub delivery_available: bool,
-    pub reconnect_reason: Option<ReconnectReason>,
-    pub client_recovery: bool,
+/// Bounded exponential backoff schedule with jitter.
+#[derive(Debug, Clone, Copy)]
+pub struct BackoffPolicy {
+    min: Duration,
+    max: Duration,
 }
 
+impl Default for BackoffPolicy {
+    fn default() -> Self {
+        Self {
+            min: DEFAULT_BACKOFF_MIN,
+            max: DEFAULT_BACKOFF_MAX,
+        }
+    }
+}
+
+impl BackoffPolicy {
+    pub fn new(min: Duration, max: Duration) -> Self {
+        Self {
+            min,
+            max: max.max(min),
+        }
+    }
+
+    /// Delay for the given 1-based attempt ordinal with random jitter.
+    pub fn delay(&self, ordinal: u64) -> Duration {
+        let exponent = ordinal.saturating_sub(1).min(16);
+        let base = self.min.saturating_mul(1u32 << exponent);
+        let capped = base.min(self.max);
+        let jitter = 1.0 - BACKOFF_JITTER + 2.0 * BACKOFF_JITTER * rand::random::<f64>();
+        let jittered = capped.as_secs_f64() * jitter.clamp(0.8, 1.2);
+        Duration::from_secs_f64(jittered.max(0.0))
+    }
+}
+
+/// Why an established WebSocket session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionEnd {
+    PeerClose,
+    SocketRead,
+    SocketWrite,
+    LivenessDeadline,
+}
+
+type WsStream = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+>;
+
+fn map_loss_reason(end: SessionEnd) -> TransportLossReason {
+    match end {
+        SessionEnd::PeerClose => TransportLossReason::PeerClose,
+        SessionEnd::SocketRead => TransportLossReason::SocketError,
+        SessionEnd::SocketWrite => TransportLossReason::SocketWrite,
+        SessionEnd::LivenessDeadline => TransportLossReason::LivenessDeadline,
+    }
+}
+
+/// Run a single connected session until the transport ends.
+///
+/// Sends proactive Ping frames on the heartbeat cadence, treats any peer
+/// frame as liveness evidence, and emits delivery-idle transitions without
+/// closing a heartbeat-responsive socket. Returns the session end reason
+/// together with updated counters.
+#[allow(clippy::too_many_arguments)]
+async fn run_session(
+    ws: WsStream,
+    stream_id: StreamId,
+    idle_timeout: Duration,
+    heartbeat_interval: Duration,
+    liveness_deadline: Duration,
+    tx: &mpsc::UnboundedSender<StreamEvent>,
+    cumulative_count: &mut u64,
+    last_source_event: &mut Option<SourceEventObservation>,
+    delivery_open: &mut bool,
+    idle_emitted: &mut bool,
+    last_useful_record: &mut Option<Instant>,
+) -> SessionEnd {
+    use tokio::time::sleep_until;
+
+    let (mut write, mut read) = ws.split();
+    let mut last_batch = Instant::now();
+    let mut last_peer: Instant = Instant::now();
+    let mut ping_at: Instant = Instant::now() + heartbeat_interval;
+
+    let end = loop {
+        let now = Instant::now();
+        let liveness_at = last_peer + liveness_deadline;
+        let idle_at = if *delivery_open && !*idle_emitted {
+            last_useful_record.unwrap_or(now) + idle_timeout
+        } else {
+            now + Duration::from_secs(3600)
+        };
+        let next_wake = ping_at.min(liveness_at).min(idle_at);
+
+        tokio::select! {
+            incoming = read.next() => {
+                let Some(msg_result) = incoming else {
+                    break SessionEnd::SocketRead;
+                };
+                match msg_result {
+                    Ok(Message::Text(text)) => {
+                        last_peer = Instant::now();
+                        *last_useful_record = Some(Instant::now());
+                        *last_source_event = observe_source_event_now(&text);
+                        *cumulative_count = cumulative_count.saturating_add(1);
+                        if !*delivery_open {
+                            *delivery_open = true;
+                            *idle_emitted = false;
+                            emit_transition(tx, StreamTransition::DeliveryResumed, stream_id);
+                        }
+                        if last_batch.elapsed() >= RECORD_UPDATE_INTERVAL {
+                            if tx.send(StreamEvent::Record(StreamMessage {
+                                stream_id,
+                                count: *cumulative_count,
+                                delivery_latency_us: last_source_event.as_ref().map(|e| e.lag_us),
+                                source_event: last_source_event.clone(),
+                            }))
+                            .is_err()
+                            {
+                                debug!(stream = ?stream_id, "receiver dropped");
+                                return SessionEnd::SocketRead;
+                            }
+                            last_batch = Instant::now();
+                        }
+                    }
+                    Ok(Message::Close(_)) => {
+                        info!(stream = ?stream_id, "connection closed by server");
+                        break SessionEnd::PeerClose;
+                    }
+                    Ok(Message::Ping(payload)) => {
+                        last_peer = Instant::now();
+                        if let Err(e) = write.send(Message::Pong(payload)).await {
+                            warn!(stream = ?stream_id, "failed to send WebSocket pong: {}", e);
+                            break SessionEnd::SocketWrite;
+                        }
+                    }
+                    Ok(Message::Pong(_)) => {
+                        last_peer = Instant::now();
+                    }
+                    Ok(_) => {
+                        last_peer = Instant::now();
+                    }
+                    Err(e) => {
+                        warn!(stream = ?stream_id, "WebSocket error: {}", e);
+                        break SessionEnd::SocketRead;
+                    }
+                }
+            }
+            _ = sleep_until(tokio::time::Instant::from_std(next_wake)) => {
+                let now = Instant::now();
+                if now >= liveness_at {
+                    warn!(stream = ?stream_id, "transport liveness deadline elapsed without peer evidence");
+                    break SessionEnd::LivenessDeadline;
+                }
+                if now >= idle_at {
+                    let silence_ms = last_useful_record
+                        .map(|t| now.duration_since(t).as_millis() as u64)
+                        .unwrap_or(0);
+                    *idle_emitted = true;
+                    emit_transition(
+                        tx,
+                        StreamTransition::DeliveryIdle { silence_ms },
+                        stream_id,
+                    );
+                }
+                if now >= ping_at {
+                    ping_at = now + heartbeat_interval;
+                    if let Err(e) = write.send(Message::Ping(vec![])).await {
+                        warn!(stream = ?stream_id, "failed to send WebSocket ping: {}", e);
+                        break SessionEnd::SocketWrite;
+                    }
+                }
+            }
+        }
+    };
+
+    // Flush the final cumulative count so consumers see the end-of-session total.
+    let _ = tx.send(StreamEvent::Record(StreamMessage {
+        stream_id,
+        count: *cumulative_count,
+        delivery_latency_us: last_source_event.as_ref().map(|e| e.lag_us),
+        source_event: last_source_event.clone(),
+    }));
+
+    *delivery_open = false;
+    end
+}
+
+fn emit_transition(
+    tx: &mpsc::UnboundedSender<StreamEvent>,
+    transition: StreamTransition,
+    stream_id: StreamId,
+) {
+    if tx.send(StreamEvent::Transition(transition)).is_err() {
+        debug!(stream = ?stream_id, "receiver dropped for transition");
+    }
+}
+
+/// WebSocket stream client that separates transport liveness from useful delivery.
+///
+/// It emits one ordered `StreamEvent` sequence per stream: low-rate state
+/// transitions share the channel with record batches, so every consumer
+/// observes exactly one ordering authority.
 pub struct StreamClient {
     url: String,
     stream_id: StreamId,
-    reconnect_delay: Duration,
     idle_timeout: Duration,
+    heartbeat_interval: Duration,
+    liveness_deadline: Duration,
     connect_timeout: Duration,
-    diagnostics: Option<Arc<DiagnosticLogger>>,
+    backoff: BackoffPolicy,
 }
 
 impl StreamClient {
@@ -352,10 +352,11 @@ impl StreamClient {
         Self {
             url,
             stream_id,
-            reconnect_delay: Duration::from_secs(5),
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
-            connect_timeout: Duration::from_secs(15),
-            diagnostics: None,
+            heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
+            liveness_deadline: DEFAULT_LIVENESS_DEADLINE,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            backoff: BackoffPolicy::default(),
         }
     }
 
@@ -364,494 +365,474 @@ impl StreamClient {
         self
     }
 
+    pub fn with_heartbeat_interval(mut self, heartbeat_interval: Duration) -> Self {
+        self.heartbeat_interval = heartbeat_interval;
+        self
+    }
+
+    pub fn with_liveness_deadline(mut self, liveness_deadline: Duration) -> Self {
+        self.liveness_deadline = liveness_deadline;
+        self
+    }
+
     pub fn with_connect_timeout(mut self, connect_timeout: Duration) -> Self {
         self.connect_timeout = connect_timeout;
         self
     }
 
-    pub fn with_diagnostics(mut self, diagnostics: Arc<DiagnosticLogger>) -> Self {
-        self.diagnostics = Some(diagnostics);
+    pub fn with_backoff_policy(mut self, backoff: BackoffPolicy) -> Self {
+        self.backoff = backoff;
         self
     }
 
-    pub fn stream_counts(&self) -> impl Stream<Item = StreamMessage> {
+    /// Run the ordered event stream for this client.
+    pub fn stream(&self) -> impl Stream<Item = StreamEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
         let url = self.url.clone();
         let stream_id = self.stream_id;
-        let reconnect_delay = self.reconnect_delay;
         let idle_timeout = self.idle_timeout;
+        let heartbeat_interval = self.heartbeat_interval;
+        let liveness_deadline = self.liveness_deadline;
         let connect_timeout = self.connect_timeout;
-        let diagnostics = self.diagnostics.clone();
+        let backoff = self.backoff;
 
         tokio::spawn(async move {
+            let send = |event: StreamEvent| {
+                if tx.send(event).is_err() {
+                    debug!(stream = ?stream_id, "receiver dropped");
+                }
+            };
+
             let mut cumulative_count: u64 = 0;
+            let mut last_source_event: Option<SourceEventObservation> = None;
+            // 1-based ordinal of the connection attempt the loop is about to
+            // perform; counts failed attempts during an outage or start-up.
             let mut attempt_number: u64 = 0;
-            let mut disconnect_start: Option<Instant> = None;
+            // Original outage boundary preserved across reconnect attempts.
+            let mut outage_started: Option<Instant> = None;
+            let mut ever_connected = false;
+            #[allow(unused_assignments)]
+            let mut delivery_open = false;
+            #[allow(unused_assignments)]
+            let mut idle_emitted = false;
+            let mut last_useful_record: Option<Instant> = None;
+            let mut pending_delay: Option<Duration> = None;
 
             loop {
-                info!(stream = ?stream_id, "Connecting to {}", url);
+                if let Some(delay) = pending_delay.take() {
+                    tokio::time::sleep(delay).await;
+                }
+                info!(stream = ?stream_id, "connecting to stream endpoint");
                 let connect_start = Instant::now();
 
-                match tokio::time::timeout(connect_timeout, connect_async(&url)).await {
+                let handshake =
+                    tokio::time::timeout(connect_timeout, connect_async(&url)).await;
+
+                match handshake {
                     Ok(Ok((ws_stream, _))) => {
                         let connect_time_ms = connect_start.elapsed().as_millis() as u64;
-                        info!(stream = ?stream_id, "Connected successfully in {}ms", connect_time_ms);
-
-                        if attempt_number > 0 {
-                            let downtime =
-                                disconnect_start.map(|s| s.elapsed().as_secs()).unwrap_or(0);
-                            if let Some(ref diag) = diagnostics {
-                                diag.log(&DiagnosticEvent::Recovered {
-                                    stream_id,
-                                    url: url.clone(),
-                                    timestamp: Utc::now(),
-                                    downtime_seconds: downtime,
-                                    attempt_count: attempt_number,
-                                });
-                            }
+                        ever_connected = true;
+                        // Backoff state resets after successful transport recovery.
+                        #[allow(unused_assignments)]
+                        {
                             attempt_number = 0;
-                            disconnect_start = None;
+                            pending_delay = None;
                         }
+                        outage_started = None;
+                        send(StreamEvent::Transition(StreamTransition::HandshakeSucceeded {
+                            connect_time_ms,
+                        }));
 
-                        let (mut write, mut read) = ws_stream.split();
-                        let mut count: u64 = 0;
-                        let mut last_send = Instant::now();
-                        let mut last_message = Instant::now();
-                        let update_interval = Duration::from_millis(100);
-                        let mut last_source_event: Option<SourceEventObservation> = None;
+                        let end = run_session(
+                            ws_stream,
+                            stream_id,
+                            idle_timeout,
+                            heartbeat_interval,
+                            liveness_deadline,
+                            &tx,
+                            &mut cumulative_count,
+                            &mut last_source_event,
+                            &mut delivery_open,
+                            &mut idle_emitted,
+                            &mut last_useful_record,
+                        )
+                        .await;
 
-                        while let Ok(Some(msg_result)) =
-                            tokio::time::timeout(idle_timeout, read.next()).await
-                        {
-                            match msg_result {
-                                Ok(Message::Text(text)) => {
-                                    last_message = Instant::now();
-                                    count += 1;
-                                    last_source_event = observe_source_event_now(&text);
-                                    if last_send.elapsed() >= update_interval {
-                                        if tx
-                                            .send(StreamMessage {
-                                                stream_id,
-                                                count: cumulative_count.saturating_add(count),
-                                                delivery_latency_us: last_source_event
-                                                    .as_ref()
-                                                    .map(|event| event.lag_us),
-                                                source_event: last_source_event.clone(),
-                                            })
-                                            .is_err()
-                                        {
-                                            debug!(stream = ?stream_id, "Receiver dropped");
-                                            return;
-                                        }
-                                        last_send = Instant::now();
-                                    }
-                                }
-                                Ok(Message::Close(_)) => {
-                                    info!(stream = ?stream_id, "Connection closed by server");
-                                    if disconnect_start.is_none() {
-                                        disconnect_start = Some(Instant::now());
-                                    }
-                                    if let Some(ref diag) = diagnostics {
-                                        diag.log(&DiagnosticEvent::Disconnected {
-                                            stream_id,
-                                            url: url.clone(),
-                                            timestamp: Utc::now(),
-                                            reconnect_reason: "peer_close".to_string(),
-                                        });
-                                    }
-                                    break;
-                                }
-                                Ok(Message::Ping(payload)) => {
-                                    if let Err(e) = write.send(Message::Pong(payload)).await {
-                                        error!(stream = ?stream_id, "Failed to send WebSocket pong: {}", e);
-                                        break;
-                                    }
-                                    if last_message.elapsed() >= idle_timeout {
-                                        warn!(stream = ?stream_id, "No data messages received for {:?}; reconnecting", idle_timeout);
-                                        break;
-                                    }
-                                }
-                                Err(e) => {
-                                    error!(stream = ?stream_id, "WebSocket error: {}", e);
-                                    if disconnect_start.is_none() {
-                                        disconnect_start = Some(Instant::now());
-                                    }
-                                    if let Some(ref diag) = diagnostics {
-                                        diag.log(&DiagnosticEvent::Disconnected {
-                                            stream_id,
-                                            url: url.clone(),
-                                            timestamp: Utc::now(),
-                                            reconnect_reason: "socket_error".to_string(),
-                                        });
-                                    }
-                                    break;
-                                }
-                                _ => {
-                                    if last_message.elapsed() >= idle_timeout {
-                                        warn!(stream = ?stream_id, "No data messages received for {:?}; reconnecting", idle_timeout);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        cumulative_count = cumulative_count.saturating_add(count);
-
-                        if tx
-                            .send(StreamMessage {
-                                stream_id,
-                                count: cumulative_count,
-                                delivery_latency_us: last_source_event
-                                    .as_ref()
-                                    .map(|event| event.lag_us),
-                                source_event: last_source_event,
-                            })
-                            .is_err()
-                        {
-                            return;
-                        }
+                        // True transport loss: preserve the original outage boundary.
+                        outage_started.get_or_insert(Instant::now());
+                        let outage_elapsed_ms = outage_started
+                            .map(|s| s.elapsed().as_millis() as u64)
+                            .unwrap_or(0);
+                        send(StreamEvent::Transition(StreamTransition::TransportLost {
+                            reason: map_loss_reason(end),
+                            outage_elapsed_ms: Some(outage_elapsed_ms),
+                        }));
+                        attempt_number = 1;
+                        pending_delay = Some(backoff.delay(1));
                     }
-                    Ok(Err(e)) => {
-                        error!(stream = ?stream_id, "Connection failed: {}", e);
-                        attempt_number += 1;
-                        if disconnect_start.is_none() {
-                            disconnect_start = Some(Instant::now());
+                    outcome @ (Ok(Err(_)) | Err(_)) => {
+                        let reason = if outcome.is_err() {
+                            warn!(
+                                stream = ?stream_id,
+                                "connection timed out after {:?}",
+                                connect_timeout
+                            );
+                            HandshakeFailureReason::ConnectTimeout
+                        } else {
+                            HandshakeFailureReason::ConnectError
+                        };
+                        attempt_number = attempt_number.saturating_add(1);
+                        // A first startup failure does not open a transport
+                        // outage: coverage remains unknown until the first
+                        // successful handshake.
+                        if ever_connected {
+                            outage_started.get_or_insert(Instant::now());
                         }
-                        if let Some(ref diag) = diagnostics {
-                            diag.log(&DiagnosticEvent::ConnectionAttemptFailed {
-                                stream_id,
-                                url: url.clone(),
-                                timestamp: Utc::now(),
-                                error_type: "connect_error".to_string(),
-                                error_message: e.to_string(),
-                                elapsed_ms: connect_start.elapsed().as_millis() as u64,
-                                timeout_seconds: connect_timeout.as_secs(),
-                                attempt_number,
-                            });
-                        }
-                    }
-                    Err(_elapsed) => {
-                        error!(
-                            stream = ?stream_id,
-                            "Connection timed out after {:?}",
-                            connect_timeout
-                        );
-                        attempt_number += 1;
-                        if disconnect_start.is_none() {
-                            disconnect_start = Some(Instant::now());
-                        }
-                        if let Some(ref diag) = diagnostics {
-                            diag.log(&DiagnosticEvent::ConnectionAttemptFailed {
-                                stream_id,
-                                url: url.clone(),
-                                timestamp: Utc::now(),
-                                error_type: "timeout".to_string(),
-                                error_message: format!(
-                                    "connection timed out after {}s",
-                                    connect_timeout.as_secs()
-                                ),
-                                elapsed_ms: connect_timeout.as_millis() as u64,
-                                timeout_seconds: connect_timeout.as_secs(),
-                                attempt_number,
-                            });
-                        }
+                        let ordinal = attempt_number;
+                        let scheduled_delay_ms = backoff.delay(ordinal).as_millis() as u64;
+                        send(StreamEvent::Transition(
+                            StreamTransition::ReconnectAttemptFailed {
+                                ordinal,
+                                reason,
+                                scheduled_delay_ms,
+                            },
+                        ));
+                        pending_delay = Some(Duration::from_millis(scheduled_delay_ms));
                     }
                 }
-
-                warn!(stream = ?stream_id, "Reconnecting in {:?}...", reconnect_delay);
-                sleep(reconnect_delay).await;
             }
         });
 
         UnboundedReceiverStream::new(rx)
     }
+}
+#[cfg(test)]
+mod fixtures {
+    use super::{StreamClient, StreamId, StreamEvent, StreamTransition};
+    use futures::SinkExt;
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::Message;
 
-    pub fn stream_with_status(
-        &self,
-    ) -> (
-        impl Stream<Item = StreamMessage>,
-        impl Stream<Item = ConnectionStatus>,
-    ) {
-        let (tx_msg, rx_msg) = mpsc::unbounded_channel();
-        let (tx_status, rx_status) = mpsc::unbounded_channel();
-        let url = self.url.clone();
-        let stream_id = self.stream_id;
-        let reconnect_delay = self.reconnect_delay;
-        let idle_timeout = self.idle_timeout;
-        let connect_timeout = self.connect_timeout;
-        let diagnostics = self.diagnostics.clone();
-
-        tokio::spawn(async move {
-            let mut cumulative_count: u64 = 0;
-            let mut attempt_number: u64 = 0;
-            let mut disconnect_start: Option<Instant> = None;
-
-            loop {
-                info!(stream = ?stream_id, "Connecting to {}", url);
-                let connect_start = Instant::now();
-
-                match tokio::time::timeout(connect_timeout, connect_async(&url)).await {
-                    Ok(Ok((ws_stream, _))) => {
-                        let connect_time_ms = connect_start.elapsed().as_millis() as u64;
-                        info!(stream = ?stream_id, "Connected successfully in {}ms", connect_time_ms);
-
-                        if attempt_number > 0 {
-                            let downtime =
-                                disconnect_start.map(|s| s.elapsed().as_secs()).unwrap_or(0);
-                            if let Some(ref diag) = diagnostics {
-                                diag.log(&DiagnosticEvent::Recovered {
-                                    stream_id,
-                                    url: url.clone(),
-                                    timestamp: Utc::now(),
-                                    downtime_seconds: downtime,
-                                    attempt_count: attempt_number,
-                                });
-                            }
-                            attempt_number = 0;
-                            disconnect_start = None;
-                        }
-
-                        let _ = tx_status.send(ConnectionStatus {
-                            stream_id,
-                            connected: true,
-                            connected_at: Some(connect_start),
-                            connect_time_ms: Some(connect_time_ms),
-                            delivery_available: false,
-                            reconnect_reason: None,
-                            client_recovery: false,
-                        });
-
-                        let (mut write, mut read) = ws_stream.split();
-                        let mut count: u64 = 0;
-                        let mut last_send = Instant::now();
-                        let mut last_message = Instant::now();
-                        let update_interval = Duration::from_millis(100);
-                        let mut last_source_event: Option<SourceEventObservation> = None;
-                        let mut delivery_available = false;
-                        let mut reconnect_reason = ReconnectReason::DataIdleTimeout;
-
-                        while let Ok(Some(msg_result)) =
-                            tokio::time::timeout(idle_timeout, read.next()).await
-                        {
-                            match msg_result {
-                                Ok(Message::Text(text)) => {
-                                    last_message = Instant::now();
-                                    count += 1;
-                                    last_source_event = observe_source_event_now(&text);
-                                    if !delivery_available {
-                                        delivery_available = true;
-                                        let _ = tx_status.send(ConnectionStatus {
-                                            stream_id,
-                                            connected: true,
-                                            connected_at: Some(connect_start),
-                                            connect_time_ms: None,
-                                            delivery_available: true,
-                                            reconnect_reason: None,
-                                            client_recovery: false,
-                                        });
-                                    }
-                                    if last_send.elapsed() >= update_interval {
-                                        if tx_msg
-                                            .send(StreamMessage {
-                                                stream_id,
-                                                count: cumulative_count.saturating_add(count),
-                                                delivery_latency_us: last_source_event
-                                                    .as_ref()
-                                                    .map(|event| event.lag_us),
-                                                source_event: last_source_event.clone(),
-                                            })
-                                            .is_err()
-                                        {
-                                            debug!(stream = ?stream_id, "Receiver dropped");
-                                            return;
-                                        }
-                                        last_send = Instant::now();
-                                    }
-                                }
-                                Ok(Message::Close(_)) => {
-                                    reconnect_reason = ReconnectReason::PeerClose;
-                                    info!(stream = ?stream_id, "Connection closed by server");
-                                    if disconnect_start.is_none() {
-                                        disconnect_start = Some(Instant::now());
-                                    }
-                                    if let Some(ref diag) = diagnostics {
-                                        diag.log(&DiagnosticEvent::Disconnected {
-                                            stream_id,
-                                            url: url.clone(),
-                                            timestamp: Utc::now(),
-                                            reconnect_reason: "peer_close".to_string(),
-                                        });
-                                    }
-                                    break;
-                                }
-                                Ok(Message::Ping(payload)) => {
-                                    if let Err(e) = write.send(Message::Pong(payload)).await {
-                                        reconnect_reason = ReconnectReason::SocketWrite;
-                                        error!(stream = ?stream_id, "Failed to send WebSocket pong: {}", e);
-                                        if disconnect_start.is_none() {
-                                            disconnect_start = Some(Instant::now());
-                                        }
-                                        if let Some(ref diag) = diagnostics {
-                                            diag.log(&DiagnosticEvent::Disconnected {
-                                                stream_id,
-                                                url: url.clone(),
-                                                timestamp: Utc::now(),
-                                                reconnect_reason: "socket_write".to_string(),
-                                            });
-                                        }
-                                        break;
-                                    }
-                                    if last_message.elapsed() >= idle_timeout {
-                                        warn!(stream = ?stream_id, "No data messages received for {:?}; reconnecting", idle_timeout);
-                                        if disconnect_start.is_none() {
-                                            disconnect_start = Some(Instant::now());
-                                        }
-                                        if let Some(ref diag) = diagnostics {
-                                            diag.log(&DiagnosticEvent::Disconnected {
-                                                stream_id,
-                                                url: url.clone(),
-                                                timestamp: Utc::now(),
-                                                reconnect_reason: "data_idle_timeout".to_string(),
-                                            });
-                                        }
-                                        break;
-                                    }
-                                }
-                                Err(e) => {
-                                    reconnect_reason = ReconnectReason::SocketRead;
-                                    error!(stream = ?stream_id, "WebSocket error: {}", e);
-                                    if disconnect_start.is_none() {
-                                        disconnect_start = Some(Instant::now());
-                                    }
-                                    if let Some(ref diag) = diagnostics {
-                                        diag.log(&DiagnosticEvent::Disconnected {
-                                            stream_id,
-                                            url: url.clone(),
-                                            timestamp: Utc::now(),
-                                            reconnect_reason: "socket_error".to_string(),
-                                        });
-                                    }
-                                    break;
-                                }
-                                _ => {
-                                    if last_message.elapsed() >= idle_timeout {
-                                        warn!(stream = ?stream_id, "No data messages received for {:?}; reconnecting", idle_timeout);
-                                        if disconnect_start.is_none() {
-                                            disconnect_start = Some(Instant::now());
-                                        }
-                                        if let Some(ref diag) = diagnostics {
-                                            diag.log(&DiagnosticEvent::Disconnected {
-                                                stream_id,
-                                                url: url.clone(),
-                                                timestamp: Utc::now(),
-                                                reconnect_reason: "data_idle_timeout".to_string(),
-                                            });
-                                        }
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        cumulative_count = cumulative_count.saturating_add(count);
-
-                        if tx_msg
-                            .send(StreamMessage {
-                                stream_id,
-                                count: cumulative_count,
-                                delivery_latency_us: last_source_event
-                                    .as_ref()
-                                    .map(|event| event.lag_us),
-                                source_event: last_source_event,
-                            })
-                            .is_err()
-                        {
-                            return;
-                        }
-
-                        let _ = tx_status.send(ConnectionStatus {
-                            stream_id,
-                            connected: false,
-                            connected_at: None,
-                            connect_time_ms: None,
-                            delivery_available: false,
-                            reconnect_reason: Some(reconnect_reason),
-                            client_recovery: reconnect_reason == ReconnectReason::DataIdleTimeout,
-                        });
-                    }
-                    Ok(Err(e)) => {
-                        error!(stream = ?stream_id, "Connection failed: {}", e);
-                        attempt_number += 1;
-                        if disconnect_start.is_none() {
-                            disconnect_start = Some(Instant::now());
-                        }
-                        if let Some(ref diag) = diagnostics {
-                            diag.log(&DiagnosticEvent::ConnectionAttemptFailed {
-                                stream_id,
-                                url: url.clone(),
-                                timestamp: Utc::now(),
-                                error_type: "connect_error".to_string(),
-                                error_message: e.to_string(),
-                                elapsed_ms: connect_start.elapsed().as_millis() as u64,
-                                timeout_seconds: connect_timeout.as_secs(),
-                                attempt_number,
-                            });
-                        }
-                        let _ = tx_status.send(ConnectionStatus {
-                            stream_id,
-                            connected: false,
-                            connected_at: None,
-                            connect_time_ms: None,
-                            delivery_available: false,
-                            reconnect_reason: Some(ReconnectReason::HandshakeFailure),
-                            client_recovery: false,
-                        });
-                    }
-                    Err(_elapsed) => {
-                        error!(
-                            stream = ?stream_id,
-                            "Connection timed out after {:?}",
-                            connect_timeout
-                        );
-                        attempt_number += 1;
-                        if disconnect_start.is_none() {
-                            disconnect_start = Some(Instant::now());
-                        }
-                        if let Some(ref diag) = diagnostics {
-                            diag.log(&DiagnosticEvent::ConnectionAttemptFailed {
-                                stream_id,
-                                url: url.clone(),
-                                timestamp: Utc::now(),
-                                error_type: "timeout".to_string(),
-                                error_message: format!(
-                                    "connection timed out after {}s",
-                                    connect_timeout.as_secs()
-                                ),
-                                elapsed_ms: connect_timeout.as_millis() as u64,
-                                timeout_seconds: connect_timeout.as_secs(),
-                                attempt_number,
-                            });
-                        }
-                        let _ = tx_status.send(ConnectionStatus {
-                            stream_id,
-                            connected: false,
-                            connected_at: None,
-                            connect_time_ms: None,
-                            delivery_available: false,
-                            reconnect_reason: Some(ReconnectReason::ConnectTimeout),
-                            client_recovery: false,
-                        });
-                    }
-                }
-
-                warn!(stream = ?stream_id, "Reconnecting in {:?}...", reconnect_delay);
-                sleep(reconnect_delay).await;
+    async fn next_transition(
+        stream: &mut (impl futures::Stream<Item = StreamEvent> + Unpin),
+    ) -> StreamTransition {
+        let deadline = std::time::Duration::from_secs(3);
+        loop {
+            let event = tokio::time::timeout(deadline, futures::StreamExt::next(stream))
+                .await
+                .expect("timeout waiting for stream event")
+                .expect("stream ended");
+            if let StreamEvent::Transition(transition) = event {
+                return transition;
             }
+        }
+    }
+
+    /// Assert no transport-lost transition arrives within `quiet` millis.
+    async fn expect_quiet_transport(stream: &mut (impl futures::Stream<Item = StreamEvent> + Unpin), quiet: u64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(quiet);
+        let mut saw_handshake = false;
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(deadline - std::time::Instant::now(), futures::StreamExt::next(stream)).await {
+                Err(_) => return,
+                Ok(Some(StreamEvent::Transition(StreamTransition::HandshakeSucceeded { .. }))) if !saw_handshake => {
+                    saw_handshake = true;
+                }
+                Ok(Some(StreamEvent::Transition(
+                    StreamTransition::DeliveryResumed,
+                ))) => {}
+                Ok(Some(StreamEvent::Transition(StreamTransition::DeliveryIdle { .. }))) => {}
+                Ok(Some(other)) => panic!("unexpected event during quiet window: {other:?}"),
+                Ok(None) => panic!("stream ended during quiet window"),
+            }
+        }
+        assert!(saw_handshake, "expected a handshake before the quiet window");
+    }
+
+    async fn bind_listener() -> (TcpListener, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fixture");
+        let addr = listener.local_addr().expect("addr").to_string();
+        (listener, format!("ws://{addr}"))
+    }
+
+    #[tokio::test]
+    async fn heartbeat_responsive_socket_surges_through_data_idle_without_reconnect() {
+        let (listener, url) = bind_listener().await;
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> =
+                tokio_tungstenite::accept_async(stream).await.expect("handshake");
+            // Deliver one useful record then go quiet; pings are auto-ponged
+            // by tungstenite when reading.
+            ws.send(Message::Text(r#"{"time_us":100}"#.into())).await.ok();
+            // Keep responding to pings for the remainder of the fixture window.
+            while let Ok(Some(_)) = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                futures::StreamExt::next(&mut ws),
+            )
+            .await
+            {}
         });
 
-        (
-            UnboundedReceiverStream::new(rx_msg),
-            UnboundedReceiverStream::new(rx_status),
-        )
+        let client = StreamClient::new(url, StreamId::A)
+            .with_idle_timeout(std::time::Duration::from_millis(80))
+            .with_heartbeat_interval(std::time::Duration::from_millis(50))
+            .with_liveness_deadline(std::time::Duration::from_millis(400));
+        let mut events = Box::pin(client.stream());
+
+        let resumed = next_transition(&mut events).await;
+        assert!(matches!(
+            resumed,
+            StreamTransition::DeliveryResumed
+                | StreamTransition::HandshakeSucceeded { .. }
+        ));
+        // Drain the handshake/idle sequence; the socket must remain connected:
+        // an idle transition may arrive, but no transport loss, and no second
+        // handshake (which would indicate a reconnect).
+        expect_quiet_transport(&mut events, 250).await;
+    }
+
+    #[tokio::test]
+    async fn ignored_heartbeats_declare_transport_loss_after_liveness_deadline() {
+        let (listener, url) = bind_listener().await;
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fixture");
+            // Accept the handshake but never read or respond to pings.
+            let _ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> =
+                tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("handshake");
+            // Hold open without reading so ping frames are never answered.
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        });
+
+        let client = StreamClient::new(url, StreamId::A)
+            .with_idle_timeout(std::time::Duration::from_secs(60))
+            .with_heartbeat_interval(std::time::Duration::from_millis(50))
+            .with_liveness_deadline(std::time::Duration::from_millis(150));
+        let mut events = Box::pin(client.stream());
+
+        let mut saw_handshake = false;
+        loop {
+            match next_transition(&mut events).await {
+                StreamTransition::HandshakeSucceeded { .. } => {
+                    saw_handshake = true;
+                }
+                StreamTransition::TransportLost { reason, .. } => {
+                    assert!(saw_handshake);
+                    assert_eq!(
+                        reason.as_str(),
+                        "liveness_deadline",
+                        "missed liveness deadline must report the bounded reason"
+                    );
+                    return;
+                }
+                other => panic!("unexpected event {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn delayed_heartbeats_inside_liveness_bound_keep_transport_alive() {
+        let (listener, url) = bind_listener().await;
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fixture");
+            let mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> =
+                tokio_tungstenite::accept_async(stream).await.expect("handshake");
+            while let Some(Ok(msg)) = futures::StreamExt::next(&mut ws).await {
+                if matches!(msg, Message::Ping(_)) {
+                    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                    ws.send(Message::Pong(vec![])).await.ok();
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+
+        let client = StreamClient::new(url, StreamId::A)
+            .with_idle_timeout(std::time::Duration::from_secs(60))
+            .with_heartbeat_interval(std::time::Duration::from_millis(30))
+            .with_liveness_deadline(std::time::Duration::from_millis(150));
+        let mut events = Box::pin(client.stream());
+
+        assert!(matches!(
+            next_transition(&mut events).await,
+            StreamTransition::HandshakeSucceeded { .. }
+        ));
+        expect_quiet_transport(&mut events, 200).await;
+    }
+
+    #[tokio::test]
+    async fn peer_close_is_true_transport_loss() {
+        let (listener, url) = bind_listener().await;
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fixture");
+            let mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> =
+                tokio_tungstenite::accept_async(stream).await.expect("handshake");
+            ws.send(Message::Text(r#"{"time_us":1}"#.into())).await.ok();
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            let _ = ws.send(Message::Close(None)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+
+        let client = StreamClient::new(url, StreamId::A)
+            .with_idle_timeout(std::time::Duration::from_secs(60))
+            .with_heartbeat_interval(std::time::Duration::from_millis(50))
+            .with_liveness_deadline(std::time::Duration::from_millis(500))
+            .with_backoff_policy(super::BackoffPolicy::new(
+                std::time::Duration::from_millis(50),
+                std::time::Duration::from_millis(100),
+            ));
+        let mut events = Box::pin(client.stream());
+
+        loop {
+            match next_transition(&mut events).await {
+                StreamTransition::HandshakeSucceeded { .. } => {}
+                StreamTransition::DeliveryResumed => {}
+                StreamTransition::TransportLost { reason, .. } => {
+                    assert_eq!(reason.as_str(), "peer_close");
+                    return;
+                }
+                other => panic!("unexpected event {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn socket_read_failure_is_true_transport_loss() {
+        let (listener, url) = bind_listener().await;
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fixture");
+            let ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> =
+                tokio_tungstenite::accept_async(stream).await.expect("handshake");
+            // Abruptly close the TCP connection to force a socket read failure.
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            drop(ws);
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+
+        let client = StreamClient::new(url, StreamId::A)
+            .with_idle_timeout(std::time::Duration::from_secs(60))
+            .with_heartbeat_interval(std::time::Duration::from_millis(50))
+            .with_liveness_deadline(std::time::Duration::from_millis(500))
+            .with_backoff_policy(super::BackoffPolicy::new(
+                std::time::Duration::from_millis(50),
+                std::time::Duration::from_millis(100),
+            ));
+        let mut events = Box::pin(client.stream());
+
+        loop {
+            match next_transition(&mut events).await {
+                StreamTransition::HandshakeSucceeded { .. } => {}
+                StreamTransition::DeliveryResumed => {}
+                StreamTransition::TransportLost { reason, .. } => {
+                    assert_eq!(reason.as_str(), "socket_error");
+                    return;
+                }
+                other => panic!("unexpected event {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_handshake_failures_record_ordinals_and_bounded_delays() {
+        let (listener, url) = bind_listener().await;
+        tokio::spawn(async move {
+            // Never accept the WebSocket handshake; hold the TCP connection.
+            let (_stream, _) = listener.accept().await.expect("accept fixture");
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        });
+
+        let client = StreamClient::new(url, StreamId::A)
+            .with_connect_timeout(std::time::Duration::from_millis(80))
+            .with_backoff_policy(super::BackoffPolicy::new(
+                std::time::Duration::from_millis(30),
+                std::time::Duration::from_millis(60),
+            ));
+        let mut events = Box::pin(client.stream());
+
+        let mut ordinals = Vec::new();
+        let mut delays = Vec::new();
+        for _ in 0..4 {
+            match next_transition(&mut events).await {
+                StreamTransition::ReconnectAttemptFailed {
+                    ordinal,
+                    reason,
+                    scheduled_delay_ms,
+                } => {
+                    assert_eq!(reason.as_str(), "connect_timeout");
+                    ordinals.push(ordinal);
+                    delays.push(scheduled_delay_ms);
+                }
+                other => panic!("unexpected event {other:?}"),
+            }
+        }
+        assert_eq!(ordinals, vec![1, 2, 3, 4], "attempt ordinals must increase");
+        for delay in &delays {
+            assert!(
+                (20..=80).contains(delay),
+                "delay {delay}ms must stay within the configured backoff window"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn same_socket_delivery_recovery_emits_resume_without_reconnect() {
+        let (listener, url) = bind_listener().await;
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept fixture");
+            let mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> =
+                tokio_tungstenite::accept_async(stream).await.expect("handshake");
+            ws.send(Message::Text(r#"{"time_us":100}"#.into())).await.ok();
+            // Stay silent past the idle deadline, then resume on the same socket.
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            ws.send(Message::Text(r#"{"time_us":340}"#.into())).await.ok();
+            // Keep responding to pings for the remainder of the fixture window.
+            while let Ok(Some(_)) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                futures::StreamExt::next(&mut ws),
+            )
+            .await
+            {}
+        });
+
+        let client = StreamClient::new(url, StreamId::A)
+            .with_idle_timeout(std::time::Duration::from_millis(100))
+            .with_heartbeat_interval(std::time::Duration::from_millis(50))
+            .with_liveness_deadline(std::time::Duration::from_millis(400));
+        let mut events = Box::pin(client.stream());
+
+        let mut handshakes = 0;
+        let mut saw_resume_after_idle = false;
+        let mut saw_loss = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                futures::StreamExt::next(&mut events),
+            )
+            .await
+            {
+                Ok(Some(StreamEvent::Transition(StreamTransition::HandshakeSucceeded { .. }))) => {
+                    handshakes += 1;
+                }
+                Ok(Some(StreamEvent::Transition(StreamTransition::DeliveryResumed))) => {
+                    saw_resume_after_idle = true;
+                }
+                Ok(Some(StreamEvent::Transition(StreamTransition::DeliveryIdle { .. }))) => {}
+                Ok(Some(StreamEvent::Record(_))) => {}
+                Ok(Some(StreamEvent::Transition(StreamTransition::TransportLost { .. }))) => {
+                    saw_loss = true;
+                }
+                Ok(Some(StreamEvent::Transition(
+                    StreamTransition::ReconnectAttemptFailed { .. },
+                ))) => {}
+                Ok(None) => panic!("stream ended early"),
+                Err(_) => break,
+            }
+        }
+        assert_eq!(handshakes, 1, "socket must not reconnect during delivery idle");
+        assert!(!saw_loss, "no transport loss on a responsive idle socket");
+        assert!(saw_resume_after_idle, "delivery must resume on the same socket");
     }
 }

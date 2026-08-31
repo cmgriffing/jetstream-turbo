@@ -25,10 +25,15 @@ config = "0.14"
 dotenvy = "0.15"
 
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
 thiserror = "1"
 chrono = { version = "0.4", features = ["serde"] }
+
+utoipa = { version = "5", features = ["chrono", "axum_extras"] }
+prometheus = { version = "0.13", default-features = false, features = ["process"] }
+ulid = { version = "1", features = ["serde"] }
+rand = "0.8"
 
 [profile.release]
 lto = "thin"
