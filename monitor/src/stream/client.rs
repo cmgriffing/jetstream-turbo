@@ -182,6 +182,32 @@ type WsStream = tokio_tungstenite::WebSocketStream<
     tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
 >;
 
+/// Shared clock of the latest peer-liveness evidence for one stream client.
+#[derive(Debug, Default)]
+pub struct LivenessClock {
+    last_peer: std::sync::Mutex<Option<Instant>>,
+}
+
+impl LivenessClock {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn touch(&self, at: Instant) {
+        if let Ok(mut guard) = self.last_peer.lock() {
+            *guard = Some(at);
+        }
+    }
+
+    /// Seconds since the last peer frame (Pong or otherwise).
+    pub fn age_seconds(&self) -> Option<u64> {
+        self.last_peer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .map(|at| at.elapsed().as_secs())
+    }
+}
+
 fn map_loss_reason(end: SessionEnd) -> TransportLossReason {
     match end {
         SessionEnd::PeerClose => TransportLossReason::PeerClose,
@@ -204,6 +230,7 @@ async fn run_session(
     idle_timeout: Duration,
     heartbeat_interval: Duration,
     liveness_deadline: Duration,
+    liveness_clock: &LivenessClock,
     tx: &mpsc::UnboundedSender<StreamEvent>,
     cumulative_count: &mut u64,
     last_source_event: &mut Option<SourceEventObservation>,
@@ -236,6 +263,7 @@ async fn run_session(
                 match msg_result {
                     Ok(Message::Text(text)) => {
                         last_peer = Instant::now();
+                        liveness_clock.touch(last_peer);
                         *last_useful_record = Some(Instant::now());
                         *last_source_event = observe_source_event_now(&text);
                         *cumulative_count = cumulative_count.saturating_add(1);
@@ -345,6 +373,7 @@ pub struct StreamClient {
     liveness_deadline: Duration,
     connect_timeout: Duration,
     backoff: BackoffPolicy,
+    liveness_clock: Option<std::sync::Arc<LivenessClock>>,
 }
 
 impl StreamClient {
@@ -357,7 +386,14 @@ impl StreamClient {
             liveness_deadline: DEFAULT_LIVENESS_DEADLINE,
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             backoff: BackoffPolicy::default(),
+            liveness_clock: None,
         }
+    }
+
+    /// Observe the latest peer-liveness evidence through a shared clock.
+    pub fn with_liveness_clock(mut self, liveness_clock: std::sync::Arc<LivenessClock>) -> Self {
+        self.liveness_clock = Some(liveness_clock);
+        self
     }
 
     pub fn with_idle_timeout(mut self, idle_timeout: Duration) -> Self {
@@ -395,6 +431,10 @@ impl StreamClient {
         let liveness_deadline = self.liveness_deadline;
         let connect_timeout = self.connect_timeout;
         let backoff = self.backoff;
+        let liveness_clock = self
+            .liveness_clock
+            .clone()
+            .unwrap_or_else(|| std::sync::Arc::new(LivenessClock::new()));
 
         tokio::spawn(async move {
             let send = |event: StreamEvent| {
@@ -449,6 +489,7 @@ impl StreamClient {
                             idle_timeout,
                             heartbeat_interval,
                             liveness_deadline,
+                            &liveness_clock,
                             &tx,
                             &mut cumulative_count,
                             &mut last_source_event,

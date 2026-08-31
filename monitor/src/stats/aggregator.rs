@@ -1035,7 +1035,6 @@ impl UptimeTracker {
     /// Independent reconnect-attempt counter; attempts never affect outage
     /// episode boundaries or timestamps.
     pub fn record_reconnect_attempt(&mut self, stream_id: StreamId) {
-        let now = Instant::now();
         match stream_id {
             StreamId::A => self.availability_a.record_reconnect_attempt(),
             StreamId::B => self.availability_b.record_reconnect_attempt(),

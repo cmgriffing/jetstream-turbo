@@ -6,6 +6,7 @@
 //! effects from it.
 
 use chrono::{DateTime, Duration, Utc};
+use tracing::{info, warn};
 use std::time::Instant;
 
 use super::transition::{DeliveryState, StreamEvent, StreamTransition, TransportState};
@@ -153,6 +154,13 @@ impl TransitionProcessor {
         match transition {
             StreamTransition::HandshakeSucceeded { connect_time_ms } => {
                 self.transport = TransportState::Connected;
+                info!(
+                    target: "monitor::transition",
+                    stream = stable_stream_id(self.stream_id),
+                    connect_time_ms,
+                    connection_epoch = self.connection_epoch,
+                    "transport recovered"
+                );
                 self.connection_epoch = self.connection_epoch.saturating_add(1);
                 if self.delivery != DeliveryState::Delivering {
                     self.delivery = DeliveryState::Waiting;
@@ -194,6 +202,11 @@ impl TransitionProcessor {
             }
             StreamTransition::DeliveryResumed => {
                 self.delivery = DeliveryState::Delivering;
+                info!(
+                    target: "monitor::transition",
+                    stream = stable_stream_id(self.stream_id),
+                    "delivery recovered"
+                );
                 if let Some((incident_id, _)) = self.active_incident.take() {
                     effects.push(Effect::Incident(IncidentCommand::Resolve {
                         incident_id,
@@ -203,6 +216,12 @@ impl TransitionProcessor {
             }
             StreamTransition::DeliveryIdle { silence_ms } => {
                 self.delivery = DeliveryState::Idle;
+                warn!(
+                    target: "monitor::transition",
+                    stream = stable_stream_id(self.stream_id),
+                    silence_ms,
+                    "delivery idle detected on responsive socket"
+                );
                 effects.push(Effect::IdleEpisode { silence_ms });
                 let last_useful_record_at = Some(wall_now - Duration::milliseconds(silence_ms as i64));
                 self.open_incident(
@@ -217,6 +236,12 @@ impl TransitionProcessor {
                 outage_elapsed_ms,
             } => {
                 self.transport = TransportState::Disconnected;
+                warn!(
+                    target: "monitor::transition",
+                    stream = stable_stream_id(self.stream_id),
+                    reason = reason.as_str(),
+                    "transport lost"
+                );
                 let new_outage = self.outage_started.is_none();
                 if new_outage {
                     self.outage_started = Some(Instant::now());
@@ -284,6 +309,14 @@ impl TransitionProcessor {
                 scheduled_delay_ms,
             } => {
                 self.outage_attempts = self.outage_attempts.saturating_add(1);
+                info!(
+                    target: "monitor::transition",
+                    stream = stable_stream_id(self.stream_id),
+                    attempt_ordinal = ordinal,
+                    reason = reason.as_str(),
+                    scheduled_delay_ms,
+                    "reconnect attempt failed"
+                );
                 effects.push(Effect::AttemptFailed { ordinal });
                 if let Some((incident_id, _)) = self.active_incident.clone() {
                     effects.push(Effect::Incident(IncidentCommand::AppendEvent {

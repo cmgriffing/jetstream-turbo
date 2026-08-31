@@ -1,10 +1,8 @@
 //! Versioned operational API: shared models, handlers, and OpenAPI contract.
 
-/// Envelope shared by every `/api/v1` success response.
-#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
-pub struct ApiResponse<T> {
-    pub data: T,
-}
+pub mod health;
+
+pub use health::{HealthSnapshot, HealthStatus, StorageHealth, StreamHealth};
 
 /// Stable machine-readable error shape for all `/api/v1` failures.
 #[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
@@ -50,6 +48,12 @@ impl ApiError {
             api_version: API_VERSION.to_string(),
         }
     }
+}
+
+/// Envelope shared by every `/api/v1` success response.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct ApiResponse<T> {
+    pub data: T,
 }
 
 /// API semantic version, independent of the binary release identity.

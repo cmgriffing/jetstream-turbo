@@ -7,7 +7,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use sqlx::SqlitePool;
-use std::str::FromStr;
 
 use super::{
     IncidentEvent, IncidentEventType, IncidentId, IncidentState, IncidentSummary, IncidentTrigger,
@@ -684,6 +683,7 @@ impl IncidentStore {
 mod tests {
     use super::*;
     use crate::incidents::{HandshakeFailureReason, MonitorIdentity};
+    use std::str::FromStr;
 
     fn temp_pool(test_name: &str) -> (SqlitePool, String) {
         let nanos = std::time::SystemTime::now()

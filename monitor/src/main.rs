@@ -18,10 +18,14 @@ use jetstream_monitor::{
     telemetry::Metrics,
     websocket,
 };
+use jetstream_monitor::api::{
+    ApiResponse, HealthSnapshot, HealthStatus, StorageHealth, StreamHealth,
+};
 use jetstream_monitor::incidents::LedgerHealth;
 use jetstream_monitor::incidents::IncidentId;
 #[allow(unused_imports)]
 use jetstream_monitor::incidents::IncidentEventType as _IE_unused;
+use std::collections::HashMap;
 use std::{sync::Arc, time::Duration};
 
 const HOURLY_INTERVAL_SECONDS: u64 = 3600;
@@ -33,6 +37,55 @@ const BASELINE_2_URL: &str =
     "wss://jetstream.us-west.bsky.network/subscribe?wantedCollections=app.bsky.feed.post";
 const BASELINE_1_NAME: &str = "Baseline 1 (jetstream.us-east)";
 const BASELINE_2_NAME: &str = "Baseline 2 (jetstream.us-west)";
+
+/// Bounded per-stream state captured by the transition loop for health reads.
+#[derive(Debug, Clone, Default)]
+struct StreamObserved {
+    transport: String,
+    delivery: String,
+    delivery_idle: bool,
+    age_started: Option<std::time::Instant>,
+    last_record_at: Option<std::time::Instant>,
+    active_incident_id: Option<String>,
+    liveness: Option<Arc<jetstream_monitor::stream::LivenessClock>>,
+}
+
+#[derive(Debug, Default)]
+struct Operational {
+    observation_loop_alive: bool,
+    streams: HashMap<StreamId, StreamObserved>,
+}
+
+fn ops_loop_alive(operational: &Arc<std::sync::Mutex<Operational>>, alive: bool) {
+    operational.lock().unwrap().observation_loop_alive = alive;
+}
+
+fn delivery_label(state: jetstream_monitor::stream::DeliveryState) -> &'static str {
+    use jetstream_monitor::stream::DeliveryState;
+    match state {
+        DeliveryState::Unknown => "unknown",
+        DeliveryState::Waiting => "waiting",
+        DeliveryState::Delivering => "delivering",
+        DeliveryState::Idle => "idle",
+    }
+}
+
+#[derive(Clone)]
+struct AppState {
+    #[allow(dead_code)]
+    broadcast_tx: Arc<tokio::sync::broadcast::Sender<jetstream_monitor::StreamStats>>,
+    storage: Arc<Storage>,
+    uptime: Arc<std::sync::RwLock<UptimeTracker>>,
+    operational: Arc<std::sync::Mutex<Operational>>,
+    ledger_health: Arc<LedgerHealth>,
+    hourly_health: Arc<LedgerHealth>,
+    metrics: Arc<Metrics>,
+    process_epoch: Arc<String>,
+    release: Arc<String>,
+    started_at: chrono::DateTime<chrono::Utc>,
+    #[allow(dead_code)]
+    incident_store: Arc<IncidentStore>,
+}
 
 #[derive(Debug, Clone, Copy)]
 struct HourlyIntervalMetrics {
@@ -315,25 +368,69 @@ async fn main() -> Result<()> {
     ));
     let _diagnostics = diagnostics;
 
+    let operational = Arc::new(std::sync::Mutex::new(Operational::default()));
+    for stream_id in [
+        StreamId::A,
+        StreamId::B,
+        StreamId::Baseline1,
+        StreamId::Baseline2,
+    ] {
+        operational.lock().unwrap().streams.insert(
+            stream_id,
+            StreamObserved {
+                transport: "disconnected".to_string(),
+                delivery: "unknown".to_string(),
+                delivery_idle: false,
+                age_started: None,
+                last_record_at: None,
+                active_incident_id: None,
+                liveness: Some(Arc::new(
+                    jetstream_monitor::stream::LivenessClock::new(),
+                )),
+            },
+        );
+    }
+
+    let liveness_a = operational.lock().unwrap().streams[&StreamId::A]
+        .liveness
+        .clone()
+        .expect("liveness clock");
+    let liveness_b = operational.lock().unwrap().streams[&StreamId::B]
+        .liveness
+        .clone()
+        .expect("liveness clock");
+    let liveness_b1 = operational.lock().unwrap().streams[&StreamId::Baseline1]
+        .liveness
+        .clone()
+        .expect("liveness clock");
+    let liveness_b2 = operational.lock().unwrap().streams[&StreamId::Baseline2]
+        .liveness
+        .clone()
+        .expect("liveness clock");
+
     let client_a = StreamClient::new(settings.stream_a_url.clone(), StreamId::A)
+        .with_liveness_clock(liveness_a)
         .with_idle_timeout(stream_idle_timeout)
         .with_heartbeat_interval(heartbeat_interval)
         .with_liveness_deadline(liveness_deadline)
         .with_connect_timeout(connect_timeout)
         .with_backoff_policy(backoff);
     let client_b = StreamClient::new(settings.stream_b_url.clone(), StreamId::B)
+        .with_liveness_clock(liveness_b)
         .with_idle_timeout(stream_idle_timeout)
         .with_heartbeat_interval(heartbeat_interval)
         .with_liveness_deadline(liveness_deadline)
         .with_connect_timeout(connect_timeout)
         .with_backoff_policy(backoff);
     let client_baseline_1 = StreamClient::new(BASELINE_1_URL.to_string(), StreamId::Baseline1)
+        .with_liveness_clock(liveness_b1)
         .with_idle_timeout(stream_idle_timeout)
         .with_heartbeat_interval(heartbeat_interval)
         .with_liveness_deadline(liveness_deadline)
         .with_connect_timeout(connect_timeout)
         .with_backoff_policy(backoff);
     let client_baseline_2 = StreamClient::new(BASELINE_2_URL.to_string(), StreamId::Baseline2)
+        .with_liveness_clock(liveness_b2)
         .with_idle_timeout(stream_idle_timeout)
         .with_heartbeat_interval(heartbeat_interval)
         .with_liveness_deadline(liveness_deadline)
@@ -369,6 +466,8 @@ async fn main() -> Result<()> {
     }
 
     let ledger_health = Arc::new(LedgerHealth::default());
+    let hourly_health = Arc::new(LedgerHealth::default());
+    let process_started_at = chrono::Utc::now();
     let (incident_tx, mut incident_rx) = tokio::sync::mpsc::unbounded_channel::<IncidentCommand>();
     {
         let store = Arc::clone(&incident_store);
@@ -416,8 +515,11 @@ async fn main() -> Result<()> {
 
     let stats_for_stream = Arc::clone(&stats_internal);
     let uptime_for_status: Arc<std::sync::RwLock<UptimeTracker>> = Arc::clone(&uptime_tracker);
+    let operational_for_loop = Arc::clone(&operational);
+    let metrics_for_loop = Arc::clone(&metrics);
     tokio::spawn(async move {
         use futures::StreamExt;
+        ops_loop_alive(&operational_for_loop, true);
         let mut stream_a = Box::pin(client_a.stream());
         let mut stream_b = Box::pin(client_b.stream());
         let mut stream_b1 = Box::pin(client_baseline_1.stream());
@@ -438,10 +540,12 @@ async fn main() -> Result<()> {
             stats_internal: &std::sync::RwLock<StreamStatsInternal>,
             incident_tx: &tokio::sync::mpsc::UnboundedSender<IncidentCommand>,
             metrics: &Metrics,
+            operational: &Arc<std::sync::Mutex<Operational>>,
         ) {
             let wall_now = chrono::Utc::now();
             let stream_of_index = processors[index].stream_id();
             let status_stream_id = processors[index].stream_id();
+            let is_record = matches!(event, StreamEvent::Record(_));
             let effects = processors[index].process(event, wall_now);
             for effect in effects {
                 match effect {
@@ -466,6 +570,21 @@ async fn main() -> Result<()> {
                         }
                     }
                     Effect::Incident(command) => {
+                        {
+                            let mut ops = operational.lock().unwrap();
+                            if let Some(entry) = ops.streams.get_mut(&stream_of_index) {
+                                match &command {
+                                    IncidentCommand::Open { incident_id, .. } => {
+                                        entry.active_incident_id =
+                                            Some(incident_id.as_str().to_string());
+                                    }
+                                    IncidentCommand::Resolve { .. } => {
+                                        entry.active_incident_id = None;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                         let _ = incident_tx.send(command);
                     }
                     Effect::OutageStarted => metrics.record_transport_outage(),
@@ -490,6 +609,30 @@ async fn main() -> Result<()> {
                 processors[index].stream_id(),
                 processors[index].delivery_state(),
             );
+            metrics.set_connection_epoch(
+                processors[index].stream_id(),
+                processors[index].connection_epoch(),
+            );
+
+            let now = std::time::Instant::now();
+            let mut ops = operational.lock().unwrap();
+            if let Some(entry) = ops.streams.get_mut(&stream_of_index) {
+                if is_record {
+                    entry.last_record_at = Some(now);
+                }
+                let transport = match processors[index].transport_state() {
+                    jetstream_monitor::stream::TransportState::Connected => "connected",
+                    jetstream_monitor::stream::TransportState::Connecting => "connecting",
+                    jetstream_monitor::stream::TransportState::Disconnected => "disconnected",
+                };
+                let delivery = delivery_label(processors[index].delivery_state());
+                if entry.transport != transport || entry.delivery != delivery {
+                    entry.age_started = Some(now);
+                }
+                entry.transport = transport.to_string();
+                entry.delivery = delivery.to_string();
+            }
+            drop(ops);
         }
 
         loop {
@@ -501,7 +644,8 @@ async fn main() -> Result<()> {
                         &uptime_for_status,
                         &stats_for_stream,
                         &incident_tx,
-                        &metrics,
+                        &metrics_for_loop,
+                        &operational_for_loop,
                     ).await;
                 }
                 Some(event) = stream_b.next() => {
@@ -511,7 +655,8 @@ async fn main() -> Result<()> {
                         &uptime_for_status,
                         &stats_for_stream,
                         &incident_tx,
-                        &metrics,
+                        &metrics_for_loop,
+                        &operational_for_loop,
                     ).await;
                 }
                 Some(event) = stream_b1.next() => {
@@ -521,7 +666,8 @@ async fn main() -> Result<()> {
                         &uptime_for_status,
                         &stats_for_stream,
                         &incident_tx,
-                        &metrics,
+                        &metrics_for_loop,
+                        &operational_for_loop,
                     ).await;
                 }
                 Some(event) = stream_b2.next() => {
@@ -531,10 +677,14 @@ async fn main() -> Result<()> {
                         &uptime_for_status,
                         &stats_for_stream,
                         &incident_tx,
-                        &metrics,
+                        &metrics_for_loop,
+                        &operational_for_loop,
                     ).await;
                 }
-                else => break,
+                else => {
+                    ops_loop_alive(&operational_for_loop, false);
+                    break;
+                }
             }
         }
     });
@@ -543,8 +693,39 @@ async fn main() -> Result<()> {
 
     let stats_for_storage = Arc::clone(&stats_internal);
     let uptime_for_storage: Arc<std::sync::RwLock<UptimeTracker>> = Arc::clone(&uptime_tracker);
-    let storage_for_api = Arc::clone(&storage_arc);
-    let uptime_for_api: Arc<std::sync::RwLock<UptimeTracker>> = Arc::clone(&uptime_tracker);
+    let hourly_health_for_task = Arc::clone(&hourly_health);
+    let storage_arc_hourly = Arc::clone(&storage_arc);
+    {
+        // Periodic metrics refresh for retention count and dashboard subscribers.
+        let metrics_for_ops = Arc::clone(&metrics);
+        let incident_store_for_ops = Arc::clone(&incident_store);
+        let broadcast_for_ops = Arc::clone(&broadcast_tx);
+        let hourly_for_gauge = Arc::clone(&hourly_health);
+        let ledger_for_gauge = Arc::clone(&ledger_health);
+        let process_started_at = process_started_at;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                metrics_for_ops.set_process_start_seconds_ago(
+                    (chrono::Utc::now() - process_started_at).num_seconds().max(0) as u64,
+                );
+                metrics_for_ops
+                    .set_dashboard_subscribers(broadcast_for_ops.receiver_count() as i64);
+                metrics_for_ops.set_incident_retained_count(
+                    incident_store_for_ops.incident_count().await.unwrap_or(0),
+                );
+                let now = chrono::Utc::now();
+                if let Some(age) = hourly_for_gauge.last_success_age_seconds(now) {
+                    metrics_for_ops.set_hourly_snapshot_age(age);
+                    metrics_for_ops.set_hourly_last_success_age(age);
+                }
+                if let Some(age) = ledger_for_gauge.last_success_age_seconds(now) {
+                    metrics_for_ops.set_incident_last_success_age(age);
+                }
+            }
+        });
+    }
     tokio::spawn(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(HOURLY_INTERVAL_SECONDS));
@@ -578,7 +759,7 @@ async fn main() -> Result<()> {
                         up.baseline_2.total_messages,
                     )
                 };
-                if let Err(e) = storage_arc
+                if let Err(e) = storage_arc_hourly
                     .save_hourly(
                         chrono::Utc::now(),
                         count_a,
@@ -589,6 +770,7 @@ async fn main() -> Result<()> {
                     .await
                 {
                     tracing::error!("Failed to save hourly stats: {}", e);
+                    hourly_health_for_task.record_failure(chrono::Utc::now());
                 }
 
                 let current_snapshot = {
@@ -606,7 +788,7 @@ async fn main() -> Result<()> {
                     )
                 };
 
-                if let Err(e) = storage_arc
+                if let Err(e) = storage_arc_hourly
                     .save_hourly_uptime(
                         chrono::Utc::now(),
                         interval_metrics.uptime_a_seconds,
@@ -642,6 +824,7 @@ async fn main() -> Result<()> {
                     .await
                 {
                     tracing::error!("Failed to save hourly uptime: {}", e);
+                    hourly_health_for_task.record_failure(chrono::Utc::now());
                 }
 
                 let reliability = ReliabilityHistory {
@@ -679,14 +862,15 @@ async fn main() -> Result<()> {
                         }
                     },
                 };
-                if let Err(e) = storage_arc
+                if let Err(e) = storage_arc_hourly
                     .save_hourly_reliability(chrono::Utc::now(), &reliability)
                     .await
                 {
                     tracing::error!("Failed to save hourly reliability: {}", e);
+                    hourly_health_for_task.record_failure(chrono::Utc::now());
                 }
 
-                if let Err(e) = storage_arc
+                if let Err(e) = storage_arc_hourly
                     .save_lifetime_totals(
                         current_snapshot.total_messages_a,
                         current_snapshot.total_messages_b,
@@ -694,7 +878,9 @@ async fn main() -> Result<()> {
                     .await
                 {
                     tracing::error!("Failed to save lifetime totals: {}", e);
+                    hourly_health_for_task.record_failure(chrono::Utc::now());
                 }
+                hourly_health_for_task.record_success(chrono::Utc::now());
 
                 previous_snapshot = current_snapshot;
                 previous_availability = current_availability;
@@ -772,15 +958,37 @@ async fn main() -> Result<()> {
         Ok(response)
     }
 
-    let app = axum::Router::new()
+    let app_state = AppState {
+        broadcast_tx: Arc::clone(&broadcast_tx),
+        storage: Arc::clone(&storage_arc),
+        uptime: Arc::clone(&uptime_tracker),
+        operational: Arc::clone(&operational),
+        ledger_health: Arc::clone(&ledger_health),
+        hourly_health: Arc::clone(&hourly_health),
+        metrics: Arc::clone(&metrics),
+        process_epoch: Arc::new(monitor_identity.process_epoch.clone()),
+        release: Arc::new(monitor_identity.release.clone()),
+        started_at: process_started_at,
+        incident_store: Arc::clone(&incident_store),
+    };
+    let ws_state = jetstream_monitor::websocket::WsState {
+        broadcast_tx: Arc::clone(&broadcast_tx),
+    };
+    let ws_router = axum::Router::new()
         .route("/ws", axum::routing::get(websocket::ws_handler))
+        .with_state(ws_state);
+    let operational_router = axum::Router::new()
         .route("/api/history", axum::routing::get(get_history))
         .route("/api/uptime", axum::routing::get(get_uptime))
         .route(
             "/api/uptime-detailed",
             axum::routing::get(get_uptime_detailed),
         )
-        .with_state((broadcast_tx, storage_for_api, uptime_for_api))
+        .route("/api/v1/health", axum::routing::get(get_api_health))
+        .route("/api/v1/metrics", axum::routing::get(get_api_metrics))
+        .with_state(app_state);
+    let app = ws_router
+        .merge(operational_router)
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .fallback(serve_spa);
 
@@ -846,12 +1054,9 @@ async fn apply_incident_command(
 
 async fn get_history(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-    axum::extract::State((_, storage, _)): axum::extract::State<(
-        Arc<tokio::sync::broadcast::Sender<jetstream_monitor::StreamStats>>,
-        Arc<Storage>,
-        Arc<std::sync::RwLock<UptimeTracker>>,
-    )>,
+    axum::extract::State(app): axum::extract::State<AppState>,
 ) -> axum::Json<Vec<HourlyStat>> {
+    let storage = &app.storage;
     let hours: i64 = params
         .get("hours")
         .and_then(|h| h.parse().ok())
@@ -867,12 +1072,9 @@ async fn get_history(
 
 async fn get_uptime(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-    axum::extract::State((_, storage, _)): axum::extract::State<(
-        Arc<tokio::sync::broadcast::Sender<jetstream_monitor::StreamStats>>,
-        Arc<Storage>,
-        Arc<std::sync::RwLock<UptimeTracker>>,
-    )>,
+    axum::extract::State(app): axum::extract::State<AppState>,
 ) -> axum::Json<UptimeResponse> {
+    let storage = &app.storage;
     let hours: i64 = params
         .get("hours")
         .and_then(|h| h.parse().ok())
@@ -918,12 +1120,10 @@ async fn get_uptime(
 
 async fn get_uptime_detailed(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-    axum::extract::State((_, storage, uptime_tracker)): axum::extract::State<(
-        Arc<tokio::sync::broadcast::Sender<jetstream_monitor::StreamStats>>,
-        Arc<Storage>,
-        Arc<std::sync::RwLock<UptimeTracker>>,
-    )>,
+    axum::extract::State(app): axum::extract::State<AppState>,
 ) -> axum::Json<UptimeDetailedStats> {
+    let storage = &app.storage;
+    let uptime_tracker = &app.uptime;
     let hours: i64 = params
         .get("hours")
         .and_then(|h| h.parse().ok())
@@ -979,4 +1179,94 @@ async fn get_uptime_detailed(
     }
 
     axum::Json(detailed)
+}
+
+async fn get_api_health(
+    axum::extract::State(app): axum::extract::State<AppState>,
+) -> axum::http::Response<axum::body::Body> {
+    use jetstream_monitor::stream::StreamId;
+
+    let ops = app.operational.lock().unwrap_or_else(|p| p.into_inner());
+    let now = chrono::Utc::now();
+
+    let mut streams = Vec::new();
+    for (stream_id, stream_key) in [
+        (StreamId::A, "a"),
+        (StreamId::B, "b"),
+        (StreamId::Baseline1, "baseline1"),
+        (StreamId::Baseline2, "baseline2"),
+    ] {
+        let availability = app.uptime.read().unwrap().availability_snapshot(stream_id);
+        let lag_us = app.uptime.read().unwrap().event_time_snapshot(stream_id).source_lag_us;
+        let entry = match ops.streams.get(&stream_id) {
+            Some(entry) => entry,
+            None => continue,
+        };
+        streams.push(StreamHealth {
+            stream_id: stream_key.to_string(),
+            transport: entry.transport.clone(),
+            delivery: entry.delivery.clone(),
+            delivery_idle: entry.delivery_idle,
+            state_age_seconds: entry
+                .age_started
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0),
+            last_useful_record_age_seconds: entry
+                .last_record_at
+                .map(|t| t.elapsed().as_secs()),
+            last_pong_age_seconds: entry.liveness.as_ref().and_then(|c| c.age_seconds()),
+            source_lag_seconds: lag_us
+                .map(|us| us / 1_000_000),
+            connection_epoch: 0,
+            reconnect_attempts: availability.reconnect_attempts,
+            outage_elapsed_ms: availability.outage_elapsed_ms,
+            outage_episodes: availability.outage_episodes,
+            idle_episodes: availability.idle_episodes,
+            active_incident_id: entry.active_incident_id.clone(),
+        });
+    }
+    let observation_loop_alive = ops.observation_loop_alive;
+    drop(ops);
+
+    let snapshot = HealthSnapshot::compute(
+        now,
+        (*app.process_epoch).clone(),
+        (*app.release).clone(),
+        app.started_at,
+        observation_loop_alive,
+        StorageHealth {
+            available: app.ledger_health.healthy(),
+            last_success_age_seconds: app.ledger_health.last_success_age_seconds(now),
+            stale_after_seconds: 3600,
+        },
+        StorageHealth {
+            available: true,
+            last_success_age_seconds: app.hourly_health.last_success_age_seconds(now),
+            stale_after_seconds: 7200,
+        },
+        streams,
+    );
+
+    let status_code = match snapshot.status {
+        HealthStatus::Unhealthy => axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        _ => axum::http::StatusCode::OK,
+    };
+    let body = serde_json::to_string(&ApiResponse { data: snapshot })
+        .unwrap_or_else(|_| "{}".to_string());
+    axum::http::Response::builder()
+        .status(status_code)
+        .header("content-type", "application/json")
+        .header("cache-control", jetstream_monitor::api::NO_STORE)
+        .body(axum::body::Body::from(body))
+        .unwrap()
+}
+
+async fn get_api_metrics(axum::extract::State(app): axum::extract::State<AppState>) -> axum::http::Response<axum::body::Body> {
+    let body = app.metrics.render();
+    axum::http::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header("content-type", Metrics::content_type())
+        .header("cache-control", jetstream_monitor::api::NO_STORE)
+        .body(axum::body::Body::from(body))
+        .unwrap()
 }

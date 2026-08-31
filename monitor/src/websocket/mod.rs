@@ -1,3 +1,3 @@
 pub mod broadcast;
 
-pub use broadcast::ws_handler;
+pub use broadcast::{ws_handler, WsState};
