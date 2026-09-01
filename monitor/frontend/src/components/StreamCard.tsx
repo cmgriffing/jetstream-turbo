@@ -32,15 +32,15 @@ interface StreamCardProps {
   /** Contract v4: delivery-idle episodes on live sockets. */
   idleEpisodes?: number;
   deliveryIdle?: boolean;
-  /** Additive ingress-ordinal accounting (turbo-fed streams only). */
-  ordinal?: OrdinalAccounting;
+  /** Additive ingress-ordinal accounting (turbo-fed streams only; null when
+   * no instrumented frame has been observed yet, e.g. baselines or pre-deploy). */
+  ordinal?: OrdinalAccounting | null | undefined;
 }
 
-export function isThresholdBreached(ordinal?: OrdinalAccounting): boolean {
-  return (
-    ordinal !== undefined &&
-    ordinal.status === "active" &&
-    (ordinal.duplicate_ratio > 0.05 || ordinal.gap_rate > 0.005)
+export function isThresholdBreached(ordinal?: OrdinalAccounting | null): boolean {
+  return Boolean(
+    ordinal?.status === "active" &&
+      ((ordinal?.duplicate_ratio ?? 0) > 0.05 || (ordinal?.gap_rate ?? 0) > 0.005),
   );
 }
 
@@ -293,7 +293,7 @@ export const StreamCard = memo(function StreamCard({
             {clientRecoveryMs !== undefined ? <span className="monitor-stream-metric-unit">Client recovery {formatDuration(clientRecoveryMs)}</span> : null}
           </p>
         </div>
-        {ordinal !== undefined ? (
+        {ordinal ? (
           <div className="monitor-stream-metric">
             <p className="monitor-stream-metric-label">
               Ordinal accounting ({ordinal.status})
@@ -320,7 +320,8 @@ export const StreamCard = memo(function StreamCard({
               <span className="monitor-stream-metric-unit">dup</span>
               {isThresholdBreached(ordinal) ? "⚠ breach" : null}
             </p>
-            {ordinal.gap_total > 0 || ordinal.uninstrumented_total > 0 ? (
+            {ordinal &&
+            (ordinal.gap_total > 0 || ordinal.uninstrumented_total > 0) ? (
               <p className="monitor-stream-metric-unit">
                 {ordinal.gap_total.toLocaleString()} gap · {ordinal.uninstrumented_total.toLocaleString()} uninstrumented
                 {ordinal.turbo_epoch ? ` · epoch ${ordinal.turbo_epoch}` : ""}

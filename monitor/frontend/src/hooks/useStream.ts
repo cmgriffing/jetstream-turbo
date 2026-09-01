@@ -152,8 +152,9 @@ export interface StreamStats {
   delivery_idle_baseline_1?: boolean
   delivery_idle_baseline_2?: boolean
   // Additive ingress-ordinal accounting for the turbo-fed streams.
-  ordinal_a?: OrdinalAccounting
-  ordinal_b?: OrdinalAccounting
+  // Rust serializes the Option as null before the first instrumented frame.
+  ordinal_a?: OrdinalAccounting | null
+  ordinal_b?: OrdinalAccounting | null
 }
 
 export interface AvailabilityHistory {
