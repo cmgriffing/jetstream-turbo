@@ -1,8 +1,8 @@
 //! Operational telemetry: Prometheus registry-backed metrics helpers.
 
 use prometheus::{
-    Encoder, Histogram, HistogramOpts, IntCounter, IntGauge, IntGaugeVec, Opts, Registry,
-    TextEncoder,
+    Encoder, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+    Registry, TextEncoder,
 };
 use std::collections::HashMap;
 
@@ -13,6 +13,14 @@ pub fn stream_label(stream_id: crate::stream::StreamId) -> &'static str {
         crate::stream::StreamId::B => "b",
         crate::stream::StreamId::Baseline1 => "baseline1",
         crate::stream::StreamId::Baseline2 => "baseline2",
+    }
+}
+
+/// Advance a family child counter to a monotonic cumulative total.
+fn bump(counter: &prometheus::core::GenericCounter<prometheus::core::AtomicU64>, total: u64) {
+    let current = counter.get();
+    if total > current {
+        counter.inc_by(total - current);
     }
 }
 
@@ -41,6 +49,13 @@ pub struct Metrics {
     transport_recovery_seconds: Histogram,
     delivery_recovery_seconds: Histogram,
     data_gap_seconds: Histogram,
+    // Ingress-ordinal accounting per stream (design D7, task 4.1).
+    ordinal_unique_total: IntCounterVec,
+    ordinal_duplicate_total: IntCounterVec,
+    ordinal_gap_total: IntCounterVec,
+    ordinal_uninstrumented_total: IntCounterVec,
+    ordinal_watermark: IntGaugeVec,
+    ordinal_epoch_changes_total: IntCounterVec,
 }
 
 impl Metrics {
@@ -188,6 +203,39 @@ impl Metrics {
         ))
         .expect("valid data gap histogram");
 
+        let counter_vec = |name: &str, help: &str| {
+            IntCounterVec::new(base(name, help), &["stream"]).expect("valid counter vec")
+        };
+
+        let ordinal_unique_total = counter_vec(
+            "monitor_stream_unique_event_total",
+            "Frames classified as unique by ingress ordinal per stream.",
+        );
+        let ordinal_duplicate_total = counter_vec(
+            "monitor_stream_duplicate_event_total",
+            "Frames classified as duplicate deliveries by ingress ordinal per stream.",
+        );
+        let ordinal_gap_total = counter_vec(
+            "monitor_stream_gap_event_total",
+            "Missing ordinals (synthetic gaps) in the delivery line per stream.",
+        );
+        let ordinal_uninstrumented_total = counter_vec(
+            "monitor_stream_uninstrumented_event_total",
+            "Frames delivered without ordinal facts per stream (deploy window).",
+        );
+        let ordinal_watermark = IntGaugeVec::new(
+            base(
+                "monitor_stream_ordinal_watermark",
+                "Highest observed ingress ordinal in the current turbo epoch.",
+            ),
+            &["stream"],
+        )
+        .expect("valid watermark gauge vec");
+        let ordinal_epoch_changes_total = counter_vec(
+            "monitor_stream_ordinal_epoch_changes_total",
+            "Observed in-band turbo epoch changes per stream.",
+        );
+
         let _ = registry.register(Box::new(process_start_seconds_ago.clone()));
         let _ = registry.register(Box::new(transport_state.clone()));
         let _ = registry.register(Box::new(delivery_state.clone()));
@@ -208,6 +256,12 @@ impl Metrics {
         let _ = registry.register(Box::new(transport_recovery_seconds.clone()));
         let _ = registry.register(Box::new(delivery_recovery_seconds.clone()));
         let _ = registry.register(Box::new(data_gap_seconds.clone()));
+        let _ = registry.register(Box::new(ordinal_unique_total.clone()));
+        let _ = registry.register(Box::new(ordinal_duplicate_total.clone()));
+        let _ = registry.register(Box::new(ordinal_gap_total.clone()));
+        let _ = registry.register(Box::new(ordinal_uninstrumented_total.clone()));
+        let _ = registry.register(Box::new(ordinal_watermark.clone()));
+        let _ = registry.register(Box::new(ordinal_epoch_changes_total.clone()));
 
         Self {
             registry,
@@ -232,6 +286,12 @@ impl Metrics {
             transport_recovery_seconds,
             delivery_recovery_seconds,
             data_gap_seconds,
+            ordinal_unique_total,
+            ordinal_duplicate_total,
+            ordinal_gap_total,
+            ordinal_uninstrumented_total,
+            ordinal_watermark,
+            ordinal_epoch_changes_total,
         }
     }
 
@@ -353,6 +413,38 @@ impl Metrics {
             .set(lag_seconds as i64);
     }
 
+    /// Publish the per-stream ingress-ordinal counters and watermark gauge
+    /// from the derived stream snapshot (task 4.1). Counters take the
+    /// cumulative totals directly, so re-setting is a no-op for monotonic
+    /// counters during the same process.
+    pub fn set_ordinal_snapshot(
+        &self,
+        stream_id: crate::stream::StreamId,
+        snapshot: &crate::stats::OrdinalStreamSnapshot,
+    ) {
+        let stream = stream_label(stream_id);
+        // Counters are fed by monotonic deltas of the cumulative totals; a
+        // total drop (epoch reset) simply stalls the counter until totals
+        // exceed the previously reported value.
+        bump(&self.ordinal_unique_total.with_label_values(&[stream]), snapshot.unique_total);
+        bump(
+            &self.ordinal_duplicate_total.with_label_values(&[stream]),
+            snapshot.duplicate_total,
+        );
+        bump(&self.ordinal_gap_total.with_label_values(&[stream]), snapshot.gap_total);
+        bump(
+            &self.ordinal_uninstrumented_total.with_label_values(&[stream]),
+            snapshot.uninstrumented_total,
+        );
+        bump(
+            &self.ordinal_epoch_changes_total.with_label_values(&[stream]),
+            snapshot.epoch_changes,
+        );
+        self.ordinal_watermark
+            .with_label_values(&[stream])
+            .set(snapshot.ordinal_watermark as i64);
+    }
+
     pub fn render(&self) -> String {
         let encoder = TextEncoder::new();
         let mut buffer = Vec::new();
@@ -381,6 +473,21 @@ mod tests {
         metrics.record_idle_episode();
         metrics.record_useful_record();
         metrics.record_incident_storage_failure();
+        metrics.set_ordinal_snapshot(
+            crate::stream::StreamId::A,
+            &crate::stats::OrdinalStreamSnapshot {
+                turbo_epoch: "epoch-m".to_string(),
+                ordinal_watermark: 17,
+                unique_total: 10,
+                duplicate_total: 2,
+                gap_total: 0,
+                uninstrumented_total: 0,
+                epoch_changes: 0,
+                duplicate_ratio: 0.0,
+                gap_rate: 0.0,
+                status: "active".to_string(),
+            },
+        );
         metrics.set_transport_state(
             crate::stream::StreamId::A,
             crate::stream::TransportState::Connected,
@@ -417,12 +524,40 @@ mod tests {
             "monitor_transport_recovery_seconds",
             "monitor_delivery_recovery_seconds",
             "monitor_data_gap_seconds",
+            "monitor_stream_unique_event_total",
+            "monitor_stream_duplicate_event_total",
+            "monitor_stream_gap_event_total",
+            "monitor_stream_uninstrumented_event_total",
+            "monitor_stream_ordinal_watermark",
+            "monitor_stream_ordinal_epoch_changes_total",
         ] {
             assert!(
                 out.contains(&format!("# HELP {family}")),
                 "missing family {family}"
             );
         }
+    }
+
+    #[test]
+    fn renders_ordinal_accounting_snapshot() {
+        let metrics = Metrics::new("test-epoch".to_string());
+        let snapshot = crate::stats::OrdinalStreamSnapshot {
+            turbo_epoch: "epoch-m".to_string(),
+            ordinal_watermark: 17,
+            unique_total: 10,
+            duplicate_total: 2,
+            gap_total: 0,
+            uninstrumented_total: 0,
+            epoch_changes: 0,
+            duplicate_ratio: 0.0,
+            gap_rate: 0.0,
+            status: "active".to_string(),
+        };
+        metrics.set_ordinal_snapshot(crate::stream::StreamId::A, &snapshot);
+        let out = metrics.render();
+        assert!(out.contains("monitor_stream_unique_event_total{stream=\"a\"} 10"));
+        assert!(out.contains("monitor_stream_duplicate_event_total{stream=\"a\"} 2"));
+        assert!(out.contains("monitor_stream_ordinal_watermark{stream=\"a\"} 17"));
     }
 
     #[test]

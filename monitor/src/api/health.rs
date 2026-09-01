@@ -65,6 +65,19 @@ pub struct StreamHealth {
     pub outage_episodes: u64,
     pub idle_episodes: u64,
     pub active_incident_id: Option<String>,
+    /// Additive ingress-ordinal accounting fields (design D7). `None` when
+    /// no instrumented frame has been observed on the stream yet.
+    pub frames_total: u64,
+    pub unique_total: Option<u64>,
+    pub duplicate_total: Option<u64>,
+    pub gap_total: Option<u64>,
+    pub uninstrumented_total: Option<u64>,
+    pub duplicate_ratio: Option<f64>,
+    pub gap_rate: Option<f64>,
+    pub ordinal_watermark: Option<u64>,
+    pub turbo_epoch: Option<String>,
+    /// `active` | `uninstrumented` — accounting status of the stream.
+    pub ordinal_accounting: String,
 }
 
 /// Full health snapshot as served by `GET /api/v1/health`.
@@ -159,6 +172,16 @@ mod tests {
             outage_episodes: 0,
             idle_episodes: 0,
             active_incident_id: None,
+            frames_total: 0,
+            unique_total: None,
+            duplicate_total: None,
+            gap_total: None,
+            uninstrumented_total: None,
+            duplicate_ratio: None,
+            gap_rate: None,
+            ordinal_watermark: None,
+            turbo_epoch: None,
+            ordinal_accounting: "uninstrumented".to_string(),
         }
     }
 

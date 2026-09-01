@@ -2,7 +2,7 @@ import { memo } from "react";
 import { Info, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { formatUptimePercent } from "@/lib/uptime";
-import type { StreamEventTime } from "@/hooks/useStream";
+import type { OrdinalAccounting, StreamEventTime } from "@/hooks/useStream";
 
 interface StreamCardProps {
   streamId: "a" | "b" | "baseline-1" | "baseline-2";
@@ -32,6 +32,16 @@ interface StreamCardProps {
   /** Contract v4: delivery-idle episodes on live sockets. */
   idleEpisodes?: number;
   deliveryIdle?: boolean;
+  /** Additive ingress-ordinal accounting (turbo-fed streams only). */
+  ordinal?: OrdinalAccounting;
+}
+
+export function isThresholdBreached(ordinal?: OrdinalAccounting): boolean {
+  return (
+    ordinal !== undefined &&
+    ordinal.status === "active" &&
+    (ordinal.duplicate_ratio > 0.05 || ordinal.gap_rate > 0.005)
+  );
 }
 
 function formatDuration(ms: number): string {
@@ -82,6 +92,7 @@ export const StreamCard = memo(function StreamCard({
   deliveryRecoveries,
   idleEpisodes,
   deliveryIdle,
+  ordinal,
 }: StreamCardProps) {
   const isBaseline = streamId === "baseline-1" || streamId === "baseline-2";
   const completeIdentity = fullName || name;
@@ -282,6 +293,41 @@ export const StreamCard = memo(function StreamCard({
             {clientRecoveryMs !== undefined ? <span className="monitor-stream-metric-unit">Client recovery {formatDuration(clientRecoveryMs)}</span> : null}
           </p>
         </div>
+        {ordinal !== undefined ? (
+          <div className="monitor-stream-metric">
+            <p className="monitor-stream-metric-label">
+              Ordinal accounting ({ordinal.status})
+              <button
+                type="button"
+                className="monitor-tooltip-trigger relative inline-flex cursor-pointer"
+                aria-label="More info about ordinal accounting"
+              >
+                <Info className="h-2.5 w-3" aria-hidden="true" />
+                <span className="monitor-tooltip">
+                  Ingress-ordinal classification: unique vs duplicate delivery and synthetic gaps from missing ordinals. Raw frame counts above are unchanged.
+                </span>
+              </button>
+            </p>
+            <p
+              className={cn(
+                "monitor-stream-metric-value",
+                isThresholdBreached(ordinal) && "monitor-stream-metric-value--breach",
+              )}
+            >
+              {ordinal.unique_total.toLocaleString()}
+              <span className="monitor-stream-metric-unit">unique</span>
+              {ordinal.duplicate_total.toLocaleString()}
+              <span className="monitor-stream-metric-unit">dup</span>
+              {isThresholdBreached(ordinal) ? "⚠ breach" : null}
+            </p>
+            {ordinal.gap_total > 0 || ordinal.uninstrumented_total > 0 ? (
+              <p className="monitor-stream-metric-unit">
+                {ordinal.gap_total.toLocaleString()} gap · {ordinal.uninstrumented_total.toLocaleString()} uninstrumented
+                {ordinal.turbo_epoch ? ` · epoch ${ordinal.turbo_epoch}` : ""}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </article>
   );

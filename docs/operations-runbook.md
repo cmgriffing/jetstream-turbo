@@ -147,6 +147,45 @@ changes; the production-scale memory suite is the regression gate.
 
 ---
 
+## 4b. Publish-before-complete retry path (ingress-ordinal accounting change)
+
+- Completion contract (design D9): an ingress event counts as complete for
+  cursor-overlap replay filtering only after it has been published (external
+  sink) and broadcast to monitor subscribers at least once.
+- Storage stage: every stored row also gets a row in the durable
+  `publication_journal` table (same SQLite transaction as the records insert).
+- Failure windows after `store_batch` and how the failed range re-enters the
+  pipeline:
+  1. **Publication or broadcast failure/timeout in process**: the batch task
+     returns `RunFailure`, the run loop aborts in-flight batches, flushes the
+     durable checkpoint at the failure boundary, and exits; the supervisor
+     decides recovery. The journal rows for the failed batch remain.
+  2. **Process restart mid-batch**: the journal rows persist in SQLite; the
+     durable checkpoint never advanced past the failed batch, so the restart
+     replays the range via Jetstream cursor replay.
+  3. **Retry pass**: `resolve_completion_state` splits the replayed batch into
+     fully complete events (row exists, journal entry cleared) and
+     stored-but-unpublished events (journal entry still present). The latter
+     skip re-hydration and re-storage: their records are reconstructed from
+     durable rows and proceed directly to publication and broadcast.
+     `jetstream_republished_records_total` counts these re-publications.
+- Consequences: publication is at-least-once in the failure window (overlap
+  replay already implied this). External sinks must tolerate duplicate
+  delivery on the consumer side; the monitor's duplicate counter observes the
+  same duplicates either way.
+- Publication idempotency (task 2.4): the stream sink (`not_redis`) assigns
+  publication entry IDs as `processed_at_millis-seq` and appends without
+  duplicate suppression, so a re-published stored record appears a second
+  time with the SAME entry ID. Consumers should dedup on that entry ID (or on
+  the portable source-event identity inside the message) rather than relying
+  on the sink to suppress repeats.
+- Metrics: `jetstream_republished_records_total` (stored-but-unpublished
+  re-publications), `jetstream_publication_journal_clear_failures_total`
+  (journal cleanup failure after a successful batch; retry will re-publish
+  those records once more, which is safe).
+
+---
+
 ## 5. Rollback switches (summary)
 
 | Switch | Values | Effect |

@@ -1,6 +1,7 @@
 use crate::stats::comparison::{
     ComparisonEngine, ComparisonStreamState, ObservationConfig, PairwiseComparisons,
 };
+use crate::stats::ordinal::{OrdinalAccounting, OrdinalStreamSnapshot};
 use crate::stream::{ConnectionStatus, ReconnectReason, StreamId, StreamMessage};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -176,6 +177,9 @@ pub struct StreamStats {
     pub delivery_idle_b: bool,
     pub delivery_idle_baseline_1: bool,
     pub delivery_idle_baseline_2: bool,
+    /// Ingress-ordinal accounting for the turbo-fed streams (additive, D7).
+    pub ordinal_a: Option<OrdinalStreamSnapshot>,
+    pub ordinal_b: Option<OrdinalStreamSnapshot>,
 }
 
 pub struct StatsAggregator {
@@ -456,6 +460,8 @@ impl StatsAggregator {
                     delivery_idle_b: availability_b.delivery_idle,
                     delivery_idle_baseline_1: availability_baseline_1.delivery_idle,
                     delivery_idle_baseline_2: availability_baseline_2.delivery_idle,
+                    ordinal_a: uptime.read().unwrap().ordinal_snapshot(StreamId::A),
+                    ordinal_b: uptime.read().unwrap().ordinal_snapshot(StreamId::B),
                 };
 
                 let _ = tx.send(stats_snapshot);
@@ -844,6 +850,16 @@ pub struct UptimeTracker {
     watermark_skew_threshold: Duration,
     event_idle_threshold: Duration,
     comparison_engine: ComparisonEngine,
+    ordinal_a: OrdinalState,
+    ordinal_b: OrdinalState,
+}
+
+/// Latest cumulative ordinal accounting plus windowed samples for the
+/// derived duplicate-ratio and gap-rate series (design D7).
+#[derive(Debug, Default)]
+struct OrdinalState {
+    latest: Option<OrdinalAccounting>,
+    samples: VecDeque<(Instant, OrdinalAccounting)>,
 }
 
 #[derive(Debug, Default)]
@@ -930,6 +946,8 @@ impl Default for UptimeTracker {
             watermark_skew_threshold: Duration::from_secs(30),
             event_idle_threshold: Duration::from_secs(30),
             comparison_engine: ComparisonEngine::new(ObservationConfig::default()),
+            ordinal_a: OrdinalState::default(),
+            ordinal_b: OrdinalState::default(),
         }
     }
 }
@@ -1141,6 +1159,9 @@ impl UptimeTracker {
 
     pub fn record_stream_message(&mut self, message: &StreamMessage) {
         self.record_total_count(message.stream_id, message.count);
+        if let Some(accounting) = &message.ordinal_accounting {
+            self.record_ordinal_accounting(message.stream_id, accounting);
+        }
         let now = Instant::now();
         let state = match message.stream_id {
             StreamId::A => &mut self.event_time_a,
@@ -1262,6 +1283,98 @@ impl UptimeTracker {
             StreamId::Baseline1 => self.baseline_1.availability.snapshot(now),
             StreamId::Baseline2 => self.baseline_2.availability.snapshot(now),
         }
+    }
+
+    /// Record one cumulative ordinal accounting snapshot for a turbo-fed
+    /// stream, keeping windowed samples for derived ratio computation.
+    pub fn record_ordinal_accounting(
+        &mut self,
+        stream_id: StreamId,
+        accounting: &OrdinalAccounting,
+    ) {
+        let now = Instant::now();
+        let state = match stream_id {
+            StreamId::A => &mut self.ordinal_a,
+            StreamId::B => &mut self.ordinal_b,
+            // Baselines carry no ring (design D6).
+            StreamId::Baseline1 | StreamId::Baseline2 => return,
+        };
+        state.latest = Some(accounting.clone());
+        state.samples.push_back((now, accounting.clone()));
+        while let Some((observed_at, _)) = state.samples.front() {
+            if now.duration_since(*observed_at) > Self::RATE_WINDOW * 2 {
+                state.samples.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Derived per-stream ordinal picture, or None when the stream carries no
+    /// ring (baselines) or nothing instrumented has been observed yet.
+    pub fn ordinal_snapshot(&self, stream_id: StreamId) -> Option<OrdinalStreamSnapshot> {
+        let state = match stream_id {
+            StreamId::A => &self.ordinal_a,
+            StreamId::B => &self.ordinal_b,
+            StreamId::Baseline1 | StreamId::Baseline2 => return None,
+        };
+        let latest = state.latest.as_ref()?;
+        let now = Instant::now();
+        // Windowed deltas over the rate window (same window as message rates):
+        // compare the newest cumulative snapshot against the newest sample
+        // that is still inside the window.
+        let first_in_window = state
+            .samples
+            .iter()
+            .find(|(at, _)| now.duration_since(*at) <= Self::RATE_WINDOW)
+            .map(|(_, snap)| snap.clone());
+        let (d_unique, d_duplicate, d_gap, d_uninstrumented): (u64, u64, u64, u64) =
+            match first_in_window {
+                Some(first) => (
+                    latest.unique_total.saturating_sub(first.unique_total),
+                    latest.duplicate_total.saturating_sub(first.duplicate_total),
+                    latest.gap_total.saturating_sub(first.gap_total),
+                    latest.uninstrumented_total.saturating_sub(first.uninstrumented_total),
+                ),
+                None => (0, 0, 0, 0),
+            };
+        let instrumented = d_unique
+            .saturating_add(d_duplicate)
+            .saturating_add(d_gap);
+        let observed = d_unique.saturating_add(d_duplicate);
+        let duplicate_ratio = if observed > 0 {
+            d_duplicate as f64 / observed as f64
+        } else {
+            0.0
+        };
+        let gap_rate = if instrumented > 0 {
+            d_gap as f64 / instrumented as f64
+        } else {
+            0.0
+        };
+        let status = if latest.unique_total
+            .saturating_add(latest.duplicate_total)
+            .saturating_add(latest.gap_total)
+            > 0
+            || instrumented > 0
+        {
+            OrdinalStreamSnapshot::ACTIVE.to_string()
+        } else {
+            OrdinalStreamSnapshot::UNINSTRUMENTED.to_string()
+        };
+        let _ = d_uninstrumented;
+        Some(OrdinalStreamSnapshot {
+            turbo_epoch: latest.turbo_epoch.clone(),
+            ordinal_watermark: latest.ordinal_watermark,
+            unique_total: latest.unique_total,
+            duplicate_total: latest.duplicate_total,
+            gap_total: latest.gap_total,
+            uninstrumented_total: latest.uninstrumented_total,
+            epoch_changes: latest.epoch_changes,
+            duplicate_ratio,
+            gap_rate,
+            status,
+        })
     }
 
     pub fn record_delivery_latency(&mut self, stream_id: StreamId, latency_us: u64) {
@@ -1856,7 +1969,10 @@ mod tests {
                 lag_us: now_us.saturating_sub(source_time_us),
                 clock_skew_us: source_time_us.saturating_sub(now_us),
                 source_event_id: Some(format!("event-{source_time_us}")),
+                ingress_ordinal: None,
+                turbo_epoch: None,
             }),
+            ordinal_accounting: None,
         }
     }
 
@@ -2132,7 +2248,10 @@ mod episode_tests {
                 lag_us: now_us.saturating_sub(source_time_us),
                 clock_skew_us: 0,
                 source_event_id: Some(format!("event-{source_time_us}")),
+                ingress_ordinal: None,
+                turbo_epoch: None,
             }),
+            ordinal_accounting: None,
         }
     }
 
@@ -2304,5 +2423,89 @@ mod episode_tests {
         assert_eq!(after.idle_episodes, 1);
         assert!(after.transport_recovery_ms == 0);
         assert!(after.delivery_available);
+    }
+}
+#[cfg(test)]
+mod ordinal_tests {
+    use super::UptimeTracker;
+    use crate::stats::ordinal::OrdinalAccounting;
+    use crate::stream::StreamId;
+
+    fn accounting(
+        unique_total: u64,
+        duplicate_total: u64,
+        gap_total: u64,
+        uninstrumented_total: u64,
+    ) -> OrdinalAccounting {
+        OrdinalAccounting {
+            turbo_epoch: "epoch-t".to_string(),
+            ordinal_watermark: unique_total + 1,
+            unique_total,
+            duplicate_total,
+            gap_total,
+            uninstrumented_total,
+            epoch_changes: 0,
+        }
+    }
+
+    #[test]
+    fn baseline_streams_have_no_ordinal_snapshot() {
+        let tracker = UptimeTracker::new();
+        assert!(tracker.ordinal_snapshot(StreamId::Baseline1).is_none());
+        assert!(tracker.ordinal_snapshot(StreamId::Baseline2).is_none());
+    }
+
+    #[test]
+    fn turbo_stream_without_observations_has_no_snapshot() {
+        let tracker = UptimeTracker::new();
+        assert!(tracker.ordinal_snapshot(StreamId::A).is_none());
+        assert!(tracker.ordinal_snapshot(StreamId::B).is_none());
+    }
+
+    #[test]
+    fn windowed_duplicate_ratio_and_gap_rate_are_derived_from_cumulative_deltas() {
+        let mut tracker = UptimeTracker::new();
+        // 10 uniques, then 12 frames of which 2 were duplicates.
+        tracker.record_ordinal_accounting(StreamId::A, &accounting(10, 0, 0, 0));
+        tracker.record_ordinal_accounting(StreamId::A, &accounting(10, 2, 0, 0));
+        let snapshot = tracker.ordinal_snapshot(StreamId::A).unwrap();
+        assert_eq!(snapshot.status, "active");
+        // Window deltas: only the 2 duplicates moved.
+        assert!((snapshot.duplicate_ratio - 1.0).abs() < 1e-9);
+        assert!(snapshot.gap_rate.abs() < 1e-9);
+        // Then more frames expose a gap of 6.
+        tracker.record_ordinal_accounting(StreamId::A, &accounting(16, 2, 6, 0));
+        let snapshot = tracker.ordinal_snapshot(StreamId::A).unwrap();
+        // Window deltas from the first sample: d_unique = 6, d_dup = 2, d_gap = 6.
+        assert!((snapshot.duplicate_ratio - 2.0 / 8.0).abs() < 1e-9);
+        assert!((snapshot.gap_rate - 6.0 / 14.0).abs() < 1e-9);
+        assert_eq!(snapshot.ordinal_watermark, 17);
+        assert_eq!(snapshot.turbo_epoch, "epoch-t");
+    }
+
+    #[test]
+    fn uninstrumented_only_activity_reports_uninstrumented_status() {
+        let mut tracker = UptimeTracker::new();
+        tracker.record_ordinal_accounting(StreamId::B, &accounting(0, 0, 0, 5));
+        tracker.record_ordinal_accounting(StreamId::B, &accounting(0, 0, 0, 12));
+        let snapshot = tracker.ordinal_snapshot(StreamId::B).unwrap();
+        assert_eq!(snapshot.status, "uninstrumented");
+        assert_eq!(snapshot.uninstrumented_total, 12);
+        assert_eq!(snapshot.duplicate_ratio, 0.0);
+        assert_eq!(snapshot.gap_rate, 0.0);
+    }
+
+    #[test]
+    fn stream_message_accounting_feeds_the_tracker() {
+        let mut tracker = UptimeTracker::new();
+        tracker.record_stream_message(&crate::stream::StreamMessage {
+            stream_id: StreamId::A,
+            count: 5,
+            delivery_latency_us: None,
+            source_event: None,
+            ordinal_accounting: Some(accounting(4, 1, 0, 0)),
+        });
+        let snapshot = tracker.ordinal_snapshot(StreamId::A).unwrap();
+        assert_eq!(snapshot.duplicate_total, 1);
     }
 }

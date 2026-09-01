@@ -1,3 +1,4 @@
+pub mod broadcast;
 pub mod coordinator;
 pub mod diagnostics;
 pub mod failure_supervisor;
@@ -6,6 +7,7 @@ pub mod progress;
 pub mod runtime_identity;
 pub mod runtime_memory;
 
+pub use broadcast::MonitorBroadcastEnvelope;
 pub use diagnostics::{
     CacheStateDiagnostics, DiagnosticsCollector, HealthDiagnostics, HealthStatus,
     MemoryPeakDiagnostics, NotRedisStateDiagnostics, ProcessMemoryDiagnostics,

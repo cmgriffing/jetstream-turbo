@@ -1950,3 +1950,7 @@
     justify-content: flex-start;
   }
 }
+
+.monitor-stream-metric-value--breach {
+  color: var(--color-warning, #b45309);
+}

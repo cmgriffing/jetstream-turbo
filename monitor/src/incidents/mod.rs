@@ -1,6 +1,7 @@
 //! Incident ledger types: bounded states, triggers, events, and identifiers.
 
 pub mod store;
+pub mod thresholds;
 
 pub use store::IncidentStore;
 
@@ -63,6 +64,23 @@ pub enum IncidentTrigger {
     DeliveryIdle,
     /// Transport was lost while delivery had been available.
     TransportLoss,
+    /// Sustained duplicate-ordinal ratio breach (stable reason
+    /// `duplicate_delivery`).
+    DuplicateDelivery,
+    /// Sustained ordinal-gap rate breach (stable reason `ordinal_gap`).
+    OrdinalGap,
+}
+
+impl IncidentTrigger {
+    /// Stable incident reason identifier (task 4.3).
+    pub fn reason(self) -> &'static str {
+        match self {
+            IncidentTrigger::DeliveryIdle => "delivery_idle",
+            IncidentTrigger::TransportLoss => "transport_loss",
+            IncidentTrigger::DuplicateDelivery => "duplicate_delivery",
+            IncidentTrigger::OrdinalGap => "ordinal_gap",
+        }
+    }
 }
 
 /// Bounded, sanitized event types recorded in the incident ledger.
@@ -81,6 +99,10 @@ pub enum IncidentEventType {
     DeliveryRecovered,
     /// An observation gap was recorded at startup reconciliation.
     ObservationGap,
+    /// A sustained ordinal-accounting breach was detected (duplicates/gaps).
+    ThresholdBreached,
+    /// The breached ratio/rate recovered below its threshold.
+    ThresholdRecovered,
 }
 
 /// A bounded, sanitized event in an incident's ordered history.
@@ -96,6 +118,11 @@ pub struct IncidentEvent {
     pub attempt_ordinal: Option<u64>,
     /// Selected backoff delay in milliseconds, when a delay was scheduled.
     pub scheduled_delay_ms: Option<u64>,
+    /// Bounded, sanitized JSON evidence (e.g. epoch, watermark, windowed
+    /// counts) attached by threshold-based triggers. Additive field; older
+    /// records carry None.
+    #[serde(default)]
+    pub evidence: Option<String>,
 }
 
 /// Bounded connection-transport loss reason used in transitions and incidents.

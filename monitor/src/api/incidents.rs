@@ -84,6 +84,8 @@ pub fn parse_trigger(raw: Option<&str>) -> Result<Option<IncidentTrigger>, ApiEr
         None => Ok(None),
         Some("delivery_idle") => Ok(Some(IncidentTrigger::DeliveryIdle)),
         Some("transport_loss") => Ok(Some(IncidentTrigger::TransportLoss)),
+        Some("duplicate_delivery") => Ok(Some(IncidentTrigger::DuplicateDelivery)),
+        Some("ordinal_gap") => Ok(Some(IncidentTrigger::OrdinalGap)),
         Some(other) => Err(ApiError::invalid_request(format!(
             "unsupported trigger value {other}"
         ))),
@@ -185,6 +187,8 @@ impl From<&IncidentSummary> for IncidentSummaryDto {
         let trigger = match summary.trigger {
             IncidentTrigger::DeliveryIdle => "delivery_idle",
             IncidentTrigger::TransportLoss => "transport_loss",
+            IncidentTrigger::DuplicateDelivery => "duplicate_delivery",
+            IncidentTrigger::OrdinalGap => "ordinal_gap",
         };
         Self {
             id: summary.id.as_str().to_string(),

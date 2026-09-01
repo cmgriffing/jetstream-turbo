@@ -181,7 +181,7 @@ async fn ws_handler(
 
 async fn handle_websocket(
     socket: WebSocket,
-    broadcast_rx: broadcast::Receiver<crate::models::enriched::EnrichedRecord>,
+    broadcast_rx: broadcast::Receiver<crate::turbocharger::MonitorBroadcastEnvelope>,
 ) {
     let (sender, socket_rx) = socket.split();
     let connection_id = uuid::Uuid::new_v4();
@@ -243,14 +243,14 @@ async fn handle_websocket(
     );
 }
 
-/// Drains the broadcast channel and forwards owned `EnrichedRecord` values into
+/// Drains the broadcast channel and forwards owned `MonitorBroadcastEnvelope` values into
 /// the outgoing channel without ever blocking on the WebSocket sender. Exits on
 /// peer timeout, socket error, Close frame, peer disconnect, or broadcast close.
 async fn monitor_receive_loop<Stream, StreamError>(
     connection_id: uuid::Uuid,
     mut socket_rx: Stream,
-    mut broadcast_rx: broadcast::Receiver<crate::models::enriched::EnrichedRecord>,
-    outgoing_tx: mpsc::Sender<crate::models::enriched::EnrichedRecord>,
+    mut broadcast_rx: broadcast::Receiver<crate::turbocharger::MonitorBroadcastEnvelope>,
+    outgoing_tx: mpsc::Sender<crate::turbocharger::MonitorBroadcastEnvelope>,
     mut peer_timeout_interval: tokio::time::Interval,
     mut lag_log_interval: tokio::time::Interval,
 ) -> (u64, u64)
@@ -344,7 +344,7 @@ where
     (lagged_total, dropped_total)
 }
 
-/// Owns the WebSocket sender, serializes `EnrichedRecord` values, and sends
+/// Owns the WebSocket sender, serializes `MonitorBroadcastEnvelope` values, and sends
 /// heartbeats with biased priority. There is no send timeout: sends block
 /// naturally while the monitor is slow, and the bounded outgoing channel
 /// absorbs short stalls. Exits when the outgoing channel closes (receive task
@@ -352,7 +352,7 @@ where
 async fn monitor_send_loop<Sink, SinkError>(
     connection_id: uuid::Uuid,
     mut sender: Sink,
-    mut outgoing_rx: mpsc::Receiver<crate::models::enriched::EnrichedRecord>,
+    mut outgoing_rx: mpsc::Receiver<crate::turbocharger::MonitorBroadcastEnvelope>,
     mut heartbeat_interval: tokio::time::Interval,
 ) -> u64
 where
@@ -1520,8 +1520,9 @@ mod tests {
     use crate::models::enriched::EnrichedRecord;
     use crate::models::jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType};    use crate::turbocharger::{
         CacheStateDiagnostics, HealthDiagnostics, HealthStatus, MemoryPeakDiagnostics,
-        NotRedisStateDiagnostics, PipelineProgress, PipelineReadinessState,
-        ProcessMemoryDiagnostics, ProgressThresholds, ReadinessDiagnostics, SQLiteStateDiagnostics,
+        MonitorBroadcastEnvelope, NotRedisStateDiagnostics, PipelineProgress,
+        PipelineReadinessState, ProcessMemoryDiagnostics, ProgressThresholds,
+        ReadinessDiagnostics, SQLiteStateDiagnostics,
     };
     use axum::extract::ws::Message;
     use axum::http::StatusCode;
@@ -2141,6 +2142,18 @@ mod tests {
         })
     }
 
+    /// A broadcast envelope as produced by the pipeline; ordinals in tests are
+    /// distinct so contract assertions can check per-epoch uniqueness.
+    fn sample_envelope(ordinal: u64) -> MonitorBroadcastEnvelope {
+        MonitorBroadcastEnvelope::new(sample_record(), "epoch-test", ordinal)
+    }
+
+    fn next_ordinal() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        N.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
     /// Consumes the interval's immediate first tick so the next tick fires after
     /// one full period, mirroring how `handle_websocket` primes its intervals.
     async fn primed_interval(period: Duration) -> tokio::time::Interval {
@@ -2200,7 +2213,7 @@ mod tests {
         let (broadcast_tx, broadcast_rx) = broadcast::channel(16);
         // The receiver side is never read, so the outgoing channel fills up and
         // stays full - the receive loop must drop instead of blocking.
-        let (outgoing_tx, _stalled_outgoing_rx) = mpsc::channel::<EnrichedRecord>(2);
+        let (outgoing_tx, _stalled_outgoing_rx) = mpsc::channel::<MonitorBroadcastEnvelope>(2);
         let socket_rx = stream::pending::<Result<Message, std::io::Error>>();
         let peer_timeout_interval = primed_interval(Duration::from_secs(3600)).await;
         let lag_log_interval = primed_interval(Duration::from_secs(3600)).await;
@@ -2215,7 +2228,7 @@ mod tests {
         ));
 
         for _ in 0..10 {
-            broadcast_tx.send(sample_record()).unwrap();
+            broadcast_tx.send(sample_envelope(next_ordinal())).unwrap();
         }
         drop(broadcast_tx);
 
@@ -2231,7 +2244,7 @@ mod tests {
     async fn try_send_failure_increments_drop_total_without_closing_connection() {
         let connection_id = uuid::Uuid::new_v4();
         let (broadcast_tx, broadcast_rx) = broadcast::channel(16);
-        let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<EnrichedRecord>(1);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<MonitorBroadcastEnvelope>(1);
         let socket_rx = stream::pending::<Result<Message, std::io::Error>>();
         let peer_timeout_interval = primed_interval(Duration::from_secs(3600)).await;
         let lag_log_interval = primed_interval(Duration::from_secs(3600)).await;
@@ -2246,15 +2259,15 @@ mod tests {
         ));
 
         // First record fills the outgoing channel.
-        broadcast_tx.send(sample_record()).unwrap();
+        broadcast_tx.send(sample_envelope(next_ordinal())).unwrap();
         let first = outgoing_rx.recv().await.expect("first record buffered");
-        assert_eq!(first.get_did(), "did:plc:test");
+        assert_eq!(first.record.get_did(), "did:plc:test");
 
         // Two more records arrive while the channel is full: both are dropped,
         // but the connection must stay alive (no break, no close).
-        broadcast_tx.send(sample_record()).unwrap();
-        broadcast_tx.send(sample_record()).unwrap();
-        broadcast_tx.send(sample_record()).unwrap();
+        broadcast_tx.send(sample_envelope(next_ordinal())).unwrap();
+        broadcast_tx.send(sample_envelope(next_ordinal())).unwrap();
+        broadcast_tx.send(sample_envelope(next_ordinal())).unwrap();
         tokio::task::yield_now().await;
         assert!(
             !task.is_finished(),
@@ -2263,8 +2276,8 @@ mod tests {
 
         // Free a slot; the loop must keep processing rather than having exited.
         let second = outgoing_rx.recv().await.expect("second record buffered");
-        assert_eq!(second.get_did(), "did:plc:test");
-        broadcast_tx.send(sample_record()).unwrap();
+        assert_eq!(second.record.get_did(), "did:plc:test");
+        broadcast_tx.send(sample_envelope(next_ordinal())).unwrap();
         drop(broadcast_tx);
 
         let (_, dropped_total) = task.await.unwrap();
@@ -2273,13 +2286,13 @@ mod tests {
         // The message sent after recovery was buffered, proving the connection
         // stayed alive through the drops.
         let recovered = outgoing_rx.recv().await.expect("recovered record buffered");
-        assert_eq!(recovered.get_did(), "did:plc:test");
+        assert_eq!(recovered.record.get_did(), "did:plc:test");
     }
 
     #[tokio::test]
     async fn send_loop_exits_when_outgoing_channel_sender_is_dropped() {
         let connection_id = uuid::Uuid::new_v4();
-        let (outgoing_tx, outgoing_rx) = mpsc::channel::<EnrichedRecord>(4);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel::<MonitorBroadcastEnvelope>(4);
         // Dropping the sender is the only shutdown signal the send loop needs.
         drop(outgoing_tx);
 
@@ -2305,9 +2318,9 @@ mod tests {
     #[tokio::test]
     async fn heartbeat_fires_with_biased_priority_under_full_outgoing_channel() {
         let connection_id = uuid::Uuid::new_v4();
-        let (outgoing_tx, outgoing_rx) = mpsc::channel::<EnrichedRecord>(8);
+        let (outgoing_tx, outgoing_rx) = mpsc::channel::<MonitorBroadcastEnvelope>(8);
         for _ in 0..3 {
-            outgoing_tx.send(sample_record()).await.unwrap();
+            outgoing_tx.send(sample_envelope(next_ordinal())).await.unwrap();
         }
         drop(outgoing_tx);
 

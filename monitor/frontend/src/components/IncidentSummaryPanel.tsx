@@ -28,7 +28,18 @@ function formatState(state: IncidentSummary["state"]): string {
 }
 
 function formatTrigger(trigger: IncidentSummary["trigger"]): string {
-  return trigger === "delivery_idle" ? "delivery idle" : "transport loss"
+  switch (trigger) {
+    case "delivery_idle":
+      return "delivery idle"
+    case "transport_loss":
+      return "transport loss"
+    case "duplicate_delivery":
+      return "duplicate delivery"
+    case "ordinal_gap":
+      return "ordinal gap"
+    default:
+      return trigger
+  }
 }
 
 export function IncidentSummaryPanel({

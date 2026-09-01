@@ -173,6 +173,7 @@ impl TransitionProcessor {
                     effects.push(Effect::Incident(IncidentCommand::AppendEvent {
                         incident_id: incident_id.clone(),
                         event: IncidentEvent {
+                        evidence: None,
                             sequence: self.next_event_sequence,
                             event_type: IncidentEventType::TransportRecovered,
                             occurred_at: wall_now,
@@ -266,6 +267,7 @@ impl TransitionProcessor {
                         effects.push(Effect::Incident(IncidentCommand::AppendEvent {
                             incident_id,
                             event: IncidentEvent {
+                        evidence: None,
                                 sequence: self.next_event_sequence,
                                 event_type: IncidentEventType::TransportLost,
                                 occurred_at: wall_now,
@@ -289,6 +291,7 @@ impl TransitionProcessor {
                             effects.push(Effect::Incident(IncidentCommand::AppendEvent {
                                 incident_id,
                                 event: IncidentEvent {
+                        evidence: None,
                                     sequence: self.next_event_sequence,
                                     event_type: IncidentEventType::TransportLost,
                                     occurred_at: wall_now,
@@ -322,6 +325,7 @@ impl TransitionProcessor {
                     effects.push(Effect::Incident(IncidentCommand::AppendEvent {
                         incident_id,
                         event: IncidentEvent {
+                        evidence: None,
                             sequence: self.next_event_sequence,
                             event_type: IncidentEventType::ReconnectAttemptFailed,
                             occurred_at: wall_now,
@@ -468,6 +472,7 @@ mod tests {
                     count: 1,
                     delivery_latency_us: Some(10),
                     source_event: None,
+                    ordinal_accounting: None,
                 }),
             ],
             0,
@@ -573,6 +578,7 @@ mod tests {
                     count: 10,
                     delivery_latency_us: None,
                     source_event: None,
+                    ordinal_accounting: None,
                 }),
                 StreamEvent::Transition(StreamTransition::DeliveryIdle { silence_ms: 31_000 }),
                 StreamEvent::Transition(StreamTransition::DeliveryIdle { silence_ms: 31_000 }),

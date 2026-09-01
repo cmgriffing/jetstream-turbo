@@ -27,6 +27,7 @@ use crate::turbocharger::runtime_memory::{
     ProcessMemoryBreakdown, RuntimeMemorySample, WorkloadPhase, WorkloadPhaseTracker,
     MAX_MONITOR_RECORD_BYTES,
 };
+use crate::turbocharger::broadcast::MonitorBroadcastEnvelope;
 use crate::turbocharger::{FailureSupervisor, RecoveryDecision};
 use chrono::{DateTime, Timelike, Utc};
 use futures::StreamExt;
@@ -109,10 +110,13 @@ pub struct TurboCharger<M, P, Po, S, E> {
     sqlite_store: Arc<SQLiteStore>,
     redis_store: Arc<RedisStore>,
     semaphore: Arc<Semaphore>,
-    broadcast_sender: broadcast::Sender<EnrichedRecord>,
+    broadcast_sender: broadcast::Sender<MonitorBroadcastEnvelope>,
     error_reporter: ErrorReporter,
     diagnostics_collector: DiagnosticsCollector,
     runtime_identity: crate::turbocharger::RuntimeIdentityDiagnostics,
+    /// In-band identifier broadcast with every record: the process epoch of
+    /// the runtime that produced them (design D2).
+    turbo_epoch: String,
     progress: Arc<PipelineProgress>,
     completion_frontier: Arc<Mutex<CompletionFrontier>>,
     failure_supervisor: Arc<FailureSupervisor>,
@@ -297,6 +301,10 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             release_identifier.as_deref(),
             &termination_path,
         );
+        let turbo_epoch = derive_turbo_epoch(
+            release_identifier.as_deref(),
+            runtime_identity.process_started_at_unix_seconds,
+        );
 
         // Initialize monitor broadcast channel
         let (broadcast_sender, _) = broadcast::channel(settings.monitor_broadcast_capacity);
@@ -326,6 +334,7 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             error_reporter,
             diagnostics_collector,
             runtime_identity,
+            turbo_epoch,
             progress,
             completion_frontier,
             failure_supervisor: Arc::new(FailureSupervisor::new(containment_policy)),
@@ -958,6 +967,7 @@ where
         let record_store = Arc::clone(&self.record_store);
         let event_publisher = Arc::clone(&self.event_publisher);
         let broadcast_sender = self.broadcast_sender.clone();
+        let turbo_epoch = self.turbo_epoch.clone();
         let progress = Arc::clone(&self.progress);
         let batch_id = progress.batch_started();
         let timeout = self
@@ -977,6 +987,7 @@ where
                 record_store,
                 event_publisher,
                 broadcast_sender,
+                turbo_epoch,
                 batch,
                 progress,
                 batch_id,
@@ -1054,6 +1065,7 @@ where
             Arc::clone(&self.record_store),
             Arc::clone(&self.event_publisher),
             self.broadcast_sender.clone(),
+            self.turbo_epoch.clone(),
             batch,
             Arc::clone(&self.progress),
             batch_id,
@@ -1213,7 +1225,8 @@ where
         hydrator: Hydrator<P, Po>,
         record_store: Arc<S>,
         event_publisher: Arc<E>,
-        broadcast_sender: broadcast::Sender<EnrichedRecord>,
+        broadcast_sender: broadcast::Sender<MonitorBroadcastEnvelope>,
+        turbo_epoch: String,
         batch: IngressBatch,
         progress: Arc<PipelineProgress>,
         batch_id: u64,
@@ -1229,11 +1242,15 @@ where
             .iter()
             .map(|event| event.cursor.source_event_id.clone())
             .collect::<Vec<_>>();
-        let completed_source_event_ids = match record_store
-            .completed_source_event_ids(&source_event_ids)
+        // Completion for replay filtering is publication-gated (design D9):
+        // "completed" means published at least once; events that are durably
+        // stored but were never published come back with their stored records
+        // so the retry path can re-publish instead of dropping them.
+        let (completed_source_event_ids, stored_unpublished) = match record_store
+            .resolve_completion_state(&source_event_ids)
             .await
         {
-            Ok(completed) => completed,
+            Ok(resolved) => resolved,
             Err(error) => {
                 lifecycle.failed();
                 return Err(error);
@@ -1245,27 +1262,36 @@ where
                 .increment(duplicate_count as u64);
             progress.duplicate_events(duplicate_count);
         }
-        let messages = events
-            .into_iter()
-            .filter(|event| !completed_source_event_ids.contains(&event.cursor.source_event_id))
-            .map(|event| event.message)
-            .collect();
-        progress.batch_stage(batch_id, PipelineStage::Hydration);
-        let enriched_records = match timeout_at(deadline, hydrator.hydrate_batch(messages)).await {
-            Ok(Ok(records)) => records,
-            Ok(Err(error)) => {
-                lifecycle.failed();
-                return Err(error);
+        let mut pending_ordinals = Vec::<(u64, EnrichedRecord)>::new();
+        let mut republished = 0_usize;
+        let mut fresh_messages = Vec::<JetstreamMessage>::new();
+        let mut fresh_ordinals = Vec::<u64>::new();
+        let mut uncompleted_ids = Vec::new();
+        for event in events {
+            if completed_source_event_ids.contains(&event.cursor.source_event_id) {
+                continue;
             }
-            Err(_) => {
-                let error = batch_timeout(batch_id, PipelineStage::Hydration, timeout_secs);
-                lifecycle.timed_out();
-                return Err(error);
+            if let Some(record) = stored_unpublished.get(&event.cursor.source_event_id) {
+                // Stored but never published: skip re-hydration and re-storage;
+                // the record is reconstructed from durable storage and proceeds
+                // directly to publication and broadcast.
+                republished += 1;
+                pending_ordinals.push((event.ordinal, record.clone()));
+            } else {
+                fresh_ordinals.push(event.ordinal);
+                fresh_messages.push(event.message);
             }
-        };
-        let count = enriched_records.len();
-
-        if count == 0 {
+            uncompleted_ids.push(event.cursor.source_event_id);
+        }
+        if republished > 0 {
+            metrics::counter!("jetstream_republished_records_total").increment(republished as u64);
+            warn!(
+                republished,
+                "Re-publishing stored-but-unpublished records after a failed batch (at-least-once)"
+            );
+        }
+        let fresh_count = fresh_messages.len();
+        if fresh_count == 0 && pending_ordinals.is_empty() {
             lifecycle.completed(0);
             return Ok(BatchCompletion {
                 processed_count: 0,
@@ -1273,22 +1299,59 @@ where
             });
         }
 
-        progress.batch_stage(batch_id, PipelineStage::Storage);
-        match timeout_at(deadline, record_store.store_batch(&enriched_records)).await {
-            Ok(Ok(_)) => progress.store_succeeded(),
-            Ok(Err(error)) => {
-                lifecycle.failed();
-                return Err(error);
+        progress.batch_stage(batch_id, PipelineStage::Hydration);
+        let fresh_records = if fresh_count > 0 {
+            match timeout_at(deadline, hydrator.hydrate_batch(fresh_messages)).await {
+                Ok(Ok(records)) => records,
+                Ok(Err(error)) => {
+                    lifecycle.failed();
+                    return Err(error);
+                }
+                Err(_) => {
+                    let error = batch_timeout(batch_id, PipelineStage::Hydration, timeout_secs);
+                    lifecycle.timed_out();
+                    return Err(error);
+                }
             }
-            Err(_) => {
-                let error = batch_timeout(batch_id, PipelineStage::Storage, timeout_secs);
-                lifecycle.timed_out();
-                return Err(error);
+        } else {
+            Vec::new()
+        };
+        let count = fresh_records.len() + pending_ordinals.len();
+
+        progress.batch_stage(batch_id, PipelineStage::Storage);
+        if !fresh_records.is_empty() {
+            match timeout_at(deadline, record_store.store_batch(&fresh_records)).await {
+                Ok(Ok(_)) => progress.store_succeeded(),
+                Ok(Err(error)) => {
+                    lifecycle.failed();
+                    return Err(error);
+                }
+                Err(_) => {
+                    let error = batch_timeout(batch_id, PipelineStage::Storage, timeout_secs);
+                    lifecycle.timed_out();
+                    return Err(error);
+                }
             }
         }
 
+        // Combined in-epoch delivery order: freshly hydrated events first (in
+        // ingress order), then the recovered stored records.
+        let broadcast_records = fresh_ordinals
+            .into_iter()
+            .zip(fresh_records)
+            .chain(pending_ordinals)
+            .collect::<Vec<_>>();
         progress.batch_stage(batch_id, PipelineStage::Publication);
-        match timeout_at(deadline, event_publisher.publish_batch(&enriched_records)).await {
+        // Publication precedes completion: only records that pass this stage
+        // (and broadcast) may afterwards be treated as complete for replay
+        // filtering. The publication journal is cleared once the whole batch
+        // has been published and broadcast.
+        let published_ids = uncompleted_ids;
+        let publish_payload = broadcast_records
+            .iter()
+            .map(|(_, record)| record.clone())
+            .collect::<Vec<_>>();
+        match timeout_at(deadline, event_publisher.publish_batch(&publish_payload)).await {
             Ok(Ok(_)) => progress.publication_succeeded(),
             Ok(Err(error)) => {
                 lifecycle.failed();
@@ -1304,18 +1367,27 @@ where
         progress.batch_stage(batch_id, PipelineStage::Broadcast);
         let receivers = broadcast_sender.receiver_count();
         let mut successful_sends = 0;
-        for enriched in enriched_records {
-            let monitor_record_bytes = serde_json::to_vec(&enriched)
+        for (ingress_ordinal, enriched) in broadcast_records {
+            let envelope = MonitorBroadcastEnvelope::new(enriched, turbo_epoch.as_str(), ingress_ordinal);
+            let monitor_record_bytes = serde_json::to_vec(&envelope)
                 .ok()
                 .and_then(|payload| u64::try_from(payload.len()).ok());
             if monitor_record_bytes.is_none_or(|bytes| bytes > MAX_MONITOR_RECORD_BYTES) {
                 metrics::counter!("monitor_broadcast_dropped_total", "reason" => "oversize_or_unserializable")
                     .increment(1);
-            } else if broadcast_sender.send(enriched).is_ok() {
+            } else if broadcast_sender.send(envelope).is_ok() {
                 successful_sends += 1;
             }
         }
         progress.broadcast_state(receivers, successful_sends);
+        // Publication and broadcast succeeded: the replay filter may now treat
+        // these events as complete on later retries (design D9).
+        if let Err(error) = record_store.clear_publication_journal(&published_ids).await {
+            // Failure leaves the journal occupied: a later replay re-publishes
+            // these records (at-least-once), which is the specified behavior.
+            metrics::counter!("jetstream_publication_journal_clear_failures_total").increment(1);
+            warn!(error = %error, "Failed to clear publication journal after broadcast");
+        }
         lifecycle.completed(count);
 
         Ok(BatchCompletion {
@@ -1357,7 +1429,7 @@ where
         Some(event)
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<EnrichedRecord> {
+    pub fn subscribe(&self) -> broadcast::Receiver<MonitorBroadcastEnvelope> {
         self.broadcast_sender.subscribe()
     }
 
@@ -1375,6 +1447,21 @@ where
 pub(crate) struct BatchCompletion {
     processed_count: usize,
     range: IngressRange,
+}
+
+/// Bounded in-band epoch identifier broadcast with every record (design D2):
+/// the identity comes from `runtime_identity` (release identifier plus process
+/// start time), so a restart produces a distinct epoch without any
+/// coordination. The monitor resets ordinal state when this value changes.
+pub(crate) fn derive_turbo_epoch(
+    release_identifier: Option<&str>,
+    process_started_at_unix_seconds: u64,
+) -> String {
+    format!(
+        "{}-{}",
+        release_identifier.unwrap_or("unknown"),
+        process_started_at_unix_seconds
+    )
 }
 
 fn ingress_batch(events: Vec<IngressEvent>) -> TurboResult<IngressBatch> {
@@ -2369,7 +2456,7 @@ mod tests {
         MockPostFetcher, MockProfileFetcher, MockRecordStore,
     };
     use std::collections::HashSet;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Notify;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -2594,6 +2681,7 @@ mod tests {
             Arc::new(MockRecordStore::new()),
             Arc::new(MockEventPublisher::new()),
             broadcast::channel(1).0,
+            "test-epoch".to_string(),
             ingress_batch(vec![accepted]).unwrap(),
             Arc::clone(&progress),
             progress.batch_started(),
@@ -2697,6 +2785,7 @@ mod tests {
             Arc::clone(&record_store),
             Arc::clone(&publisher),
             broadcast::channel(1).0,
+            "test-epoch".to_string(),
             test_ingress_batch(vec![message.clone()]),
             Arc::clone(&progress),
             progress.batch_started(),
@@ -2746,6 +2835,7 @@ mod tests {
             Arc::clone(&record_store),
             Arc::clone(&publisher),
             broadcast::channel(1).0,
+            "test-epoch".to_string(),
             test_ingress_batch(vec![message]),
             Arc::clone(&progress),
             progress.batch_started(),
@@ -3021,6 +3111,7 @@ mod tests {
             Arc::new(MockRecordStore::new()),
             Arc::new(MockEventPublisher::new()),
             broadcast::channel(1).0,
+            "test-epoch".to_string(),
             test_ingress_batch(vec![create_post_message(1)]),
             Arc::clone(&progress),
             batch_id,
@@ -3059,6 +3150,7 @@ mod tests {
             Arc::new(FailingRecordStore),
             Arc::new(MockEventPublisher::new()),
             broadcast::channel(1).0,
+            "test-epoch".to_string(),
             test_ingress_batch(vec![create_post_message(10)]),
             Arc::clone(&storage_progress),
             storage_progress.batch_started(),
@@ -3085,6 +3177,7 @@ mod tests {
             Arc::new(MockRecordStore::new()),
             Arc::new(FailingEventPublisher),
             broadcast::channel(1).0,
+            "test-epoch".to_string(),
             test_ingress_batch(vec![create_post_message(11)]),
             Arc::clone(&publication_progress),
             publication_progress.batch_started(),
@@ -3126,6 +3219,7 @@ mod tests {
                     }),
                     Arc::new(MockEventPublisher::new()),
                     broadcast::channel(1).0,
+            "test-epoch".to_string(),
                     test_ingress_batch(vec![create_post_message(2)]),
                     progress,
                     batch_id,
@@ -3156,6 +3250,7 @@ mod tests {
             Arc::new(MockRecordStore::new()),
             Arc::new(MockEventPublisher::new()),
             broadcast::channel(1).0,
+            "test-epoch".to_string(),
             test_ingress_batch(vec![create_post_message(3)]),
             Arc::clone(&progress),
             resumed_id,
@@ -3190,6 +3285,7 @@ mod tests {
                 cancelled: Arc::clone(&cancelled),
             }),
             broadcast::channel(1).0,
+            "test-epoch".to_string(),
             test_ingress_batch(vec![create_post_message(4)]),
             Arc::clone(&progress),
             batch_id,
@@ -3233,6 +3329,7 @@ mod tests {
             }),
             Arc::clone(&publisher),
             broadcast_sender,
+            "test-epoch".to_string(),
             test_ingress_batch(vec![message]),
             progress,
             batch_id,
@@ -3546,5 +3643,326 @@ mod tests {
                 "permit level must be one of the two fixed points, got {permit_level}"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Ingress-ordinal broadcast contract (change: monitor-broadcast-contract)
+    // ------------------------------------------------------------------
+
+    async fn contract_sqlite(path: &std::path::Path) -> SQLiteStore {
+        maintained_sqlite_store(
+            path,
+            SQLitePragmaConfig {
+                cache_size_kib: 1024,
+                mmap_size_mb: 1,
+                journal_size_limit_mb: 1,
+            },
+        )
+        .await
+    }
+
+    /// Spying wrapper exposing store/clear call counts over the real store.
+    #[derive(Clone)]
+    struct SpyRecordStore {
+        inner: Arc<SQLiteStore>,
+        store_calls: Arc<AtomicUsize>,
+        clear_calls: Arc<AtomicUsize>,
+    }
+
+    impl RecordStore for SpyRecordStore {
+        async fn store_batch(&self, records: &[EnrichedRecord]) -> TurboResult<Vec<i64>> {
+            self.store_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.store_batch(records).await
+        }
+
+        async fn resolve_completion_state(
+            &self,
+            source_event_ids: &[SourceEventId],
+        ) -> TurboResult<(
+            HashSet<SourceEventId>,
+            HashMap<SourceEventId, EnrichedRecord>,
+        )> {
+            self.inner.resolve_completion_state(source_event_ids).await
+        }
+
+        async fn clear_publication_journal(
+            &self,
+            source_event_ids: &[SourceEventId],
+        ) -> TurboResult<()> {
+            self.clear_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.clear_publication_journal(source_event_ids).await
+        }
+    }
+
+    /// Publisher that fails the first call at the publication stage, then
+    /// records all subsequently published records.
+    struct OnceFailingPublisher {
+        fail: AtomicBool,
+        published: Mutex<Vec<EnrichedRecord>>,
+        call_count: AtomicUsize,
+    }
+
+    impl OnceFailingPublisher {
+        fn new() -> Self {
+            Self {
+                fail: AtomicBool::new(true),
+                published: Mutex::new(Vec::new()),
+                call_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl EventPublisher for OnceFailingPublisher {
+        async fn publish_batch(&self, records: &[EnrichedRecord]) -> TurboResult<Vec<String>> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            if self.fail.swap(false, Ordering::SeqCst) {
+                return Err(TurboError::Internal("redis publication failed".to_string()));
+            }
+            let mut published = lock_published(&self.published).await;
+            published.extend(records.iter().cloned());
+            Ok(Vec::new())
+        }
+    }
+
+    async fn lock_published(
+        published: &Mutex<Vec<EnrichedRecord>>,
+    ) -> tokio::sync::MutexGuard<'_, Vec<EnrichedRecord>> {
+        published.lock().await
+    }
+
+    #[tokio::test]
+    async fn broadcast_payload_contract_fields_present_and_ordinals_unique() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("contract-broadcast.db");
+        let sqlite = Arc::new(contract_sqlite(&db_path).await);
+        let (broadcast_sender, mut receiver) = broadcast::channel(64);
+        let publisher = Arc::new(MockEventPublisher::new());
+        let progress = progress();
+        let batch = test_ingress_batch(vec![
+            create_post_message(1),
+            create_post_message(2),
+            create_post_message(3),
+        ]);
+        let completion = TurboCharger::<
+            MockMessageSource,
+            MockProfileFetcher,
+            MockPostFetcher,
+            SQLiteStore,
+            MockEventPublisher,
+        >::process_batch_internal(
+            Hydrator::new(
+                TurboCache::new(10, 10),
+                Arc::new(MockProfileFetcher::new()),
+                Arc::new(MockPostFetcher::new()),
+            ),
+            sqlite,
+            publisher,
+            broadcast_sender,
+            "epoch-a-1".to_string(),
+            batch,
+            Arc::clone(&progress),
+            progress.batch_started(),
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(completion.processed_count, 3);
+
+        let expected_ordinals: Vec<u64> = (1..=3).collect();
+        let mut seen_ordinals = Vec::new();
+        while let Ok(envelope) = receiver.try_recv() {
+            assert_eq!(envelope.turbo_epoch, "epoch-a-1");
+            let json = serde_json::to_value(&envelope).unwrap();
+            assert!(
+                json.get("turbo_epoch").is_some(),
+                "epoch identifier must be present on every serialized record"
+            );
+            assert!(
+                json.get("ingress_ordinal").is_some(),
+                "ingress ordinal must be present on every serialized record"
+            );
+            assert!(
+                json.get("message").is_some(),
+                "record fields must remain at the top level for legacy consumers"
+            );
+            seen_ordinals.push(envelope.ingress_ordinal);
+        }
+        assert_eq!(seen_ordinals, expected_ordinals, "ordinals must match the assigned ingress ordinals");
+        let unique: HashSet<u64> = seen_ordinals.iter().copied().collect();
+        assert_eq!(unique.len(), seen_ordinals.len(), "ordinals are unique within the epoch");
+    }
+
+    #[tokio::test]
+    async fn batch_failing_after_storage_republishes_stored_records_without_rehydration() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("fault-publish-timeout.db");
+        let spy = Arc::new(SpyRecordStore {
+            inner: Arc::new(contract_sqlite(&db_path).await),
+            store_calls: Arc::new(AtomicUsize::new(0)),
+            clear_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let (broadcast_sender, _receiver) = broadcast::channel(64);
+        let failing_publisher = Arc::new(OnceFailingPublisher::new());
+        let progress = progress();
+        // Attempt 1: storage succeeds, publication fails after store_batch.
+        let failure = TurboCharger::<
+            MockMessageSource,
+            MockProfileFetcher,
+            MockPostFetcher,
+            SpyRecordStore,
+            OnceFailingPublisher,
+        >::process_batch_internal(
+            Hydrator::new(
+                TurboCache::new(10, 10),
+                Arc::new(MockProfileFetcher::new()),
+                Arc::new(MockPostFetcher::new()),
+            ),
+            Arc::clone(&spy),
+            failing_publisher,
+            broadcast_sender.clone(),
+            "epoch-b-1".to_string(),
+            test_ingress_batch(vec![create_post_message(1)]),
+            Arc::clone(&progress),
+            progress.batch_started(),
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .expect_err("publication failure must fail the batch");
+        assert!(
+            matches!(failure, TurboError::Internal(m) if m == "redis publication failed"),
+            "failure must occur after storage"
+        );
+        assert_eq!(spy.store_calls.load(Ordering::SeqCst), 1);
+
+        // Attempt 2 (retry via cursor-overlap replay of the same events):
+        // the stored-but-unpublished record is re-published without
+        // re-hydration storage, then the journal is cleared exactly once.
+        let publisher = Arc::new(MockEventPublisher::new());
+        let retry = TurboCharger::<
+            MockMessageSource,
+            MockProfileFetcher,
+            MockPostFetcher,
+            SpyRecordStore,
+            MockEventPublisher,
+        >::process_batch_internal(
+            Hydrator::new(
+                TurboCache::new(10, 10),
+                Arc::new(MockProfileFetcher::new()),
+                Arc::new(MockPostFetcher::new()),
+            ),
+            Arc::clone(&spy),
+            publisher.clone(),
+            broadcast_sender,
+            "epoch-b-1".to_string(),
+            test_ingress_batch(vec![create_post_message(1)]),
+            Arc::clone(&progress),
+            progress.batch_started(),
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(retry.processed_count, 1);
+        assert_eq!(publisher.call_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            spy.store_calls.load(Ordering::SeqCst),
+            1,
+            "stored-but-unpublished events must skip re-storage"
+        );
+        assert_eq!(spy.clear_calls.load(Ordering::SeqCst), 1);
+        // Completion is now publication-gated: the retry published, so the
+        // event is complete and the journal must be empty.
+        let completion = RecordStore::resolve_completion_state(
+            spy.inner.as_ref(),
+            &[event_id_for_message(&create_post_message(1))],
+        )
+        .await
+        .unwrap();
+        assert!(!completion.0.is_empty(), "retry published so event is complete");
+        assert!(completion.1.is_empty(), "publication journal must be cleared after success");
+    }
+
+    #[tokio::test]
+    async fn restart_mid_batch_recovery_republishes_from_durable_journal() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("fault-restart-mid-batch.db");
+        let pragma = SQLitePragmaConfig {
+            cache_size_kib: 1024,
+            mmap_size_mb: 1,
+            journal_size_limit_mb: 1,
+        };
+        // Attempt 1 (before "restart"): storage succeeds, publication fails.
+        {
+            let store = maintained_sqlite_store(&db_path, pragma).await;
+            let (broadcast_sender, _receiver) = broadcast::channel(64);
+            let failing_publisher = Arc::new(OnceFailingPublisher::new());
+            let progress = progress();
+            let _ = TurboCharger::<
+                MockMessageSource,
+                MockProfileFetcher,
+                MockPostFetcher,
+                SQLiteStore,
+                OnceFailingPublisher,
+            >::process_batch_internal(
+                Hydrator::new(
+                    TurboCache::new(10, 10),
+                    Arc::new(MockProfileFetcher::new()),
+                    Arc::new(MockPostFetcher::new()),
+                ),
+                Arc::new(store),
+                failing_publisher,
+                broadcast_sender,
+                "epoch-c-1".to_string(),
+                test_ingress_batch(vec![create_post_message(1)]),
+                Arc::clone(&progress),
+                progress.batch_started(),
+                Some(Duration::from_secs(1)),
+            )
+            .await
+            .expect_err("publication failure must fail the batch");
+        }
+        // Simulated process restart: a fresh store instance over the same
+        // durable database, a fresh broadcast channel, and fresh publishers.
+        let store = Arc::new(maintained_sqlite_store(&db_path, pragma).await);
+        let (broadcast_sender, mut receiver) = broadcast::channel(64);
+        let publisher = Arc::new(MockEventPublisher::new());
+        let progress = progress();
+        let completion = TurboCharger::<
+            MockMessageSource,
+            MockProfileFetcher,
+            MockPostFetcher,
+            SQLiteStore,
+            MockEventPublisher,
+        >::process_batch_internal(
+            Hydrator::new(
+                TurboCache::new(10, 10),
+                Arc::new(MockProfileFetcher::new()),
+                Arc::new(MockPostFetcher::new()),
+            ),
+            store,
+            publisher,
+            broadcast_sender,
+            "epoch-c-1".to_string(),
+            test_ingress_batch(vec![create_post_message(1)]),
+            Arc::clone(&progress),
+            progress.batch_started(),
+            Some(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            completion.processed_count, 1,
+            "the affected event must be re-broadcast after restart"
+        );
+        let mut rebroadcast = 0;
+        while let Ok(_envelope) = receiver.try_recv() {
+            rebroadcast += 1;
+        }
+        assert_eq!(rebroadcast, 1, "the affected event must be re-broadcast exactly once on retry");
+    }
+
+    fn event_id_for_message(message: &JetstreamMessage) -> SourceEventId {
+        SourceCursor::from_message(message)
+            .map(|cursor| cursor.source_event_id)
+            .expect("post messages carry a portable source event id")
     }
 }

@@ -389,6 +389,8 @@ mod tests {
             lag_us: 0,
             clock_skew_us: 0,
             source_event_id: identity.map(str::to_string),
+            ingress_ordinal: None,
+            turbo_epoch: None,
         }
     }
 

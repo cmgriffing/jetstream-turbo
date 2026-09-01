@@ -9,10 +9,14 @@ use jetstream_monitor::incidents::LedgerHealth;
 use jetstream_monitor::{
     config::Settings,
     diagnostics::DiagnosticLogger,
-    incidents::{IncidentStore, MonitorIdentity},
+    incidents::{
+        thresholds::{evaluate_ordinal_breach, OrdinalIncidentState},
+        IncidentStore, MonitorIdentity,
+    },
     stats::{
-        comparison_eligibility, AvailabilitySnapshot, ObservationConfig, StatsAggregator,
-        StreamStatsInternal, UptimeDetailedStats, UptimeMetricsSnapshot, UptimeTracker,
+        comparison_eligibility, AvailabilitySnapshot, OrdinalThresholds, ObservationConfig,
+        StatsAggregator, StreamStatsInternal, UptimeDetailedStats, UptimeMetricsSnapshot,
+        UptimeTracker,
     },
     storage::{
         AvailabilityHistory, EventTimeHistory, HourlyStat, HourlyUptime, ReliabilityHistory,
@@ -517,6 +521,43 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Sustained duplicate/gap breach evaluation → incident ledger (task 4.3).
+    {
+        let uptime_for_ordinal: Arc<std::sync::RwLock<UptimeTracker>> = Arc::clone(&uptime_tracker);
+        let incident_tx_for_ordinal = incident_tx.clone();
+        let thresholds = OrdinalThresholds {
+            duplicate_ratio: settings.ordinal_duplicate_ratio_threshold,
+            gap_rate: settings.ordinal_gap_rate_threshold,
+            sustain: Duration::from_secs(settings.ordinal_incident_sustain_seconds.max(1)),
+            resolve: Duration::from_secs(settings.ordinal_incident_resolve_seconds.max(1)),
+        };
+        tokio::spawn(async move {
+            let mut state = OrdinalIncidentState::default();
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                let snapshots = {
+                    let up = uptime_for_ordinal.read().unwrap();
+                    [
+                        (StreamId::A, up.ordinal_snapshot(StreamId::A)),
+                        (StreamId::B, up.ordinal_snapshot(StreamId::B)),
+                    ]
+                };
+                let now = std::time::Instant::now();
+                for (stream_id, snapshot) in snapshots {
+                    let Some(snapshot) = snapshot else {
+                        continue;
+                    };
+                    let mut commands = Vec::new();
+                    evaluate_ordinal_breach(stream_id, &snapshot, &thresholds, &mut state, now, &mut commands);
+                    for command in commands {
+                        let _ = incident_tx_for_ordinal.send(command);
+                    }
+                }
+            }
+        });
+    }
+
     let stats_for_stream = Arc::clone(&stats_internal);
     let uptime_for_status: Arc<std::sync::RwLock<UptimeTracker>> = Arc::clone(&uptime_tracker);
     let operational_for_loop = Arc::clone(&operational);
@@ -560,7 +601,15 @@ async fn main() -> Result<()> {
                     Effect::Record(record) => {
                         metrics.record_useful_record();
                         let delivery_latency_us = record.delivery_latency_us;
-                        uptime.write().unwrap().record_stream_message(&record);
+                        {
+                            let mut up = uptime.write().unwrap();
+                            up.record_stream_message(&record);
+                            if record.ordinal_accounting.is_some() {
+                                if let Some(snapshot) = up.ordinal_snapshot(record.stream_id) {
+                                    metrics.set_ordinal_snapshot(record.stream_id, &snapshot);
+                                }
+                            }
+                        }
                         match record.stream_id {
                             StreamId::A | StreamId::B => {
                                 if let Some(lat) = delivery_latency_us {
@@ -1035,7 +1084,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Apply one ordered incident command to the durable store.
 async fn apply_incident_command(
     store: &IncidentStore,
     command: &IncidentCommand,
@@ -1250,6 +1298,13 @@ async fn get_api_health(
             .unwrap()
             .event_time_snapshot(stream_id)
             .source_lag_us;
+        let ordinal = app.uptime.read().unwrap().ordinal_snapshot(stream_id);
+        let frames_total = match stream_id {
+            StreamId::A => app.uptime.read().unwrap().total_messages_a,
+            StreamId::B => app.uptime.read().unwrap().total_messages_b,
+            StreamId::Baseline1 => app.uptime.read().unwrap().baseline_1.total_messages,
+            StreamId::Baseline2 => app.uptime.read().unwrap().baseline_2.total_messages,
+        };
         let entry = match ops.streams.get(&stream_id) {
             Some(entry) => entry,
             None => continue,
@@ -1272,6 +1327,19 @@ async fn get_api_health(
             outage_episodes: availability.outage_episodes,
             idle_episodes: availability.idle_episodes,
             active_incident_id: entry.active_incident_id.clone(),
+            frames_total,
+            unique_total: ordinal.as_ref().map(|s| s.unique_total),
+            duplicate_total: ordinal.as_ref().map(|s| s.duplicate_total),
+            gap_total: ordinal.as_ref().map(|s| s.gap_total),
+            uninstrumented_total: ordinal.as_ref().map(|s| s.uninstrumented_total),
+            duplicate_ratio: ordinal.as_ref().map(|s| s.duplicate_ratio),
+            gap_rate: ordinal.as_ref().map(|s| s.gap_rate),
+            ordinal_watermark: ordinal.as_ref().map(|s| s.ordinal_watermark),
+            turbo_epoch: ordinal.as_ref().map(|s| s.turbo_epoch.clone()),
+            ordinal_accounting: ordinal
+                .as_ref()
+                .map(|s| s.status.clone())
+                .unwrap_or_else(|| "uninstrumented".to_string()),
         });
     }
     let observation_loop_alive = ops.observation_loop_alive;
@@ -1560,6 +1628,7 @@ mod incident_api_tests {
                         reason: Some(HandshakeFailureReason::ConnectTimeout.as_str().to_string()),
                         attempt_ordinal: Some(1),
                         scheduled_delay_ms: Some(1_000),
+                        evidence: None,
                     },
                 )
                 .await

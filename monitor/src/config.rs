@@ -46,6 +46,14 @@ pub struct Settings {
     pub diagnostics_log_path: String,
     #[serde(default = "default_diagnostics_log_max_bytes")]
     pub diagnostics_log_max_bytes: u64,
+    #[serde(default = "default_ordinal_duplicate_ratio_threshold")]
+    pub ordinal_duplicate_ratio_threshold: f64,
+    #[serde(default = "default_ordinal_gap_rate_threshold")]
+    pub ordinal_gap_rate_threshold: f64,
+    #[serde(default = "default_ordinal_incident_sustain_seconds")]
+    pub ordinal_incident_sustain_seconds: u64,
+    #[serde(default = "default_ordinal_incident_resolve_seconds")]
+    pub ordinal_incident_resolve_seconds: u64,
 }
 
 fn default_stream_a_name() -> String {
@@ -128,6 +136,22 @@ fn default_diagnostics_log_max_bytes() -> u64 {
     1048576
 }
 
+fn default_ordinal_duplicate_ratio_threshold() -> f64 {
+    0.05
+}
+
+fn default_ordinal_gap_rate_threshold() -> f64 {
+    0.005
+}
+
+fn default_ordinal_incident_sustain_seconds() -> u64 {
+    60
+}
+
+fn default_ordinal_incident_resolve_seconds() -> u64 {
+    300
+}
+
 impl Settings {
     pub fn load() -> Result<Self> {
         dotenvy::dotenv().ok();
@@ -189,6 +213,22 @@ impl Settings {
                 "diagnostics_log_max_bytes",
                 default_diagnostics_log_max_bytes(),
             )?
+            .set_default(
+                "ordinal_duplicate_ratio_threshold",
+                default_ordinal_duplicate_ratio_threshold(),
+            )?
+            .set_default(
+                "ordinal_gap_rate_threshold",
+                default_ordinal_gap_rate_threshold(),
+            )?
+            .set_default(
+                "ordinal_incident_sustain_seconds",
+                default_ordinal_incident_sustain_seconds(),
+            )?
+            .set_default(
+                "ordinal_incident_resolve_seconds",
+                default_ordinal_incident_resolve_seconds(),
+            )?
             .add_source(config::Environment::default())
             .build()?;
 
@@ -219,10 +259,43 @@ impl Settings {
         if !settings.api_server_url.starts_with("http") {
             anyhow::bail!("api_server_url must be an HTTP(S) URL");
         }
+        validate_ordinal_thresholds(
+            settings.ordinal_duplicate_ratio_threshold,
+            settings.ordinal_gap_rate_threshold,
+            settings.ordinal_incident_sustain_seconds,
+            settings.ordinal_incident_resolve_seconds,
+        )?;
         Ok(settings)
     }
 }
 
+fn validate_ordinal_thresholds(
+    duplicate_ratio: f64,
+    gap_rate: f64,
+    sustain_seconds: u64,
+    resolve_seconds: u64,
+) -> Result<()> {
+    if !(0.0..=1.0).contains(&duplicate_ratio) {
+        anyhow::bail!("ordinal_duplicate_ratio_threshold must be within [0, 1]");
+    }
+    if !(0.0..=1.0).contains(&gap_rate) {
+        anyhow::bail!("ordinal_gap_rate_threshold must be within [0, 1]");
+    }
+    if gap_rate > duplicate_ratio {
+        anyhow::bail!(
+            "ordinal_gap_rate_threshold must not exceed ordinal_duplicate_ratio_threshold"
+        );
+    }
+    if sustain_seconds == 0 {
+        anyhow::bail!("ordinal_incident_sustain_seconds must be greater than zero");
+    }
+    if resolve_seconds < sustain_seconds {
+        anyhow::bail!(
+            "ordinal_incident_resolve_seconds must be at least ordinal_incident_sustain_seconds"
+        );
+    }
+    Ok(())
+}
 fn validate_liveness_settings(
     heartbeat_seconds: u64,
     liveness_deadline_seconds: u64,
@@ -323,6 +396,19 @@ mod tests {
         assert!(validate_backoff_settings(0, 30).is_err());
         assert!(validate_backoff_settings(40, 30).is_err());
         assert!(validate_backoff_settings(1, 0).is_err());
+    }
+
+    #[test]
+    fn ordinal_threshold_defaults_are_conservative() {
+        assert_eq!(default_ordinal_duplicate_ratio_threshold(), 0.05);
+        assert_eq!(default_ordinal_gap_rate_threshold(), 0.005);
+        assert_eq!(default_ordinal_incident_sustain_seconds(), 60);
+        assert_eq!(default_ordinal_incident_resolve_seconds(), 300);
+        assert!(validate_ordinal_thresholds(0.05, 0.005, 60, 300).is_ok());
+        assert!(validate_ordinal_thresholds(1.5, 0.005, 60, 300).is_err());
+        assert!(validate_ordinal_thresholds(0.05, 0.5, 60, 300).is_err());
+        assert!(validate_ordinal_thresholds(0.05, 0.005, 0, 300).is_err());
+        assert!(validate_ordinal_thresholds(0.05, 0.005, 300, 60).is_err());
     }
 
     #[test]

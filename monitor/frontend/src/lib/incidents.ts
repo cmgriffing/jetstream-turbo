@@ -3,7 +3,11 @@
  */
 
 export type IncidentState = "open" | "resolved" | "incomplete"
-export type IncidentTrigger = "delivery_idle" | "transport_loss"
+export type IncidentTrigger =
+  | "delivery_idle"
+  | "transport_loss"
+  | "duplicate_delivery"
+  | "ordinal_gap"
 
 export interface IncidentSummary {
   id: string

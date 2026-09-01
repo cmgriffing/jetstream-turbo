@@ -187,6 +187,37 @@ pub trait RecordStore {
     ) -> impl std::future::Future<Output = TurboResult<HashSet<SourceEventId>>> + Send {
         async { Ok(HashSet::new()) }
     }
+
+    /// Resolve completion for replay filtering (design D9). An event counts as
+    /// complete only when it was published at least once; an event durably
+    /// stored but never published is returned with its stored record so the
+    /// retry path can re-publish instead of dropping it.
+    fn resolve_completion_state(
+        &self,
+        source_event_ids: &[SourceEventId],
+    ) -> impl std::future::Future<
+        Output = TurboResult<(
+            HashSet<SourceEventId>,
+            std::collections::HashMap<SourceEventId, EnrichedRecord>,
+        )>,
+    > + Send
+    where
+        Self: Sync,
+    {
+        async {
+            let completed = self.completed_source_event_ids(source_event_ids).await?;
+            Ok((completed, std::collections::HashMap::new()))
+        }
+    }
+
+    /// Release the publication journal after publication and broadcast
+    /// succeeded, completing the events for future replay filtering.
+    fn clear_publication_journal(
+        &self,
+        _source_event_ids: &[SourceEventId],
+    ) -> impl std::future::Future<Output = TurboResult<()>> + Send {
+        async { Ok(()) }
+    }
 }
 
 pub struct SQLiteStore {
@@ -388,6 +419,12 @@ impl SQLiteStore {
                 source_seq INTEGER,
                 source_event_id TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS publication_journal (
+                source_event_id TEXT PRIMARY KEY,
+                at_uri TEXT,
+                created_at TEXT NOT NULL
             );
             "#,
         )
@@ -1281,6 +1318,88 @@ impl RecordStore for SQLiteStore {
         Ok(completed)
     }
 
+    /// Journal-aware completion (design D9): a row alone is not completion.
+    /// An event is complete only when its row exists and sits outside the
+    /// publication journal; stored rows still in the journal come back with
+    /// their reconstructed records for re-publication.
+    async fn resolve_completion_state(
+        &self,
+        source_event_ids: &[SourceEventId],
+    ) -> TurboResult<(
+        HashSet<SourceEventId>,
+        std::collections::HashMap<SourceEventId, EnrichedRecord>,
+    )> {
+        let mut completed = HashSet::new();
+        let mut stored_unpublished = std::collections::HashMap::new();
+        for source_event_id in source_event_ids {
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM records WHERE source_event_id = ?)",
+            )
+            .bind(source_event_id.as_str())
+            .fetch_one(&self.pool)
+            .await?;
+            if !exists {
+                continue;
+            }
+            let journaled: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM publication_journal WHERE source_event_id = ?)",
+            )
+            .bind(source_event_id.as_str())
+            .fetch_one(&self.pool)
+            .await?;
+            if journaled {
+                let row = sqlx::query(
+                    r#"
+                    SELECT at_uri, did, time_us, message, message_metadata,
+                           created_at, hydrated_at, hydration_time_ms,
+                           api_calls_count, cache_hit_rate, cache_hits, cache_misses,
+                           hydration_quality
+                    FROM records
+                    WHERE source_event_id = ?
+                    LIMIT 1
+                    "#,
+                )
+                .bind(source_event_id.as_str())
+                .fetch_one(&self.pool)
+                .await?;
+                let record = self.row_to_record(row).await?;
+                stored_unpublished.insert(
+                    source_event_id.clone(),
+                    record,
+                );
+            } else {
+                completed.insert(source_event_id.clone());
+            }
+        }
+        Ok((completed, stored_unpublished))
+    }
+
+    async fn clear_publication_journal(
+        &self,
+        source_event_ids: &[SourceEventId],
+    ) -> TurboResult<()> {
+        if source_event_ids.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await?;
+        const MAX_PARAMS: usize = 999;
+        for chunk in source_event_ids.chunks(MAX_PARAMS) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "DELETE FROM publication_journal WHERE source_event_id IN ({placeholders})"
+            );
+            let mut delete_query = sqlx::query(&sql);
+            for id in chunk {
+                delete_query = delete_query.bind(id.as_str());
+            }
+            delete_query.execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     #[instrument(
         name = "sqlite_store_batch",
         skip(self, records),
@@ -1363,6 +1482,20 @@ impl RecordStore for SQLiteStore {
             }
 
             let rows = query.fetch_all(&mut *tx).await?;
+            // Publication journal entries ride the same transaction: a stored
+            // row whose batch later fails before publication/broadcast remains
+            // journaled, so a retry re-publishes it instead of dropping it
+            // (design D9). Successful batches clear the journal after publish.
+            let journal_sql = "INSERT INTO publication_journal (source_event_id, at_uri, created_at) \
+                VALUES (?, ?, ?) ON CONFLICT(source_event_id) DO NOTHING";
+            let mut journal_query = sqlx::query(journal_sql);
+            for record in chunk {
+                journal_query = journal_query
+                    .bind(record.source_event_id().to_string())
+                    .bind(record.get_at_uri())
+                    .bind(&now_str);
+            }
+            journal_query.execute(&mut *tx).await?;
             tx.commit().await?;
             all_ids.extend(
                 rows.into_iter()

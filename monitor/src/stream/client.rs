@@ -8,6 +8,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info, warn};
 
 use crate::incidents::{HandshakeFailureReason, TransportLossReason};
+use crate::stats::{OrdinalAccounting, OrdinalClassification, OrdinalRing};
 
 use super::transition::{StreamEvent, StreamTransition};
 
@@ -75,12 +76,19 @@ pub struct SourceEventObservation {
     pub lag_us: u64,
     pub clock_skew_us: u64,
     pub source_event_id: Option<String>,
+    /// In-band ingress ordinal facts, present only on turbo broadcasts that
+    /// carry the monitor envelope (additive; absent frames are uninstrumented).
+    #[serde(default)]
+    pub ingress_ordinal: Option<u64>,
+    #[serde(default)]
+    pub turbo_epoch: Option<String>,
 }
 
 fn observe_source_event(text: &str, observed_at_us: u64) -> Option<SourceEventObservation> {
     let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
     let source = parsed.get("message").unwrap_or(&parsed);
     let source_time_us = source.get("time_us")?.as_u64()?;
+    let (ingress_ordinal, turbo_epoch) = ordinal_facts(&parsed);
     Some(SourceEventObservation {
         source_time_us,
         observed_at_us,
@@ -89,7 +97,22 @@ fn observe_source_event(text: &str, observed_at_us: u64) -> Option<SourceEventOb
             .saturating_sub(observed_at_us)
             .min(MAX_REPORTED_CLOCK_SKEW_US),
         source_event_id: portable_source_identity(source),
+        ingress_ordinal,
+        turbo_epoch,
     })
+}
+
+/// Parse the additive envelope ordinal facts (flattened at the payload top
+/// level). A missing field means the frame is uninstrumented (design D4).
+fn ordinal_facts(parsed: &serde_json::Value) -> (Option<u64>, Option<String>) {
+    let ingress_ordinal = parsed
+        .get("ingress_ordinal")
+        .and_then(|value| value.as_u64());
+    let turbo_epoch = parsed
+        .get("turbo_epoch")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    (ingress_ordinal, turbo_epoch)
 }
 
 fn portable_source_identity(source: &serde_json::Value) -> Option<String> {
@@ -126,12 +149,93 @@ fn observe_source_event_now(text: &str) -> Option<SourceEventObservation> {
     observe_source_event(text, now_us)
 }
 
+/// Bounded structured-log state for classification anomalies (task 4.4),
+/// matching transition-log verbosity conventions (first occurrence, then
+/// bounded windows).
+#[derive(Debug, Default, Clone, Copy)]
+struct OrdinalLogState {
+    logged_epoch_changes: u64,
+    logged_gap: bool,
+    logged_duplicate_total: u64,
+}
+
+/// Classify one text frame's ordinal facts against the ring (or tally it as
+/// uninstrumented) and return the cumulative accounting snapshot, if the
+/// stream carries a ring at all.
+fn classify_ordinal_frame(
+    text: &str,
+    stream_id: StreamId,
+    ring: &mut Option<OrdinalRing>,
+    log_state: &mut OrdinalLogState,
+) -> Option<OrdinalAccounting> {
+    let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
+    let (ingress_ordinal, turbo_epoch) = ordinal_facts(&parsed);
+    let ring = ring.as_mut()?;
+    match (ingress_ordinal, turbo_epoch.as_deref()) {
+        (Some(ordinal), Some(epoch)) => {
+            let previous_epoch = ring.snapshot().map(|snap| snap.turbo_epoch);
+            let classification = ring.observe(ordinal, epoch);
+            if previous_epoch.as_deref() != Some(epoch) {
+                log_state.logged_epoch_changes = log_state.logged_epoch_changes.saturating_add(1);
+                if log_state.logged_epoch_changes == 1
+                    || log_state.logged_epoch_changes.is_power_of_two()
+                {
+                    warn!(
+                        target: "monitor::ordinal",
+                        stream = stable_stream_label(stream_id),
+                        turbo_epoch = epoch,
+                        "turbo epoch change observed in-band; ordinal accounting reset"
+                    );
+                }
+            }
+            match classification {
+                OrdinalClassification::Gap { missing } if !log_state.logged_gap => {
+                    log_state.logged_gap = true;
+                    warn!(
+                        target: "monitor::ordinal",
+                        stream = stable_stream_label(stream_id),
+                        watermark_at = ordinal,
+                        missing,
+                        "first ordinal gap detected; missing ordinals are being counted"
+                    );
+                }
+                OrdinalClassification::Duplicate => {
+                    let duplicate_total =
+                        ring.snapshot().map(|snap| snap.duplicate_total).unwrap_or(0);
+                    if duplicate_total - log_state.logged_duplicate_total >= 1_000 {
+                        log_state.logged_duplicate_total = duplicate_total;
+                        warn!(
+                            target: "monitor::ordinal",
+                            stream = stable_stream_label(stream_id),
+                            duplicate_total,
+                            "duplicate ordinal delivery continuing"
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {
+            ring.observe_uninstrumented();
+        }
+    }
+    ring.snapshot()
+}
+
+fn stable_stream_label(stream_id: StreamId) -> &'static str {
+    crate::stream::processor::stable_stream_id(stream_id)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamMessage {
     pub stream_id: StreamId,
     pub count: u64,
     pub delivery_latency_us: Option<u64>,
     pub source_event: Option<SourceEventObservation>,
+    /// Latest cumulative ordinal accounting for instrumented streams; None on
+    /// baseline streams and before the first instrumented frame.
+    #[serde(default)]
+    pub ordinal_accounting: Option<OrdinalAccounting>,
 }
 
 /// Bounded exponential backoff schedule with jitter.
@@ -236,6 +340,8 @@ async fn run_session(
     delivery_open: &mut bool,
     idle_emitted: &mut bool,
     last_useful_record: &mut Option<Instant>,
+    ordinal_ring: &mut Option<OrdinalRing>,
+    ordinal_log_state: &mut OrdinalLogState,
 ) -> SessionEnd {
     use tokio::time::sleep_until;
 
@@ -266,6 +372,12 @@ async fn run_session(
                         *last_useful_record = Some(Instant::now());
                         *last_source_event = observe_source_event_now(&text);
                         *cumulative_count = cumulative_count.saturating_add(1);
+                        let accounting = classify_ordinal_frame(
+                            &text,
+                            stream_id,
+                            ordinal_ring,
+                            ordinal_log_state,
+                        );
                         if !*delivery_open {
                             *delivery_open = true;
                             *idle_emitted = false;
@@ -277,6 +389,7 @@ async fn run_session(
                                 count: *cumulative_count,
                                 delivery_latency_us: last_source_event.as_ref().map(|e| e.lag_us),
                                 source_event: last_source_event.clone(),
+                                ordinal_accounting: accounting.clone(),
                             }))
                             .is_err()
                             {
@@ -343,6 +456,7 @@ async fn run_session(
         count: *cumulative_count,
         delivery_latency_us: last_source_event.as_ref().map(|e| e.lag_us),
         source_event: last_source_event.clone(),
+        ordinal_accounting: ordinal_ring.as_ref().and_then(OrdinalRing::snapshot),
     }));
 
     *delivery_open = false;
@@ -444,6 +558,11 @@ impl StreamClient {
 
             let mut cumulative_count: u64 = 0;
             let mut last_source_event: Option<SourceEventObservation> = None;
+            // Turbo-fed streams carry the monitor envelope and are classified
+            // by ingress ordinal (design D6: baselines keep raw accounting).
+            let mut ordinal_ring = matches!(stream_id, StreamId::A | StreamId::B)
+                .then(OrdinalRing::new);
+            let mut ordinal_log_state = OrdinalLogState::default();
             // 1-based ordinal of the connection attempt the loop is about to
             // perform; counts failed attempts during an outage or start-up.
             let mut attempt_number: u64 = 0;
@@ -494,6 +613,8 @@ impl StreamClient {
                             &mut delivery_open,
                             &mut idle_emitted,
                             &mut last_useful_record,
+                            &mut ordinal_ring,
+                            &mut ordinal_log_state,
                         )
                         .await;
 

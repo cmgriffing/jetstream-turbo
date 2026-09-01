@@ -51,6 +51,19 @@ export interface PairwiseComparisons {
   stream_b_baseline_2: PairwiseComparison
 }
 
+export interface OrdinalAccounting {
+  turbo_epoch: string
+  ordinal_watermark: number
+  unique_total: number
+  duplicate_total: number
+  gap_total: number
+  uninstrumented_total: number
+  epoch_changes: number
+  duplicate_ratio: number
+  gap_rate: number
+  status: "active" | "uninstrumented"
+}
+
 export interface StreamStats {
   stream_a?: number
   stream_b?: number
@@ -138,6 +151,9 @@ export interface StreamStats {
   delivery_idle_b?: boolean
   delivery_idle_baseline_1?: boolean
   delivery_idle_baseline_2?: boolean
+  // Additive ingress-ordinal accounting for the turbo-fed streams.
+  ordinal_a?: OrdinalAccounting
+  ordinal_b?: OrdinalAccounting
 }
 
 export interface AvailabilityHistory {

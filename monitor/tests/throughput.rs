@@ -25,6 +25,7 @@ fn record_batch(stream_id: StreamId, count: u64) -> StreamEvent {
         count,
         delivery_latency_us: Some(1_000),
         source_event: None,
+        ordinal_accounting: None,
     })
 }
 
@@ -161,7 +162,7 @@ async fn baseline_record_path_without_transition_layer() {
 
     let started = Instant::now();
     for i in 0..EVENTS {
-        let record = StreamMessage { stream_id: StreamId::A, count: i as u64, delivery_latency_us: Some(1_000), source_event: None };
+        let record = StreamMessage { stream_id: StreamId::A, count: i as u64, delivery_latency_us: Some(1_000), source_event: None, ordinal_accounting: None };
         uptime.write().unwrap().record_stream_message(&record);
         stats.write().unwrap().update(record);
         metrics.record_useful_record();
@@ -172,5 +173,61 @@ async fn baseline_record_path_without_transition_layer() {
         "baseline {EVENTS} records (aggregation only) in {:?}: {:.0} events/sec",
         elapsed,
         EVENTS as f64 / elapsed.as_secs_f64()
+    );
+}
+
+/// Sustained spike traffic through the ring plus full downstream surfaces:
+/// classification must be O(1) per record and the ring memory must stay
+/// constant at 2^17 bits forever (task 6.4, design D3).
+#[tokio::test]
+#[ignore = "load-check benchmark; run explicitly"]
+async fn ordinal_ring_memory_is_constant_under_sustained_spike_traffic() {
+    const EVENTS: usize = 2_000_000;
+
+    let uptime = Arc::new(std::sync::RwLock::new(UptimeTracker::new()));
+    let metrics = Metrics::new("load-check".to_string());
+    let mut ring = jetstream_monitor::stats::OrdinalRing::new();
+    let ring_bits_capacity0 = std::mem::size_of_val(&ring);
+    // Feed ordinals far beyond the ring window (2^17) several times over:
+    // duplicates from outside the window classify unique again (D3), gaps
+    // from spike jumps accumulate in the synthetic counter.
+    let started = Instant::now();
+    for i in 0..EVENTS {
+        let ordinal = (i as u64) * 3; // deterministic gaps of 2 per step
+        let _classification = ring.observe(ordinal, "load-epoch");
+        if i % 97 == 0 {
+            ring.observe_uninstrumented();
+        }
+        let accounting = ring.snapshot().expect("epoch known");
+        uptime
+            .write()
+            .unwrap()
+            .record_ordinal_accounting(StreamId::A, &accounting);
+        if let Some(picture) = uptime.read().unwrap().ordinal_snapshot(StreamId::A) {
+            metrics.set_ordinal_snapshot(StreamId::A, &picture);
+        }
+    }
+    let elapsed = started.elapsed();
+    let rate = EVENTS as f64 / elapsed.as_secs_f64();
+    println!(
+        "classified {EVENTS} spike events in {:?}: {:.0} events/sec",
+        elapsed, rate
+    );
+    let ring_bits_capacity = std::mem::size_of_val(&ring);
+    assert_eq!(
+        ring_bits_capacity, ring_bits_capacity0,
+        "ring footprint must not grow with sustained traffic"
+    );
+    // Classification totals must remain consistent under spike traffic:
+    // every third ordinal (i*3 leaves 2 missing per step) plus uninstrumented.
+    let accounting = ring.snapshot().unwrap();
+    let expected_unique = EVENTS as u64; // each ordinal counts unique
+    assert_eq!(accounting.unique_total, expected_unique);
+    assert_eq!(accounting.gap_total, (EVENTS as u64 - 1) * 2);
+    assert_eq!(accounting.uninstrumented_total, (EVENTS as u64 / 97) + 1);
+    assert!(
+        rate > 10_000.0,
+        "classification regressed below headroom threshold: {:.0} events/sec",
+        rate
     );
 }

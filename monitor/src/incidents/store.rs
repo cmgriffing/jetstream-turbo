@@ -51,6 +51,7 @@ type EventRow = (
     Option<String>,
     Option<i64>,
     Option<i64>,
+    Option<String>,
 );
 
 #[derive(Debug, sqlx::FromRow)]
@@ -86,6 +87,8 @@ fn trigger_str(trigger: IncidentTrigger) -> &'static str {
     match trigger {
         IncidentTrigger::DeliveryIdle => "delivery_idle",
         IncidentTrigger::TransportLoss => "transport_loss",
+        IncidentTrigger::DuplicateDelivery => "duplicate_delivery",
+        IncidentTrigger::OrdinalGap => "ordinal_gap",
     }
 }
 
@@ -102,6 +105,8 @@ fn parse_trigger(value: &str) -> Result<IncidentTrigger> {
     match value {
         "delivery_idle" => Ok(IncidentTrigger::DeliveryIdle),
         "transport_loss" => Ok(IncidentTrigger::TransportLoss),
+        "duplicate_delivery" => Ok(IncidentTrigger::DuplicateDelivery),
+        "ordinal_gap" => Ok(IncidentTrigger::OrdinalGap),
         other => Err(anyhow::anyhow!("unknown incident trigger {}", other)),
     }
 }
@@ -266,6 +271,7 @@ impl IncidentStore {
                 reason TEXT,
                 attempt_ordinal INTEGER,
                 scheduled_delay_ms INTEGER,
+                evidence TEXT,
                 PRIMARY KEY (incident_id, sequence)
             )
             "#,
@@ -280,6 +286,22 @@ impl IncidentStore {
         .execute(&self.pool)
         .await
         .ok();
+
+        // Additive migration: sanitize evidence JSON on threshold events.
+        let event_columns = sqlx::query("PRAGMA table_info(monitor_incident_events)")
+            .fetch_all(&self.pool)
+            .await?;
+        let has_evidence = event_columns
+            .iter()
+            .any(|row| {
+                use sqlx::Row;
+                row.try_get::<String, _>("name").is_ok_and(|n| n == "evidence")
+            });
+        if !has_evidence {
+            sqlx::query("ALTER TABLE monitor_incident_events ADD COLUMN evidence TEXT")
+                .execute(&self.pool)
+                .await?;
+        }
 
         Ok(())
     }
@@ -333,9 +355,9 @@ impl IncidentStore {
             r#"
             INSERT INTO monitor_incident_events (
                 incident_id, sequence, event_type, occurred_at, reason,
-                attempt_ordinal, scheduled_delay_ms
+                attempt_ordinal, scheduled_delay_ms, evidence
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(incident_id.as_str())
@@ -345,6 +367,7 @@ impl IncidentStore {
         .bind(event.reason.as_deref())
         .bind(event.attempt_ordinal.map(|v| v as i64))
         .bind(event.scheduled_delay_ms.map(|v| v as i64))
+        .bind(event.evidence.as_deref())
         .execute(&mut *tx)
         .await?;
 
@@ -649,7 +672,7 @@ impl IncidentStore {
     ) -> Result<EventPage> {
         let mut query = sqlx::QueryBuilder::new(
             r#"
-                SELECT sequence, event_type, occurred_at, reason, attempt_ordinal, scheduled_delay_ms
+                SELECT sequence, event_type, occurred_at, reason, attempt_ordinal, scheduled_delay_ms, evidence
                 FROM monitor_incident_events
                 WHERE incident_id = "#,
         );
@@ -663,20 +686,28 @@ impl IncidentStore {
         let rows: Vec<EventRow> = query.build_query_as().fetch_all(&self.pool).await?;
 
         let mut events = Vec::with_capacity(rows.len());
-        for (sequence, event_type_str, occurred_at, reason, attempt_ordinal, scheduled_delay_ms) in
-            rows
+        for (
+            sequence,
+            event_type_str,
+            occurred_at,
+            reason,
+            attempt_ordinal,
+            scheduled_delay_ms,
+            evidence,
+        ) in rows
         {
             let event_type: IncidentEventType =
                 serde_json::from_str(&format!("\"{event_type_str}\""))
                     .map_err(|e| anyhow::anyhow!("unknown event type {event_type_str}: {e}"))?;
             events.push(IncidentEvent {
+                evidence,
                 sequence,
                 event_type,
                 occurred_at: parse_time(Some(occurred_at))?
                     .ok_or_else(|| anyhow::anyhow!("missing event occurred_at"))?,
                 reason,
-                attempt_ordinal: attempt_ordinal.map(|v| v.max(0) as u64),
-                scheduled_delay_ms: scheduled_delay_ms.map(|v| v.max(0) as u64),
+                attempt_ordinal: attempt_ordinal.map(|v: i64| v.max(0) as u64),
+                scheduled_delay_ms: scheduled_delay_ms.map(|v: i64| v.max(0) as u64),
             });
         }
 
@@ -764,6 +795,7 @@ mod tests {
                     reason: Some(HandshakeFailureReason::ConnectTimeout.as_str().to_string()),
                     attempt_ordinal: Some(sequence as u64),
                     scheduled_delay_ms: Some(1_000),
+                    evidence: None,
                 },
             )
             .await
@@ -795,6 +827,7 @@ mod tests {
             .append_event(
                 &incident,
                 IncidentEvent {
+                    evidence: None,
                     sequence: 1,
                     event_type: IncidentEventType::ReconnectAttemptFailed,
                     occurred_at: Utc::now(),

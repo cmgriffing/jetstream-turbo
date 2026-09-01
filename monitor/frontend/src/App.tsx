@@ -246,6 +246,7 @@ function App() {
                   reconnectReason={stats.reconnect_reason_a}
                   clientRecoveryMs={stats.client_recovery_a_ms}
                   eventTime={stats.event_time_a}
+                  ordinal={stats.ordinal_a}
                 />
                 <StreamCard
                   streamId="b"
@@ -268,6 +269,7 @@ function App() {
                   reconnectReason={stats.reconnect_reason_b}
                   clientRecoveryMs={stats.client_recovery_b_ms}
                   eventTime={stats.event_time_b}
+                  ordinal={stats.ordinal_b}
                 />
                 </div>
               </div>
