@@ -212,9 +212,11 @@ impl TurboCache {
 
     pub fn set_user_profile(&self, did: impl Into<String>, profile: Arc<BlueskyProfile>) {
         let did: String = did.into();
-        // Pre-compute the serialized fragment once per profile so hydrated
-        // metadata can splice it verbatim (one-time cost, amortized over reuse).
-        let _ = profile.serialized_json();
+        // The serialized fragment (`BlueskyProfile::serialized_json`) is memoized
+        // in the profile's `OnceLock` on first use, so the insert path stays a
+        // plain cache write: profiles that are cached but never hydrated must not
+        // pay for a serialization nobody splices. `cache_user_profile_set` guards
+        // this path; eagerly serializing here costs ~2x on that benchmark.
         self.user_cache.insert(did.clone(), profile);
         trace!("Cached user profile: {}", did);
     }

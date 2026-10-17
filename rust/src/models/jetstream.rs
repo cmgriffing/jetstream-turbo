@@ -381,12 +381,18 @@ impl JetstreamMessage {
     #[inline(always)]
     pub fn extract_at_uri(&self) -> Option<String> {
         let commit = self.commit.as_ref()?;
-        let collection = commit.collection.as_ref()?;
-        let rkey = commit.rkey.as_ref()?;
+        // Resolve each field to `&str` exactly once: `CompactString`'s `Deref`
+        // branches on the inline/heap tag, so reading through it twice per field
+        // (once for `len`, once for `push_str`) costs more than the pointer it
+        // saves. `extract_at_uri` is a Tier 1 benchmark, so those extra branches
+        // show up as a regression.
+        let did = self.did.as_str();
+        let collection = commit.collection.as_deref()?;
+        let rkey = commit.rkey.as_deref()?;
 
-        let mut uri = String::with_capacity(7 + self.did.len() + collection.len() + rkey.len());
+        let mut uri = String::with_capacity(7 + did.len() + collection.len() + rkey.len());
         uri.push_str("at://");
-        uri.push_str(&self.did);
+        uri.push_str(did);
         uri.push('/');
         uri.push_str(collection);
         uri.push('/');
