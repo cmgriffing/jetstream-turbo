@@ -13,7 +13,7 @@ use ahash::RandomState as AHashState;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::info;
+use tracing::debug;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -168,6 +168,24 @@ where
             })
     }
 
+    pub fn with_persistent_cache(
+        mut self,
+        cache: Arc<crate::hydration::entity_cache::PersistentEntityCache>,
+    ) -> Self {
+        self.resolver = self.resolver.with_persistent_cache(cache);
+        self
+    }
+
+    pub fn persistent_cache(
+        &self,
+    ) -> Option<&Arc<crate::hydration::entity_cache::PersistentEntityCache>> {
+        self.resolver.persistent_cache()
+    }
+
+    pub fn observe_message(&self, message: &JetstreamMessage) {
+        self.resolver.observe_message(message);
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn hydrate_one(
         &self,
@@ -264,6 +282,7 @@ where
             HashSet::with_hasher(AHashState::default());
 
         for message in messages {
+            self.observe_message(&message);
             let is_post = message
                 .commit
                 .as_ref()
@@ -348,7 +367,7 @@ where
         let total_time = start_time.elapsed().as_millis() as u64;
         tracing::Span::current().record("total_time_ms", total_time);
 
-        info!(
+        debug!(
             "Hydrated batch of {} messages in {:?}",
             results.len(),
             total_time

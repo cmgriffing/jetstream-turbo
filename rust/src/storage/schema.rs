@@ -38,6 +38,35 @@ pub const REQUIRED_INDEXES: &[RequiredIndex] = &[
     },
 ];
 
+/// Verify the bounded additive recovery indexes after table initialization.
+/// Unlike legacy record-index construction, these indexes are created on the
+/// new empty receipt table during the compatibility migration.
+pub async fn verify_recovery_indexes(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    for (name, expected_sql) in [
+        (
+            "idx_completion_receipts_coverage",
+            "CREATE INDEX idx_completion_receipts_coverage ON completion_receipts(ingress_epoch, covered, ingress_ordinal)",
+        ),
+        (
+            "idx_completion_receipts_expiry",
+            "CREATE INDEX idx_completion_receipts_expiry ON completion_receipts(covered, source_time_us)",
+        ),
+    ] {
+        let actual: Option<String> = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?",
+        )
+        .bind(name)
+        .fetch_optional(pool)
+        .await?;
+        if actual.as_deref().is_none_or(|sql| normalize_sql(sql) != normalize_sql(expected_sql)) {
+            return Err(sqlx::Error::Protocol(format!(
+                "incompatible required recovery index {name}; offline schema repair required"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Result of bounded, read-only required-index verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaVerification {

@@ -3,6 +3,7 @@ use jetstream_turbo_rs::storage::{
     verify_required_indexes, SQLitePragmaConfig, SQLiteStore, SchemaMaintenanceError,
     SchemaVerification, REQUIRED_INDEXES,
 };
+use jetstream_turbo_rs::utils::logging::retention::{LogOwner, LogPolicy};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::process::Stdio;
@@ -14,6 +15,62 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const LARGE_FIXTURE_ROWS: usize = 100_000;
 const VERIFICATION_BUDGET: Duration = Duration::from_secs(1);
 const STARTUP_BUDGET: Duration = Duration::from_secs(2);
+
+async fn run_schema_maintenance(directory: &std::path::Path) -> std::process::Output {
+    let output = Command::new(env!("CARGO_BIN_EXE_jetstream-turbo"))
+        .current_dir(directory)
+        .env("TURBO__DB_DIR", directory)
+        .env("RUST_LOG", "info")
+        .arg("schema-maintenance")
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "maintenance failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Starting offline schema maintenance"));
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("Application file logging unavailable"),
+        "maintenance must select stdout directly rather than fail file initialization"
+    );
+    output
+}
+
+#[tokio::test]
+async fn schema_maintenance_uses_stdout_without_creating_a_log_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    run_schema_maintenance(directory.path()).await;
+    assert!(!directory.path().join("logs").exists());
+}
+
+#[tokio::test]
+async fn schema_maintenance_does_not_touch_an_existing_file_log_owner() {
+    let directory = tempfile::tempdir().unwrap();
+    let logs = directory.path().join("logs");
+    std::fs::create_dir(&logs).unwrap();
+    let segment = logs.join(format!(
+        "jetstream-turbo.main.{}.{}.log",
+        chrono::Utc::now().timestamp(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&segment, b"service log").unwrap();
+    let owner = LogOwner::start(&logs, LogPolicy::default()).unwrap();
+    let snapshot = || {
+        std::fs::read_dir(&logs)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), std::fs::read(entry.path()).unwrap())
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let before = snapshot();
+    run_schema_maintenance(directory.path()).await;
+    assert_eq!(snapshot(), before);
+    assert_eq!(owner.diagnostics().allocated_bytes, 11);
+}
 
 fn test_pragma_config() -> SQLitePragmaConfig {
     SQLitePragmaConfig {
@@ -176,6 +233,15 @@ async fn maintained_large_database_opens_store_within_startup_budget() {
 
 #[tokio::test]
 async fn production_binary_passes_readiness_before_scheduled_cleanup() {
+    assert_production_startup(false).await;
+}
+
+#[tokio::test]
+async fn disk_pressure_startup_serves_diagnostics_without_admitting_growth() {
+    assert_production_startup(true).await;
+}
+
+async fn assert_production_startup(disk_pressure: bool) {
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("jetstream.db");
     let pool = create_large_unmaintained_fixture(&db_path).await;
@@ -206,7 +272,11 @@ async fn production_binary_passes_readiness_before_scheduled_cleanup() {
         .env("BLUESKY_APP_PASSWORD", "test-password")
         .env("STREAM_NAME", "test-stream")
         .env("JETSTREAM_HOSTS", r#"["ws://127.0.0.1:9"]"#)
-        .env("MAX_DB_SIZE_MB", "1")
+        .env("MAX_DB_SIZE_MB", "6144")
+        .env(
+            "DISK_MIN_FREE_MB",
+            if disk_pressure { "1000000000" } else { "16384" },
+        )
         .env("CLEANUP_CHUNK_SIZE", "1")
         .env("CLEANUP_CHUNK_DELAY_MS", "1000")
         .env("CLEANUP_CHECK_INTERVAL_MINUTES", "60")
@@ -230,7 +300,14 @@ async fn production_binary_passes_readiness_before_scheduled_cleanup() {
             .get(format!("http://127.0.0.1:{http_port}/ready"))
             .send()
             .await
-            .is_ok_and(|response| response.status().is_success())
+            .is_ok_and(|response| {
+                response.status()
+                    == if disk_pressure {
+                        reqwest::StatusCode::SERVICE_UNAVAILABLE
+                    } else {
+                        reqwest::StatusCode::OK
+                    }
+            })
         {
             listener_available = true;
             break;
@@ -241,6 +318,21 @@ async fn production_binary_passes_readiness_before_scheduled_cleanup() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
+    if disk_pressure && listener_available {
+        let health: serde_json::Value = client
+            .get(format!("http://127.0.0.1:{http_port}/api/v1/health"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(health["data"]["readiness"]["reason"], "disk_pressure");
+        assert_eq!(
+            health["data"]["diagnostics"]["sqlite_state"]["capacity"]["admission_allowed"],
+            false
+        );
+    }
     let _ = child.start_kill();
     let output = child.wait_with_output().await.unwrap();
     assert!(

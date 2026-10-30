@@ -5,12 +5,12 @@ use jetstream_turbo_rs::server::create_server;
 use jetstream_turbo_rs::storage::{SQLitePragmaConfig, SQLiteStore};
 use jetstream_turbo_rs::telemetry::ErrorReporter;
 use jetstream_turbo_rs::turbocharger::ProductionTurboCharger as TurboCharger;
+use jetstream_turbo_rs::utils::logging::retention::{LogOwner, LogPolicy};
 use std::any::Any;
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
-use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::{filter::filter_fn, layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 const BATCH_REPORT_LOG_TARGET: &str = "jetstream_turbo.batch_report";
@@ -88,7 +88,22 @@ async fn main() -> Result<()> {
     });
 
     // Initialize tracing
-    let _log_guards = init_tracing(&log_level)?;
+    let bootstrap_settings = Settings::from_env_for_schema_maintenance()?;
+    // SQLite reads this process-wide setting when opening its first temp file.
+    // Set it once, before schema checks, pools or ingestion tasks are started.
+    let vacuum_temp = bootstrap_settings
+        .vacuum_temp_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("SQLITE_TMPDIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir)
+        });
+    std::env::set_var("SQLITE_TMPDIR", &vacuum_temp);
+    let _log_guards = init_tracing(&log_level, &bootstrap_settings, command.is_none())?;
 
     if let Some(Command::SchemaMaintenance { busy_timeout_secs }) = command {
         let settings = Settings::from_env_for_schema_maintenance()?;
@@ -314,105 +329,67 @@ fn panic_payload_to_string(payload: &(dyn Any + Send)) -> String {
     }
 }
 
-fn init_tracing(log_level: &str) -> Result<Vec<WorkerGuard>> {
+fn init_tracing(
+    log_level: &str,
+    settings: &Settings,
+    file_logging_enabled: bool,
+) -> Result<Option<LogOwner>> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
-
     let stdout_layer = tracing_subscriber::fmt::layer().json();
-    let main_file_filter = filter_fn(|metadata| metadata.target() != BATCH_REPORT_LOG_TARGET);
-    let batch_file_filter = filter_fn(|metadata| metadata.target() == BATCH_REPORT_LOG_TARGET);
-
-    let main_file_logging = create_file_log_writer(None);
-    let batch_file_logging = create_file_log_writer(Some("batches"));
-
-    match (main_file_logging, batch_file_logging) {
-        (
-            Some((main_file_writer, main_guard, main_log_path)),
-            Some((batch_file_writer, batch_guard, batch_log_path)),
-        ) => {
-            let file_layer = tracing_subscriber::fmt::layer()
-                .json()
-                .with_writer(main_file_writer)
-                .with_filter(main_file_filter);
-            let batch_file_layer = tracing_subscriber::fmt::layer()
-                .json()
-                .with_writer(batch_file_writer)
-                .with_filter(batch_file_filter);
-
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(stdout_layer)
-                .with(file_layer)
-                .with(batch_file_layer)
-                .init();
-
-            tracing::info!(log_path = %main_log_path.display(), "File logging enabled");
-            tracing::info!(batch_log_path = %batch_log_path.display(), "Batch file logging enabled");
-            Ok(vec![main_guard, batch_guard])
-        }
-        (Some((file_writer, guard, log_path)), None) => {
-            let file_layer = tracing_subscriber::fmt::layer()
-                .json()
-                .with_writer(file_writer)
-                .with_filter(main_file_filter);
-
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(stdout_layer)
-                .with(file_layer)
-                .init();
-
-            tracing::info!(log_path = %log_path.display(), "File logging enabled");
-            Ok(vec![guard])
-        }
-        (None, Some((batch_file_writer, batch_guard, batch_log_path))) => {
-            let batch_file_layer = tracing_subscriber::fmt::layer()
-                .json()
-                .with_writer(batch_file_writer)
-                .with_filter(batch_file_filter);
-
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(stdout_layer)
-                .with(batch_file_layer)
-                .init();
-
-            tracing::info!(batch_log_path = %batch_log_path.display(), "Batch file logging enabled");
-            Ok(vec![batch_guard])
-        }
-        (None, None) => {
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(stdout_layer)
-                .init();
-
-            Ok(Vec::new())
-        }
+    // Maintenance can run beside the service. Leave its managed files and
+    // ownership lock untouched, and report maintenance output to the caller.
+    if !file_logging_enabled {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(stdout_layer)
+            .init();
+        return Ok(None);
     }
-}
-
-fn create_file_log_writer(suffix: Option<&str>) -> Option<(NonBlocking, WorkerGuard, PathBuf)> {
-    let log_path = default_log_path(suffix)?;
-    create_file_log_writer_at(&log_path)
-}
-
-fn create_file_log_writer_at(
-    log_path: &std::path::Path,
-) -> Option<(NonBlocking, WorkerGuard, PathBuf)> {
-    let parent = log_path.parent()?;
-    let file_name = log_path.file_name()?.to_str()?;
-
-    if std::fs::create_dir_all(parent).is_err() {
-        return None;
+    let owner = default_log_path(None).and_then(|path| {
+        let policy = LogPolicy {
+            max_segment_bytes: settings.log_segment_max_mb.saturating_mul(1024 * 1024),
+            max_total_bytes: settings.log_total_max_mb.saturating_mul(1024 * 1024),
+            retention_seconds: settings.log_retention_seconds,
+            queue_capacity: settings.log_queue_capacity,
+            max_record_bytes: settings.log_max_record_bytes,
+            cleanup_interval: Duration::from_secs(60),
+        };
+        match LogOwner::start(path.parent()?, policy) {
+            Ok(owner) => Some(owner),
+            Err(error) => {
+                eprintln!("Application file logging unavailable: {error}");
+                None
+            }
+        }
+    });
+    if let Some(owner) = owner {
+        let main_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(owner.main_writer())
+            .with_filter(filter_fn(|metadata| {
+                metadata.target() != BATCH_REPORT_LOG_TARGET
+            }));
+        let batch_layer = tracing_subscriber::fmt::layer()
+            .json()
+            .with_writer(owner.batch_writer())
+            .with_filter(filter_fn(|metadata| {
+                metadata.target() == BATCH_REPORT_LOG_TARGET
+            }));
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(stdout_layer)
+            .with(main_layer)
+            .with(batch_layer)
+            .init();
+        Ok(Some(owner))
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(stdout_layer)
+            .init();
+        Ok(None)
     }
-
-    let appender = tracing_appender::rolling::RollingFileAppender::builder()
-        .rotation(tracing_appender::rolling::Rotation::NEVER)
-        .filename_prefix(file_name)
-        .build(parent)
-        .ok()?;
-    let (writer, guard) = tracing_appender::non_blocking(appender);
-    Some((writer, guard, log_path.to_path_buf()))
 }
 
 fn default_log_path(suffix: Option<&str>) -> Option<PathBuf> {
@@ -427,7 +404,7 @@ fn default_log_path(suffix: Option<&str>) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod logging_tests {
-    use super::{create_file_log_writer_at, default_log_path};
+    use super::{default_log_path, LogOwner, LogPolicy};
 
     #[test]
     fn default_log_path_uses_working_directory_logs_folder() {
@@ -451,11 +428,11 @@ mod logging_tests {
     fn file_log_initialization_returns_none_when_log_file_cannot_be_opened() {
         let temp_dir = tempfile::tempdir().expect("temporary directory should be created");
         let log_path = temp_dir.path().join("jetstream-turbo.log");
-        std::fs::create_dir(&log_path).expect("conflicting directory should be created");
+        std::fs::write(&log_path, b"conflicting file").expect("conflicting file should be created");
 
-        let writer = create_file_log_writer_at(&log_path);
+        let writer = LogOwner::start(&log_path, LogPolicy::default());
 
-        assert!(writer.is_none());
+        assert!(writer.is_err());
     }
 }
 

@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::{error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 pub trait ProfileFetcher {
     fn bulk_fetch_profiles(
@@ -137,6 +137,10 @@ impl SharedFetchError {
 /// items per request, average latencies) are derived by differencing over time.
 #[derive(Debug, Default)]
 pub struct FetchDiagnostics {
+    /// Actual HTTP send attempts, including retry and isolation requests.
+    pub http_requests_total: AtomicU64,
+    /// Entity cardinality submitted across actual HTTP send attempts.
+    pub http_entities_total: AtomicU64,
     /// Identifiers submitted across all requests (items per request = Δitems / Δrequests).
     pub items_total: AtomicU64,
     /// Total wall time spent waiting for the collector lock plus holding it
@@ -212,6 +216,8 @@ fn classify_fetch_error(error: &TurboError) -> Option<FetchErrorClass> {
 #[derive(Debug, Clone, Copy, Default, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct BlueskyFetchKindDiagnostics {
+    pub http_requests_total: u64,
+    pub http_entities_total: u64,
     pub requests_total: u64,
     pub items_total: u64,
     pub lock_duration_ns_total: u64,
@@ -1097,6 +1103,16 @@ impl ProfileBatchCollector {
                 query_params.push(("actors", did));
             }
 
+            self.fetch
+                .http_requests_total
+                .fetch_add(1, Ordering::Relaxed);
+            self.fetch
+                .http_entities_total
+                .fetch_add(dids.len() as u64, Ordering::Relaxed);
+            metrics::counter!("jetstream_turbo_api_http_requests_total", "kind" => "profile")
+                .increment(1);
+            metrics::counter!("jetstream_turbo_api_entities_total", "kind" => "profile")
+                .increment(dids.len() as u64);
             let response = self
                 .http_client
                 .get(&url)
@@ -1464,7 +1480,7 @@ impl ProfileBatchCollector {
             self.batches_partial.fetch_add(1, Ordering::Relaxed);
         }
         let pct = (identifiers.len() as f64 / self.config.batch_size as f64) * 100.0;
-        info!(
+        debug!(
             "{} batch capacity: {}/{} ({:.0}%)",
             kind,
             identifiers.len(),
@@ -1478,7 +1494,7 @@ impl ProfileBatchCollector {
         if total > 0 && total % 10 == 0 {
             let partial = self.batches_partial.load(Ordering::Relaxed);
             let pct = (partial as f64 / total as f64) * 100.0;
-            info!(
+            debug!(
                 "Profile batch partial rate: {:.1}% ({}/{})",
                 pct, partial, total
             );
@@ -1488,6 +1504,8 @@ impl ProfileBatchCollector {
     /// Point-in-time snapshot of this collector's fetch counters.
     fn fetch_snapshot(&self) -> BlueskyFetchKindDiagnostics {
         BlueskyFetchKindDiagnostics {
+            http_requests_total: self.fetch.http_requests_total.load(Ordering::Relaxed),
+            http_entities_total: self.fetch.http_entities_total.load(Ordering::Relaxed),
             requests_total: self.batches_total.load(Ordering::Relaxed),
             items_total: self.fetch.items_total.load(Ordering::Relaxed),
             lock_duration_ns_total: self.fetch.lock_duration_ns_total.load(Ordering::Relaxed),
@@ -1703,6 +1721,16 @@ impl PostBatchCollector {
                 query_params.push(("uris", uri));
             }
 
+            self.fetch
+                .http_requests_total
+                .fetch_add(1, Ordering::Relaxed);
+            self.fetch
+                .http_entities_total
+                .fetch_add(uris.len() as u64, Ordering::Relaxed);
+            metrics::counter!("jetstream_turbo_api_http_requests_total", "kind" => "post")
+                .increment(1);
+            metrics::counter!("jetstream_turbo_api_entities_total", "kind" => "post")
+                .increment(uris.len() as u64);
             let response = self
                 .http_client
                 .get(&url)
@@ -2072,7 +2100,7 @@ impl PostBatchCollector {
             self.batches_partial.fetch_add(1, Ordering::Relaxed);
         }
         let pct = (identifiers.len() as f64 / self.config.batch_size as f64) * 100.0;
-        info!(
+        debug!(
             "Post batch capacity: {}/{} ({:.0}%)",
             identifiers.len(),
             self.config.batch_size,
@@ -2085,7 +2113,7 @@ impl PostBatchCollector {
         if total > 0 && total % 10 == 0 {
             let partial = self.batches_partial.load(Ordering::Relaxed);
             let pct = (partial as f64 / total as f64) * 100.0;
-            info!(
+            debug!(
                 "Post batch partial rate: {:.1}% ({}/{})",
                 pct, partial, total
             );
@@ -2095,6 +2123,8 @@ impl PostBatchCollector {
     /// Point-in-time snapshot of this collector's fetch counters.
     fn fetch_snapshot(&self) -> BlueskyFetchKindDiagnostics {
         BlueskyFetchKindDiagnostics {
+            http_requests_total: self.fetch.http_requests_total.load(Ordering::Relaxed),
+            http_entities_total: self.fetch.http_entities_total.load(Ordering::Relaxed),
             requests_total: self.batches_total.load(Ordering::Relaxed),
             items_total: self.fetch.items_total.load(Ordering::Relaxed),
             lock_duration_ns_total: self.fetch.lock_duration_ns_total.load(Ordering::Relaxed),
@@ -2400,6 +2430,34 @@ mod tests {
                 if failure.isolation == Some(crate::client::IsolationOutcome::BudgetExhausted)
         )));
         assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn actual_http_counters_include_retries_separately_from_claims() {
+        let server = MockServer::start().await;
+        for endpoint in ["/app.bsky.actor.getProfiles", "/app.bsky.feed.getPosts"] {
+            Mock::given(method("GET"))
+                .and(path(endpoint))
+                .respond_with(ResponseTemplate::new(502))
+                .expect(3)
+                .mount(&server)
+                .await;
+        }
+        let client = client_for_server(&server, 2, ContainmentPolicy::default()).await;
+        assert!(client
+            .bulk_fetch_profiles(&["did:plc:test".to_string()])
+            .await
+            .is_err());
+        let _ = client
+            .bulk_fetch_posts(&["at://did:plc:test/app.bsky.feed.post/one".to_string()])
+            .await;
+        let diagnostics = client.fetch_diagnostics().await;
+        for kind in [diagnostics.profiles, diagnostics.posts] {
+            assert_eq!(kind.requests_total, 1);
+            assert_eq!(kind.http_requests_total, 3);
+            assert_eq!(kind.http_entities_total, 3);
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 6);
     }
 
     #[tokio::test]

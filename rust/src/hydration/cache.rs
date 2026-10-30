@@ -1,4 +1,5 @@
 use crate::client::HydrationFailure;
+use crate::hydration::entity_cache::{post_author, CacheKind, InvalidationFences};
 use crate::models::bluesky::{BlueskyPost, BlueskyProfile};
 use ahash::RandomState;
 use lru::LruCache;
@@ -11,19 +12,27 @@ use tracing::{instrument, trace};
 
 /// Time-to-live for cached profiles and posts (matches the previous moka TTL).
 const PROFILE_TTL: Duration = Duration::from_secs(300);
+const INVALIDATION_FENCE_CAPACITY: usize = 1024;
+
+#[derive(Default)]
+struct InvalidationState {
+    generation: u64,
+    fences: InvalidationFences,
+}
 
 /// A cached value plus its insertion time, used to implement lazy TTL expiry
 /// (and FIFO eviction when the cache is at capacity).
 struct CacheEntry<T> {
     value: Arc<T>,
     inserted_at: Instant,
+    expires_at: Instant,
     weight_bytes: u64,
 }
 
 impl<T> CacheEntry<T> {
     #[inline(always)]
     fn expired(&self, ttl: Duration, now: Instant) -> bool {
-        now.duration_since(self.inserted_at) >= ttl
+        now >= self.expires_at || now.saturating_duration_since(self.inserted_at) >= ttl
     }
 }
 
@@ -38,6 +47,9 @@ pub struct TurboCache {
     negative_post_ttl: Duration,
     negative_post_capacity: usize,
     clock: Arc<dyn Fn() -> Instant + Send + Sync>,
+    profile_ttl: Duration,
+    post_ttl: Duration,
+    generation: Arc<Mutex<InvalidationState>>,
     user_capacity: usize,
     post_capacity: usize,
     user_limit_bytes: u64,
@@ -93,6 +105,12 @@ struct PositiveCacheInsert<'a, T> {
     current_weight_bytes: &'a AtomicU64,
     limit_bytes: u64,
     kind_evictions: &'a AtomicU64,
+}
+
+struct CacheFreshness {
+    age: Duration,
+    remaining: Duration,
+    sampled_at: Instant,
 }
 
 impl Clone for CacheMetrics {
@@ -243,6 +261,9 @@ impl TurboCache {
             negative_post_ttl,
             negative_post_capacity,
             clock,
+            profile_ttl: PROFILE_TTL,
+            post_ttl: PROFILE_TTL,
+            generation: Arc::new(Mutex::new(InvalidationState::default())),
             user_capacity: user_cache_size,
             post_capacity: post_cache_size,
             user_limit_bytes: limits.user.max(1),
@@ -270,6 +291,195 @@ impl TurboCache {
         (users as u64, posts as u64)
     }
 
+    /// Configure independent freshness bounds; existing entries also obey them.
+    pub fn with_ttls(mut self, profile_ttl: Duration, post_ttl: Duration) -> Self {
+        self.profile_ttl = profile_ttl;
+        self.post_ttl = post_ttl;
+        self
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .generation
+    }
+
+    pub(crate) fn begin_fetch<T>(&self, prepare: impl FnOnce() -> T) -> (u64, T) {
+        let mut state = self.generation.lock().unwrap_or_else(|e| e.into_inner());
+        state.generation = state.generation.saturating_add(1);
+        // Capture the disk marker under this same lock: concurrent resolver
+        // branches must agree on the order of their fetches in both tiers.
+        (state.generation, prepare())
+    }
+
+    pub(crate) fn finish_fetch(
+        &self,
+        generation: u64,
+        kind: CacheKind,
+        key: &str,
+        install: impl FnOnce(),
+    ) -> bool {
+        let mut state = self.generation.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.fences.allows(generation, kind, key) {
+            return false;
+        }
+        state
+            .fences
+            .invalidate(generation, kind, key, INVALIDATION_FENCE_CAPACITY);
+        if !state.fences.allows(generation, kind, key) {
+            return false;
+        }
+        install();
+        true
+    }
+
+    pub(crate) fn if_current(
+        &self,
+        generation: u64,
+        kind: CacheKind,
+        key: &str,
+        install: impl FnOnce(),
+    ) -> bool {
+        let current = self.generation.lock().unwrap_or_else(|e| e.into_inner());
+        if current.fences.allows(generation, kind, key) {
+            install();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn profile_ttl(&self) -> Duration {
+        self.profile_ttl
+    }
+    pub(crate) fn post_ttl(&self) -> Duration {
+        self.post_ttl
+    }
+
+    /// A full clear also fences every fetch already in flight.
+    pub fn invalidate_all(&self) {
+        let mut state = self.generation.lock().unwrap_or_else(|e| e.into_inner());
+        state.generation = state.generation.saturating_add(1);
+        let generation = state.generation;
+        state.fences.clear(generation);
+        self.clear();
+    }
+
+    pub(crate) fn invalidate_with(&self, kind: CacheKind, key: &str, invalidate: impl FnOnce()) {
+        self.invalidate_if_current(None, kind, key, invalidate);
+    }
+
+    pub(crate) fn invalidate_if_current(
+        &self,
+        generation: Option<u64>,
+        kind: CacheKind,
+        key: &str,
+        invalidate: impl FnOnce(),
+    ) {
+        let mut state = self.generation.lock().unwrap_or_else(|e| e.into_inner());
+        if generation.is_some_and(|generation| !state.fences.allows(generation, kind, key)) {
+            return;
+        }
+        let next = generation.unwrap_or_else(|| {
+            state.generation = state.generation.saturating_add(1);
+            state.generation
+        });
+        // A Missing outcome must account for recovery before removing its
+        // negative-cache metadata. The same lock excludes older completions.
+        invalidate();
+        if state
+            .fences
+            .invalidate(next, kind, key, INVALIDATION_FENCE_CAPACITY)
+        {
+            self.clear();
+        } else {
+            self.remove_invalidated(kind, key);
+        }
+    }
+
+    fn remove_invalidated(&self, kind: CacheKind, key: &str) {
+        if kind == CacheKind::Post {
+            if let Some(entry) = self
+                .post_cache
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(key)
+            {
+                subtract_weight(&self.post_weight_bytes, entry.weight_bytes);
+            }
+            self.post_order
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|uri| uri != key);
+            self.clear_unavailable_post(key);
+            if let Some(weight) = self
+                .expired_negative_posts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pop(key)
+            {
+                subtract_weight(&self.expired_negative_post_weight_bytes, weight);
+            }
+            return;
+        }
+        if kind == CacheKind::Profile {
+            let mut users = self.user_cache.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = users.remove(key) {
+                subtract_weight(&self.user_weight_bytes, entry.weight_bytes);
+            }
+            self.user_order
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|did| did != key);
+        }
+        let affected = |uri: &str| match kind {
+            CacheKind::Profile => post_author(uri) == Some(key),
+            CacheKind::Post => uri == key,
+        };
+        let mut posts = self.post_cache.write().unwrap_or_else(|e| e.into_inner());
+        posts.retain(|uri, entry| {
+            if affected(uri) {
+                subtract_weight(&self.post_weight_bytes, entry.weight_bytes);
+                false
+            } else {
+                true
+            }
+        });
+        self.post_order
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|uri| !affected(uri));
+        let mut negative = self
+            .negative_post_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut expired = self
+            .expired_negative_posts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let negative_keys: Vec<_> = negative
+            .iter()
+            .filter(|(uri, _)| affected(uri))
+            .map(|(uri, _)| uri.clone())
+            .collect();
+        for uri in negative_keys {
+            if let Some(entry) = negative.pop(&uri) {
+                subtract_weight(&self.negative_post_weight_bytes, entry.weight_bytes);
+            }
+        }
+        let expired_keys: Vec<_> = expired
+            .iter()
+            .filter(|(uri, _)| affected(uri))
+            .map(|(uri, _)| uri.clone())
+            .collect();
+        for uri in expired_keys {
+            if let Some(weight) = expired.pop(&uri) {
+                subtract_weight(&self.expired_negative_post_weight_bytes, weight);
+            }
+        }
+    }
+
     pub fn get_negative_post_entry_count(&self) -> usize {
         self.negative_post_cache
             .lock()
@@ -292,7 +502,7 @@ impl TurboCache {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match map.get(did) {
-            Some(entry) if !entry.expired(PROFILE_TTL, now) => {
+            Some(entry) if !entry.expired(self.profile_ttl, now) => {
                 self.metrics.user_hits.fetch_add(1, Ordering::Relaxed);
                 Some(Arc::clone(&entry.value))
             }
@@ -304,7 +514,14 @@ impl TurboCache {
     }
 
     pub fn get_user_profiles<S: AsRef<str>>(&self, dids: &[S]) -> Vec<Option<Arc<BlueskyProfile>>> {
+        if self.profile_ttl.is_zero() {
+            self.metrics
+                .user_misses
+                .fetch_add(dids.len() as u64, Ordering::Relaxed);
+            return vec![None; dids.len()];
+        }
         let now = (self.clock)();
+        let oldest_allowed_fetch = now.checked_sub(self.profile_ttl);
         let map = self
             .user_cache
             .read()
@@ -314,7 +531,10 @@ impl TurboCache {
 
         for did in dids {
             match map.get(did.as_ref()) {
-                Some(entry) if !entry.expired(PROFILE_TTL, now) => {
+                Some(entry)
+                    if now < entry.expires_at
+                        && oldest_allowed_fetch.is_none_or(|cutoff| entry.inserted_at > cutoff) =>
+                {
                     hits += 1;
                     profiles.push(Some(Arc::clone(&entry.value)));
                 }
@@ -336,6 +556,21 @@ impl TurboCache {
     }
 
     pub fn set_user_profile(&self, did: String, profile: Arc<BlueskyProfile>) {
+        self.set_user_profile_with_freshness(did, profile, Duration::ZERO, self.profile_ttl);
+    }
+
+    pub(crate) fn set_user_profile_with_freshness(
+        &self,
+        did: String,
+        profile: Arc<BlueskyProfile>,
+        age: Duration,
+        remaining: Duration,
+    ) {
+        let freshness = CacheFreshness {
+            age,
+            remaining,
+            sampled_at: (self.clock)(),
+        };
         let weight_bytes = estimated_serialized_weight(&did, profile.as_ref());
         self.insert_entry(
             PositiveCacheInsert {
@@ -349,6 +584,7 @@ impl TurboCache {
             did,
             profile,
             weight_bytes,
+            freshness,
         );
         trace!("Cached user profile");
     }
@@ -360,7 +596,7 @@ impl TurboCache {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match map.get(uri) {
-            Some(entry) if !entry.expired(PROFILE_TTL, now) => {
+            Some(entry) if !entry.expired(self.post_ttl, now) => {
                 self.metrics.post_hits.fetch_add(1, Ordering::Relaxed);
                 Some(Arc::clone(&entry.value))
             }
@@ -372,7 +608,21 @@ impl TurboCache {
     }
 
     pub fn get_posts(&self, uris: &[String]) -> Vec<Option<Arc<BlueskyPost>>> {
+        self.get_posts_by_keys(uris)
+    }
+
+    pub(crate) fn get_posts_by_keys<S: AsRef<str>>(
+        &self,
+        uris: &[S],
+    ) -> Vec<Option<Arc<BlueskyPost>>> {
+        if self.post_ttl.is_zero() {
+            self.metrics
+                .post_misses
+                .fetch_add(uris.len() as u64, Ordering::Relaxed);
+            return vec![None; uris.len()];
+        }
         let now = (self.clock)();
+        let oldest_allowed_fetch = now.checked_sub(self.post_ttl);
         let map = self
             .post_cache
             .read()
@@ -381,8 +631,11 @@ impl TurboCache {
         let mut hits = 0_u64;
 
         for uri in uris {
-            match map.get(uri) {
-                Some(entry) if !entry.expired(PROFILE_TTL, now) => {
+            match map.get(uri.as_ref()) {
+                Some(entry)
+                    if now < entry.expires_at
+                        && oldest_allowed_fetch.is_none_or(|cutoff| entry.inserted_at > cutoff) =>
+                {
                     hits += 1;
                     posts.push(Some(Arc::clone(&entry.value)));
                 }
@@ -411,6 +664,7 @@ impl TurboCache {
         key: String,
         value: Arc<T>,
         weight_bytes: u64,
+        freshness: CacheFreshness,
     ) {
         if weight_bytes > target.limit_bytes {
             self.metrics.cache_evictions.fetch_add(1, Ordering::Relaxed);
@@ -426,6 +680,19 @@ impl TurboCache {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = (self.clock)();
+        let elapsed = now.saturating_duration_since(freshness.sampled_at);
+        let remaining = freshness.remaining.saturating_sub(elapsed);
+        if remaining.is_zero() {
+            return;
+        }
+        let age = freshness.age.saturating_add(elapsed);
+        let fetched_at = now.checked_sub(age).unwrap_or(now);
+        if map
+            .get(&key)
+            .is_some_and(|previous| previous.inserted_at > fetched_at)
+        {
+            return;
+        }
         if let Some(previous) = map.remove(&key) {
             subtract_weight(target.current_weight_bytes, previous.weight_bytes);
             order.retain(|existing| existing != &key);
@@ -454,13 +721,29 @@ impl TurboCache {
             key,
             CacheEntry {
                 value,
-                inserted_at: now,
+                inserted_at: fetched_at,
+                expires_at: now + remaining,
                 weight_bytes,
             },
         );
     }
 
     pub fn set_post(&self, uri: String, post: Arc<BlueskyPost>) {
+        self.set_post_with_freshness(uri, post, Duration::ZERO, self.post_ttl);
+    }
+
+    pub(crate) fn set_post_with_freshness(
+        &self,
+        uri: String,
+        post: Arc<BlueskyPost>,
+        age: Duration,
+        remaining: Duration,
+    ) {
+        let freshness = CacheFreshness {
+            age,
+            remaining,
+            sampled_at: (self.clock)(),
+        };
         self.complete_post_resolution(&uri, "found");
         let weight_bytes = estimated_serialized_weight(&uri, post.as_ref());
         self.insert_entry(
@@ -475,6 +758,7 @@ impl TurboCache {
             uri,
             post,
             weight_bytes,
+            freshness,
         );
         trace!("Cached referenced post");
     }
@@ -805,12 +1089,14 @@ impl TurboCache {
             &self.user_order,
             &self.user_weight_bytes,
             now,
+            self.profile_ttl,
         );
         let posts = reclaim_expired_entries(
             &self.post_cache,
             &self.post_order,
             &self.post_weight_bytes,
             now,
+            self.post_ttl,
         );
         let mut negative = self
             .negative_post_cache
@@ -941,13 +1227,14 @@ fn reclaim_expired_entries<T>(
     order: &Mutex<VecDeque<String>>,
     weight: &AtomicU64,
     now: Instant,
+    ttl: Duration,
 ) -> usize {
     let mut cache = cache
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let expired = cache
         .iter()
-        .filter(|(_, entry)| entry.expired(PROFILE_TTL, now))
+        .filter(|(_, entry)| entry.expired(ttl, now))
         .map(|(key, _)| key.clone())
         .collect::<Vec<_>>();
     for key in &expired {
@@ -970,6 +1257,64 @@ fn reclaim_expired_entries<T>(
 mod tests {
     use super::*;
     use crate::client::{BlueskyOperation, UpstreamFailureCategory};
+
+    #[test]
+    fn targeted_fences_preserve_unrelated_fetches_and_bound_metadata() {
+        let cache = TurboCache::new(10, 10);
+        let generation = cache.generation();
+        let target = "at://did:plc:target/app.bsky.feed.post/one";
+        let unrelated = "at://did:plc:other/app.bsky.feed.post/one";
+        cache.set_unavailable_post(target.into(), failure("target"));
+        cache.set_unavailable_post(unrelated.into(), failure("other"));
+        cache.invalidate_with(CacheKind::Post, target, || {});
+        assert!(cache.get_unavailable_post(target).is_none());
+        assert!(cache.get_unavailable_post(unrelated).is_some());
+        assert!(
+            !cache.if_current(generation, CacheKind::Post, target, || panic!(
+                "stale fetch installed"
+            ))
+        );
+        assert!(cache.if_current(generation, CacheKind::Post, unrelated, || {}));
+        for i in 0..INVALIDATION_FENCE_CAPACITY * 2 {
+            cache.invalidate_with(CacheKind::Post, &format!("post-{i}"), || {});
+        }
+        let state = cache.generation.lock().unwrap();
+        assert!(state.fences.len() <= INVALIDATION_FENCE_CAPACITY);
+        assert!(!state.fences.allows(generation, CacheKind::Post, unrelated));
+        drop(state);
+        assert!(cache.get_unavailable_post(unrelated).is_some());
+    }
+
+    #[test]
+    fn disk_promotion_keeps_original_deadline_and_shortened_ttl() {
+        let start = Instant::now();
+        let now = Arc::new(Mutex::new(start));
+        let clock = Arc::clone(&now);
+        let cache = TurboCache::new_with_clock(
+            10,
+            10,
+            10,
+            Duration::from_secs(30),
+            Arc::new(move || *clock.lock().unwrap()),
+        );
+        let profile: BlueskyProfile = serde_json::from_value(
+            serde_json::json!({"did":"did:plc:test","handle":"test.example"}),
+        )
+        .unwrap();
+        cache.set_user_profile_with_freshness(
+            "did:plc:test".into(),
+            Arc::new(profile.clone()),
+            Duration::from_secs(299),
+            Duration::from_secs(1),
+        );
+        assert!(cache.get_user_profile("did:plc:test").is_some());
+        *now.lock().unwrap() = start + Duration::from_secs(1);
+        assert!(cache.get_user_profile("did:plc:test").is_none());
+        cache.set_user_profile("did:plc:test".into(), Arc::new(profile));
+        *now.lock().unwrap() = start + Duration::from_secs(61);
+        let cache = cache.with_ttls(Duration::from_secs(60), Duration::from_secs(300));
+        assert!(cache.get_user_profile("did:plc:test").is_none());
+    }
 
     fn failure(fingerprint: &str) -> HydrationFailure {
         HydrationFailure {

@@ -381,7 +381,10 @@ pub fn parse_proc_cgroup(contents: &str) -> CgroupIdentity {
         };
         if hierarchy == "0" && controllers.is_empty() {
             identity.v2_path.get_or_insert_with(|| path.to_string());
-        } else if controllers.split(',').any(|controller| controller == "memory") {
+        } else if controllers
+            .split(',')
+            .any(|controller| controller == "memory")
+        {
             identity
                 .v1_memory_path
                 .get_or_insert_with(|| path.to_string());
@@ -489,8 +492,7 @@ pub fn resolve_cgroup_memory_paths(
             }
         } else {
             attempted.push(
-                "v1 memory controller line present but no cgroup memory mount resolved"
-                    .to_string(),
+                "v1 memory controller line present but no cgroup memory mount resolved".to_string(),
             );
         }
     }
@@ -889,8 +891,7 @@ impl MemoryRunArtifact {
             let effective_max_batches = configuration
                 .replay_max_concurrent_batches
                 .max(configuration.max_concurrent_requests);
-            sample.queued_batches.saturating_add(sample.running_batches)
-                <= effective_max_batches
+            sample.queued_batches.saturating_add(sample.running_batches) <= effective_max_batches
                 && sample.active_permits <= sample.maximum_permits
                 && sample.maximum_permits <= effective_max_batches
         });
@@ -1263,9 +1264,8 @@ mod tests {
         );
         assert_eq!(v2.v1_memory_path, None);
 
-        let v1 = parse_proc_cgroup(
-            "12:cpu,cpuacct:/a/b\n11:memory:/system.slice/jetstream.service\n",
-        );
+        let v1 =
+            parse_proc_cgroup("12:cpu,cpuacct:/a/b\n11:memory:/system.slice/jetstream.service\n");
         assert_eq!(
             v1.v1_memory_path.as_deref(),
             Some("/system.slice/jetstream.service")
@@ -1280,7 +1280,10 @@ mod tests {
             parse_proc_cgroup("12:cpu:/only-non-memory\n"),
             CgroupIdentity::default()
         );
-        assert_eq!(parse_proc_cgroup("malformed-line"), CgroupIdentity::default());
+        assert_eq!(
+            parse_proc_cgroup("malformed-line"),
+            CgroupIdentity::default()
+        );
     }
 
     #[test]
@@ -1294,9 +1297,7 @@ mod tests {
             Some("/sys/fs/cgroup/memory")
         );
         // A v2-only mount table resolves no v1 mount.
-        let empty = parse_mountinfo(
-            "36 35 0:31 / /sys/fs/cgroup rw,nosuid - cgroup2 cgroup2 rw\n",
-        );
+        let empty = parse_mountinfo("36 35 0:31 / /sys/fs/cgroup rw,nosuid - cgroup2 cgroup2 rw\n");
         assert_eq!(resolve_v1_memory_mount(&empty), None);
     }
 
@@ -1308,8 +1309,7 @@ mod tests {
         write_file(&nested, "memory.current", "42\n");
 
         let identity = parse_proc_cgroup("0::/system.slice/jetstream.service\n");
-        let resolved =
-            resolve_cgroup_memory_paths(&identity, &v2_root, None).unwrap();
+        let resolved = resolve_cgroup_memory_paths(&identity, &v2_root, None).unwrap();
         assert_eq!(resolved.hierarchy, CgroupHierarchy::V2);
         assert_eq!(resolved.memory_dir, nested.display().to_string());
 
@@ -1327,11 +1327,9 @@ mod tests {
 
     #[test]
     fn cgroup_path_resolution_failure_names_attempted_locations() {
-        let identity = parse_proc_cgroup(
-            "11:memory:/system.slice/service\n0::/system.slice/service\n",
-        );
-        let result =
-            resolve_cgroup_memory_paths(&identity, Path::new("/nonexistent-v2"), None);
+        let identity =
+            parse_proc_cgroup("11:memory:/system.slice/service\n0::/system.slice/service\n");
+        let result = resolve_cgroup_memory_paths(&identity, Path::new("/nonexistent-v2"), None);
         let error = result.unwrap_err();
         assert!(error.contains("/nonexistent-v2/system.slice/service/memory.current"));
         assert!(error.contains("no cgroup memory mount resolved"));
@@ -1396,7 +1394,11 @@ mod tests {
         assert_eq!(diagnostics.max_bytes, None, "v1 -1 limit means unlimited");
         assert_eq!(diagnostics.max_unlimited, Some(true));
         assert_eq!(diagnostics.high_bytes, Some(4096));
-        assert_eq!(diagnostics.events.max, Some(7), "failcnt maps to max events");
+        assert_eq!(
+            diagnostics.events.max,
+            Some(7),
+            "failcnt maps to max events"
+        );
         assert_eq!(diagnostics.events.oom_kill, None, "v1 has no kill counters");
         assert_eq!(diagnostics.pressure_some_avg10, Some(2.5));
         assert_eq!(diagnostics.collection_error, None);
@@ -1417,7 +1419,9 @@ mod tests {
         assert_eq!(diagnostics.current_bytes, None);
         assert_eq!(diagnostics.max_bytes, None);
         assert_eq!(diagnostics.pressure_some_avg10, None);
-        let error = diagnostics.collection_error.expect("error must be explicit");
+        let error = diagnostics
+            .collection_error
+            .expect("error must be explicit");
         assert!(error.contains("unavailable"));
         assert!(error.contains("/injected/memory.current"));
     }

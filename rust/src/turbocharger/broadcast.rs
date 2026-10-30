@@ -25,7 +25,11 @@ pub struct MonitorBroadcastEnvelope {
 }
 
 impl MonitorBroadcastEnvelope {
-    pub fn new(record: EnrichedRecord, turbo_epoch: impl Into<String>, ingress_ordinal: u64) -> Self {
+    pub fn new(
+        record: EnrichedRecord,
+        turbo_epoch: impl Into<String>,
+        ingress_ordinal: u64,
+    ) -> Self {
         Self {
             record,
             turbo_epoch: turbo_epoch.into(),

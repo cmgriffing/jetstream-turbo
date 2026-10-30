@@ -150,13 +150,10 @@ async fn run_suite(event_volume: usize, smoke_cache_entries: usize, scale: &str)
     let live_count = (backlog_count / 4).max(25);
     let backlog: Vec<JetstreamMessage> = (0..backlog_count)
         .map(|index| {
-            let mut message = create_message_batch(1)
-                .pop()
-                .expect("fixture message");
+            let mut message = create_message_batch(1).pop().expect("fixture message");
             message.time_us = Some(
                 backlog_start_us
-                    + (backlog_window_us as f64 * (index + 1) as f64 / backlog_count as f64)
-                        as u64,
+                    + (backlog_window_us as f64 * (index + 1) as f64 / backlog_count as f64) as u64,
             );
             message.seq = Some(900_000 + index as u64);
             message
@@ -186,7 +183,11 @@ async fn run_suite(event_volume: usize, smoke_cache_entries: usize, scale: &str)
         scale,
     )
     .await;
-    for (index, lag_us) in convergence_sweep.committed_lag_us_samples.iter().enumerate() {
+    for (index, lag_us) in convergence_sweep
+        .committed_lag_us_samples
+        .iter()
+        .enumerate()
+    {
         let mut drain_sample = sample(
             WorkloadPhase::Replay,
             checkpoint.saturating_add((index + 1) as u64),
@@ -200,8 +201,7 @@ async fn run_suite(event_volume: usize, smoke_cache_entries: usize, scale: &str)
     }
     // The convergence drain committed backlog + live traffic; the suite's
     // checkpoint cursor must reflect that so later samples stay monotonic.
-    checkpoint = checkpoint
-        .saturating_add(convergence_sweep.committed_lag_us_samples.len() as u64);
+    checkpoint = checkpoint.saturating_add(convergence_sweep.committed_lag_us_samples.len() as u64);
 
     // Cursor replay uses the same deterministic source records. Duplicate
     // storage semantics and checkpoint monotonicity are exercised separately
@@ -397,7 +397,13 @@ async fn run_suite(event_volume: usize, smoke_cache_entries: usize, scale: &str)
         0,
         0,
     ));
-    store.run_vacuum(max_size, &jetstream_turbo_rs::storage::VacuumRunPolicy::default()).await.expect("VACUUM phase");
+    store
+        .run_vacuum(
+            max_size,
+            &jetstream_turbo_rs::storage::VacuumRunPolicy::default(),
+        )
+        .await
+        .expect("VACUUM phase");
     samples.push(sample(
         WorkloadPhase::Vacuum,
         checkpoint,
@@ -543,7 +549,6 @@ fn unix_millis() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-
 struct ConvergenceRun {
     committed_lag_us_samples: Vec<u64>,
     drainage_events_per_second: f64,
@@ -626,11 +631,11 @@ async fn convergence_drain(
                     .filter_map(|m| m.time_us)
                     .max()
                     .expect("drain event time_us");
-                let enriched = hydrator.hydrate_batch(batch).await.expect("drain hydration");
-                store
-                    .store_batch(&enriched)
+                let enriched = hydrator
+                    .hydrate_batch(batch)
                     .await
-                    .expect("drain store");
+                    .expect("drain hydration");
+                store.store_batch(&enriched).await.expect("drain store");
                 last_time_us
             });
         }
@@ -669,7 +674,11 @@ async fn run_convergence_and_sweep(
 ) -> ConvergenceSweep {
     let settings = jetstream_turbo_rs::Settings::default();
     let replay_max = settings.effective_max_batch_concurrency();
-    let multipliers: &[usize] = if scale == "production" { &[2, 3, 4] } else { &[3] };
+    let multipliers: &[usize] = if scale == "production" {
+        &[2, 3, 4]
+    } else {
+        &[3]
+    };
     let mut per_concurrency_events_per_second = Vec::new();
     let mut peak_rss_bytes = None;
     let mut convergence: Option<ConvergenceRun> = None;
@@ -730,11 +739,10 @@ async fn run_convergence_and_sweep(
     // schedule, not a production-rate measurement (it excludes write
     // contention and is dispatch-granularity noisy at compressed scale); it
     // is therefore reported, not asserted against.
-    let baseline: jetstream_turbo_rs::turbocharger::MemoryRunBaseline =
-        serde_json::from_str(include_str!(
-            "fixtures/runtime-memory-pre-change-baseline.json"
-        ))
-        .expect("valid checked-in pre-change baseline");
+    let baseline: jetstream_turbo_rs::turbocharger::MemoryRunBaseline = serde_json::from_str(
+        include_str!("fixtures/runtime-memory-pre-change-baseline.json"),
+    )
+    .expect("valid checked-in pre-change baseline");
     assert!(
         convergence.drainage_events_per_second > baseline.throughput_per_second,
         "drain throughput {} events/s must exceed the production baseline rate {} events/s",
@@ -790,8 +798,14 @@ fn write_sweep_artifact(sweep: &ConvergenceSweep, scale: &str, artifact_path: &s
         },
     });
     let sweep_path = parent.join("runtime-memory-replay-concurrency-sweep.json");
-    if let Err(error) = std::fs::write(&sweep_path, serde_json::to_vec_pretty(&payload).expect("sweep JSON")) {
-        eprintln!("failed to write sweep artifact {}: {error}", sweep_path.display());
+    if let Err(error) = std::fs::write(
+        &sweep_path,
+        serde_json::to_vec_pretty(&payload).expect("sweep JSON"),
+    ) {
+        eprintln!(
+            "failed to write sweep artifact {}: {error}",
+            sweep_path.display()
+        );
     }
 }
 

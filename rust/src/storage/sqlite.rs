@@ -119,6 +119,15 @@ pub struct CleanupResult {
     pub vacuum_pending_reason: Option<VacuumPendingReason>,
 }
 
+/// Progress from receipt expiry work bounded by a scheduling time budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiptPruneResult {
+    pub receipts_deleted: u64,
+    /// Resume promptly when the budget ended on a full chunk. This may request
+    /// one extra pass when that chunk happened to drain the eligible receipts.
+    pub needs_reschedule: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SQLiteStateSnapshot {
     pub db_size_bytes: i64,
@@ -210,6 +219,17 @@ pub trait RecordStore {
         }
     }
 
+    /// Bind stored or replay-completed events to this process's admission epoch.
+    /// Fresh events are bound after payload storage; a crash before binding keeps
+    /// their recovery state conservatively uncovered.
+    fn bind_ingress(
+        &self,
+        _epoch: &str,
+        _events: &[(SourceEventId, u64, u64)],
+    ) -> impl std::future::Future<Output = TurboResult<()>> + Send {
+        async { Ok(()) }
+    }
+
     /// Release the publication journal after publication and broadcast
     /// succeeded, completing the events for future replay filtering.
     fn clear_publication_journal(
@@ -226,9 +246,27 @@ pub struct SQLiteStore {
     max_connections: u32,
     pragma_config: SQLitePragmaConfig,
     vacuum_state: Mutex<VacuumState>,
+    pub(super) capacity_policy: Mutex<super::capacity::StoragePolicy>,
+    pub(super) disk_pressure: std::sync::atomic::AtomicBool,
+    pub(super) maintenance_active: std::sync::atomic::AtomicBool,
+    pub(super) reclamation_metrics: Mutex<super::capacity::ReclamationMetrics>,
+}
+
+struct PreparedRecoveryRecord {
+    json: String,
+    message_end: usize,
+    source_event_id: SourceEventId,
+    at_uri: Option<String>,
 }
 
 impl SQLiteStore {
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
+    pub fn database_path(&self) -> &Path {
+        Path::new(&self.db_path)
+    }
     /// Performs the same bounded compatibility and index verification used by serve startup.
     pub async fn verify_schema_ready<P: AsRef<Path>>(
         db_path: P,
@@ -308,6 +346,10 @@ impl SQLiteStore {
             max_connections: max_connections.max(1),
             pragma_config,
             vacuum_state: Mutex::new(VacuumState::default()),
+            capacity_policy: Mutex::new(super::capacity::StoragePolicy::default()),
+            disk_pressure: std::sync::atomic::AtomicBool::new(false),
+            maintenance_active: std::sync::atomic::AtomicBool::new(false),
+            reclamation_metrics: Mutex::new(super::capacity::ReclamationMetrics::default()),
         })
     }
 
@@ -426,6 +468,25 @@ impl SQLiteStore {
                 at_uri TEXT,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS recovery_admissions (
+                source_event_id TEXT PRIMARY KEY,
+                source_time_us INTEGER NOT NULL,
+                ingress_epoch TEXT NOT NULL,
+                ingress_ordinal INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS completion_receipts (
+                source_event_id TEXT PRIMARY KEY,
+                source_time_us INTEGER,
+                ingress_epoch TEXT,
+                ingress_ordinal INTEGER,
+                covered INTEGER NOT NULL DEFAULT 0 CHECK(covered IN (0, 1)),
+                completed_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_completion_receipts_coverage
+                ON completion_receipts(ingress_epoch, covered, ingress_ordinal);
+            CREATE INDEX IF NOT EXISTS idx_completion_receipts_expiry
+                ON completion_receipts(covered, source_time_us);
             "#,
         )
         .execute(pool)
@@ -454,6 +515,8 @@ impl SQLiteStore {
             .execute(pool)
             .await?;
         }
+        crate::storage::schema::verify_recovery_indexes(pool).await?;
+        crate::hydration::entity_cache::ensure_schema(pool).await?;
         trace!("Bounded SQLite schema compatibility checks completed");
         Ok(())
     }
@@ -547,6 +610,11 @@ impl SQLiteStore {
         record.message.write_json(&mut buf);
         let message_end = buf.len();
         simd_json_to_writer(&mut buf, &record.hydrated_metadata).unwrap();
+        if (buf.len() as u64).saturating_add(4096) > self.recovery_batch_limit() {
+            return Err(TurboError::Internal(
+                "serialized recovery record exceeds configured storage allowance".into(),
+            ));
+        }
         let combined = String::from_utf8(buf).expect("serialized JSON is UTF-8");
         let message_json = &combined[..message_end];
         let metadata_json = &combined[message_end..];
@@ -613,11 +681,17 @@ impl SQLiteStore {
         &self,
         source_event_id: &SourceEventId,
     ) -> TurboResult<bool> {
-        let exists: i64 =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM records WHERE source_event_id = ?)")
-                .bind(source_event_id.as_str())
-                .fetch_one(&self.pool)
-                .await?;
+        let exists: i64 = sqlx::query_scalar(
+            r#"SELECT EXISTS(
+                SELECT 1 FROM completion_receipts WHERE source_event_id = ?
+                UNION ALL SELECT 1 FROM records r WHERE source_event_id = ?
+                AND NOT EXISTS(SELECT 1 FROM publication_journal j
+                    WHERE j.source_event_id = r.source_event_id))"#,
+        )
+        .bind(source_event_id.as_str())
+        .bind(source_event_id.as_str())
+        .fetch_one(&self.pool)
+        .await?;
         Ok(exists != 0)
     }
 
@@ -748,6 +822,23 @@ impl SQLiteStore {
         &self,
         checkpoint: &IngestionCheckpoint,
     ) -> TurboResult<bool> {
+        self.advance_checkpoint(checkpoint, None).await
+    }
+
+    /// Advance progress and prove receipt coverage only within the current epoch.
+    pub async fn advance_ingestion_checkpoint_for_epoch(
+        &self,
+        checkpoint: &IngestionCheckpoint,
+        epoch: &str,
+    ) -> TurboResult<bool> {
+        self.advance_checkpoint(checkpoint, Some(epoch)).await
+    }
+
+    async fn advance_checkpoint(
+        &self,
+        checkpoint: &IngestionCheckpoint,
+        epoch: Option<&str>,
+    ) -> TurboResult<bool> {
         let ingress_ordinal = i64::try_from(checkpoint.ingress_ordinal).map_err(|_| {
             TurboError::InvalidMessage("checkpoint ordinal exceeds SQLite range".to_string())
         })?;
@@ -763,6 +854,7 @@ impl SQLiteStore {
                 TurboError::InvalidMessage("checkpoint source_seq exceeds SQLite range".to_string())
             })?;
 
+        let mut tx = self.pool.begin().await?;
         let result = sqlx::query(
             r#"
             INSERT INTO ingestion_checkpoint (
@@ -782,10 +874,84 @@ impl SQLiteStore {
         .bind(source_seq)
         .bind(checkpoint.cursor.source_event_id.as_str())
         .bind(checkpoint.updated_at.to_rfc3339())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
+        if result.rows_affected() == 1 {
+            if let Some(epoch) = epoch {
+                sqlx::query("UPDATE completion_receipts SET covered = 1 WHERE ingress_epoch = ? AND ingress_ordinal <= ? AND covered = 0")
+                    .bind(epoch)
+                    .bind(ingress_ordinal)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        tx.commit().await?;
         Ok(result.rows_affected() == 1)
+    }
+
+    /// Expire only receipts proven covered by a durable frontier, retaining the
+    /// configured replay overlap behind source time rather than wall-clock time.
+    pub async fn prune_completion_receipts(
+        &self,
+        retention_seconds: u64,
+        chunk_size: u32,
+    ) -> TurboResult<u64> {
+        let horizon_us = retention_seconds
+            .max(3600)
+            .saturating_mul(1_000_000)
+            .min(i64::MAX as u64) as i64;
+        let result = sqlx::query(
+            r#"DELETE FROM completion_receipts WHERE source_event_id IN (
+                SELECT source_event_id FROM completion_receipts
+                WHERE covered = 1 AND source_time_us <
+                    (SELECT time_us - ? FROM ingestion_checkpoint WHERE singleton_id = 1)
+                AND NOT EXISTS (
+                    SELECT 1 FROM publication_journal j
+                    WHERE j.source_event_id = completion_receipts.source_event_id
+                )
+                LIMIT ?)"#,
+        )
+        .bind(horizon_us)
+        .bind(chunk_size.min(10_000))
+        .execute(&self.pool)
+        .await?;
+        metrics::counter!("storage_receipts_expired_total").increment(result.rows_affected());
+        Ok(result.rows_affected())
+    }
+
+    /// Drain expired receipts in bounded transactions, yielding between chunks.
+    /// The budget is checked between transactions, so even a zero budget makes
+    /// one chunk of progress. Callers must promptly resume `needs_reschedule`
+    /// work instead of waiting for the ordinary cleanup interval.
+    pub async fn prune_completion_receipts_with_budget(
+        &self,
+        retention_seconds: u64,
+        chunk_size: u32,
+        budget: Duration,
+    ) -> TurboResult<ReceiptPruneResult> {
+        let started = Instant::now();
+        let chunk_size = chunk_size.clamp(1, 10_000);
+        let mut receipts_deleted = 0u64;
+        loop {
+            let deleted = self
+                .prune_completion_receipts(retention_seconds, chunk_size)
+                .await?;
+            receipts_deleted = receipts_deleted.saturating_add(deleted);
+            if deleted < u64::from(chunk_size) {
+                return Ok(ReceiptPruneResult {
+                    receipts_deleted,
+                    needs_reschedule: false,
+                });
+            }
+            tokio::task::yield_now().await;
+            if started.elapsed() >= budget {
+                return Ok(ReceiptPruneResult {
+                    receipts_deleted,
+                    needs_reschedule: true,
+                });
+            }
+        }
     }
 
     /// Deletes records older than the cutoff in bounded chunks. `pause` is
@@ -800,39 +966,16 @@ impl SQLiteStore {
         chunk_delay_ms: u64,
         pause: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> TurboResult<u64> {
-        let older_than_str = older_than.to_rfc3339();
-        let mut total_deleted = 0u64;
-
-        loop {
-            if total_deleted > 0 && pause.is_some_and(|pause| pause()) {
-                info!(
-                    total_deleted,
-                    "Cleanup chunk loop paused (gating callback signaled); resuming next cycle"
-                );
-                break;
-            }
-            let result = sqlx::query(
-                "DELETE FROM records WHERE rowid IN (SELECT rowid FROM records WHERE created_at < ? LIMIT ?)"
-            )
-            .bind(&older_than_str)
-            .bind(chunk_size)
-            .execute(&self.pool)
-            .await?;
-
-            let deleted = result.rows_affected();
-            if deleted == 0 {
-                break;
-            }
-
-            total_deleted += deleted;
-
-            if deleted as u32 == chunk_size {
-                sleep(Duration::from_millis(chunk_delay_ms)).await;
-            }
+        // Legacy rows without durable completion proof and pending publications
+        // are protected. Limit each transaction and yield to required writes.
+        let deleted = sqlx::query(
+            "DELETE FROM records WHERE rowid IN (SELECT r.rowid FROM records r WHERE r.created_at < ? AND EXISTS (SELECT 1 FROM completion_receipts c WHERE c.source_event_id=r.source_event_id) AND NOT EXISTS (SELECT 1 FROM publication_journal j WHERE j.source_event_id=r.source_event_id) LIMIT ?)"
+        ).bind(older_than.to_rfc3339()).bind(chunk_size.clamp(1, 10_000)).execute(&self.pool).await?.rows_affected();
+        if deleted > 0 && chunk_delay_ms > 0 && !pause.is_some_and(|pause| pause()) {
+            sleep(Duration::from_millis(chunk_delay_ms)).await;
         }
-
-        info!("Cleaned up {} old records", total_deleted);
-        Ok(total_deleted)
+        metrics::counter!("sqlite_cleanup_rows_total", "kind" => "payload").increment(deleted);
+        Ok(deleted)
     }
 
     pub async fn get_db_size(&self) -> TurboResult<i64> {
@@ -887,12 +1030,7 @@ impl SQLiteStore {
         let vacuum_deferred_seconds = vacuum_state
             .pending_since
             .filter(|_| vacuum_state.pending)
-            .map(|since| {
-                Utc::now()
-                    .signed_duration_since(since)
-                    .num_seconds()
-                    .max(0) as u64
-            });
+            .map(|since| Utc::now().signed_duration_since(since).num_seconds().max(0) as u64);
 
         Ok(SQLiteStateSnapshot {
             db_size_bytes,
@@ -916,9 +1054,7 @@ impl SQLiteStore {
             over_budget: vacuum_state.over_budget,
             over_budget_after_vacuum: vacuum_state.over_budget_after_vacuum,
             vacuum_gating_reason: vacuum_state.gating_reason,
-            vacuum_deferred_seconds: vacuum_state
-                .deferred_seconds
-                .or(vacuum_deferred_seconds),
+            vacuum_deferred_seconds: vacuum_state.deferred_seconds.or(vacuum_deferred_seconds),
             vacuum_last_forced_reason: vacuum_state.last_forced_reason,
         })
     }
@@ -1012,56 +1148,21 @@ impl SQLiteStore {
         cleanup_chunk_delay_ms: u64,
         chunk_pause: Option<&(dyn Fn() -> bool + Send + Sync)>,
     ) -> TurboResult<CleanupResult> {
-        let initial_size = self.get_db_size().await?;
-        let mut total_deleted: u64 = 0;
-
-        // The retention delete loop only runs when the file is over budget:
-        // SQLite (auto_vacuum = NONE) never shrinks the file on DELETE, so
-        // deleting below the limit is pointless work that only grows the
-        // freelist. Size only decreases via VACUUM.
-        if initial_size > max_size_bytes {
-            let mut current_retention = retention_days;
-            let max_iterations = 3;
-
-            for iteration in 0..max_iterations {
-                let cutoff = Utc::now() - chrono::Duration::days(current_retention as i64);
-                let deleted = self
-                    .cleanup_old_records(
-                        cutoff,
-                        cleanup_chunk_size,
-                        cleanup_chunk_delay_ms,
-                        chunk_pause,
-                    )
-                    .await?;
-                total_deleted += deleted;
-
-                let current_size = self.get_db_size().await?;
-
-                if current_size <= max_size_bytes {
-                    break;
-                }
-
-                info!(
-                    "Iteration {}: DB still {}MB over limit, reducing retention from {} to {} days",
-                    iteration + 1,
-                    current_size / (1024 * 1024),
-                    current_retention,
-                    (current_retention / 2).max(1)
-                );
-
-                current_retention = (current_retention / 2).max(1);
-
-                if iteration < max_iterations - 1 {
-                    sleep(Duration::from_secs(2)).await;
-                }
-            }
-        }
-
+        // Expiry runs below the allocation target too. DELETE releases reusable
+        // pages; it never justifies shortening the replay horizon or freshness.
+        let cutoff = Utc::now() - chrono::Duration::days(retention_days as i64);
+        let total_deleted = self
+            .cleanup_old_records(
+                cutoff,
+                cleanup_chunk_size,
+                cleanup_chunk_delay_ms,
+                chunk_pause,
+            )
+            .await?;
         let post_delete_size = self.get_db_size().await?;
         let vacuum_pending_reason = self
             .decide_vacuum_pending(max_size_bytes, vacuum_freelist_ratio)
             .await?;
-
         Ok(CleanupResult {
             records_deleted: total_deleted,
             new_size_bytes: post_delete_size,
@@ -1092,7 +1193,10 @@ impl SQLiteStore {
         max_size_bytes: i64,
         vacuum_freelist_ratio: f64,
     ) -> TurboResult<Option<VacuumPendingReason>> {
-        let db_size = self.get_db_size().await?;
+        let db_size = self
+            .get_db_size()
+            .await?
+            .saturating_add(self.get_wal_size_bytes().await?.unwrap_or(0));
         let reason = if db_size > max_size_bytes {
             Some(VacuumPendingReason::OverBudget)
         } else {
@@ -1142,6 +1246,25 @@ impl SQLiteStore {
         Ok(reason)
     }
 
+    /// Attempt bounded WAL reclamation without allocating a full temporary copy.
+    pub async fn checkpoint_wal(&self) -> TurboResult<bool> {
+        if self.db_path == ":memory:" {
+            return Ok(true);
+        }
+        let mut conn = self.connect_maintenance_connection().await?;
+        sqlx::query("PRAGMA busy_timeout=50")
+            .execute(&mut conn)
+            .await?;
+        let (busy, _, _): (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
+            .fetch_one(&mut conn)
+            .await?;
+        conn.close().await?;
+        if busy != 0 {
+            self.record_busy_checkpoint();
+        }
+        Ok(busy == 0)
+    }
+
     /// Runs a VACUUM in the configured execution mode, recording the duration
     /// and bytes reclaimed from the file-size delta. Clears any pending flag on
     /// success and tracks whether the file is still over budget afterwards.
@@ -1160,23 +1283,42 @@ impl SQLiteStore {
     ) -> TurboResult<VacuumRunResult> {
         let started_at = Utc::now();
         let start = Instant::now();
-        let size_before = self.get_db_size().await?;
-
+        let size_before = self.allocated_size_bytes().await?;
+        // A previous successful VACUUM may still have a busy WAL. Reclaim it
+        // before requiring space for another full copy; this needs no temp copy.
+        if !self.checkpoint_wal().await? {
+            return Err(TurboError::Internal(
+                "WAL checkpoint busy; reclamation remains pending".into(),
+            ));
+        }
+        let working_size = self.get_db_size().await?;
+        self.verify_vacuum_capacity(working_size as u64, &policy.temp_dir)?;
         match policy.mode {
             VacuumExecutionMode::FileBackedTempStore => {
-                Self::verify_temp_volume_headroom(&policy.temp_dir, size_before)?;
                 let mut conn = self.connect_maintenance_connection().await?;
-                if let Err(e) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-                    .execute(&mut conn)
-                    .await
-                {
-                    warn!("wal_checkpoint(TRUNCATE) before VACUUM failed: {e}; continuing");
+                let (busy, _, _): (i64, i64, i64) =
+                    sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
+                        .fetch_one(&mut conn)
+                        .await?;
+                if busy != 0 {
+                    return Err(TurboError::Internal(
+                        "WAL checkpoint busy; reclamation remains pending".into(),
+                    ));
                 }
                 sqlx::query("VACUUM").execute(&mut conn).await?;
+                let (busy, _, _): (i64, i64, i64) =
+                    sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
+                        .fetch_one(&mut conn)
+                        .await?;
+                if busy != 0 {
+                    return Err(TurboError::Internal(
+                        "Post-VACUUM checkpoint busy; physical reclamation remains pending".into(),
+                    ));
+                }
                 conn.close().await?;
             }
             VacuumExecutionMode::PooledMemory => {
-                if size_before > policy.max_in_memory_db_bytes {
+                if working_size > policy.max_in_memory_db_bytes {
                     return Err(crate::models::TurboError::Internal(format!(
                         "refusing VACUUM with temp_store = MEMORY: database is {} bytes, \
                          above the pooled-memory safety threshold of {} bytes",
@@ -1184,20 +1326,32 @@ impl SQLiteStore {
                     )));
                 }
                 let mut conn = self.pool.acquire().await?;
-                if let Err(e) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-                    .execute(&mut *conn)
-                    .await
-                {
-                    warn!("wal_checkpoint(TRUNCATE) before VACUUM failed: {e}; continuing");
+                let (busy, _, _): (i64, i64, i64) =
+                    sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
+                        .fetch_one(&mut *conn)
+                        .await?;
+                if busy != 0 {
+                    return Err(TurboError::Internal(
+                        "WAL checkpoint busy; reclamation remains pending".into(),
+                    ));
                 }
                 sqlx::query("VACUUM").execute(&mut *conn).await?;
+                let (busy, _, _): (i64, i64, i64) =
+                    sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
+                        .fetch_one(&mut *conn)
+                        .await?;
+                if busy != 0 {
+                    return Err(TurboError::Internal(
+                        "Post-VACUUM checkpoint busy; physical reclamation remains pending".into(),
+                    ));
+                }
                 drop(conn);
             }
         }
 
         let duration = start.elapsed();
         let duration_ms = duration.as_millis() as u64;
-        let size_after = self.get_db_size().await?;
+        let size_after = self.allocated_size_bytes().await?;
         let bytes_reclaimed = size_before.saturating_sub(size_after);
         let over_budget_after_vacuum = size_after > max_size_bytes;
 
@@ -1332,6 +1486,16 @@ impl RecordStore for SQLiteStore {
         let mut completed = HashSet::new();
         let mut stored_unpublished = std::collections::HashMap::new();
         for source_event_id in source_event_ids {
+            let receipted: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM completion_receipts WHERE source_event_id = ?)",
+            )
+            .bind(source_event_id.as_str())
+            .fetch_one(&self.pool)
+            .await?;
+            if receipted {
+                completed.insert(source_event_id.clone());
+                continue;
+            }
             let exists: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM records WHERE source_event_id = ?)",
             )
@@ -1363,15 +1527,50 @@ impl RecordStore for SQLiteStore {
                 .fetch_one(&self.pool)
                 .await?;
                 let record = self.row_to_record(row).await?;
-                stored_unpublished.insert(
-                    source_event_id.clone(),
-                    record,
-                );
+                stored_unpublished.insert(source_event_id.clone(), record);
             } else {
                 completed.insert(source_event_id.clone());
             }
         }
         Ok((completed, stored_unpublished))
+    }
+
+    async fn bind_ingress(
+        &self,
+        epoch: &str,
+        events: &[(SourceEventId, u64, u64)],
+    ) -> TurboResult<()> {
+        let mut tx = self.pool.begin().await?;
+        for (id, ordinal, source_time_us) in events {
+            let ordinal = i64::try_from(*ordinal).map_err(|_| {
+                TurboError::InvalidMessage("admission ordinal exceeds SQLite range".into())
+            })?;
+            let time_us = i64::try_from(*source_time_us).map_err(|_| {
+                TurboError::InvalidMessage("admission time exceeds SQLite range".into())
+            })?;
+            sqlx::query("UPDATE completion_receipts SET ingress_epoch = ?, ingress_ordinal = ?, covered = 0 WHERE source_event_id = ?")
+                .bind(epoch).bind(ordinal).bind(id.as_str())
+                .execute(&mut *tx).await?;
+            sqlx::query(
+                r#"INSERT INTO recovery_admissions(
+                    source_event_id, source_time_us, ingress_epoch, ingress_ordinal)
+                SELECT ?, ?, ?, ? WHERE EXISTS(
+                    SELECT 1 FROM records WHERE source_event_id = ?)
+                ON CONFLICT(source_event_id) DO UPDATE SET
+                    source_time_us = excluded.source_time_us,
+                    ingress_epoch = excluded.ingress_epoch,
+                    ingress_ordinal = excluded.ingress_ordinal"#,
+            )
+            .bind(id.as_str())
+            .bind(time_us)
+            .bind(epoch)
+            .bind(ordinal)
+            .bind(id.as_str())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     async fn clear_publication_journal(
@@ -1382,21 +1581,52 @@ impl RecordStore for SQLiteStore {
             return Ok(());
         }
         let mut tx = self.pool.begin().await?;
-        const MAX_PARAMS: usize = 999;
-        for chunk in source_event_ids.chunks(MAX_PARAMS) {
-            let placeholders = std::iter::repeat_n("?", chunk.len())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let sql = format!(
-                "DELETE FROM publication_journal WHERE source_event_id IN ({placeholders})"
-            );
-            let mut delete_query = sqlx::query(&sql);
-            for id in chunk {
-                delete_query = delete_query.bind(id.as_str());
+        let completed_at = Utc::now().to_rfc3339();
+        for id in source_event_ids {
+            // Receipt creation, journal removal, and payload compaction are one
+            // transaction. Failure leaves the unpublished payload replayable.
+            sqlx::query(
+                r#"INSERT INTO completion_receipts(
+                    source_event_id, source_time_us, ingress_epoch, ingress_ordinal,
+                    covered, completed_at)
+                SELECT r.source_event_id, r.time_us, a.ingress_epoch,
+                    a.ingress_ordinal, 0, ?
+                FROM records r LEFT JOIN recovery_admissions a
+                    ON a.source_event_id = r.source_event_id
+                WHERE r.source_event_id = ?
+                ON CONFLICT(source_event_id) DO NOTHING"#,
+            )
+            .bind(&completed_at)
+            .bind(id.as_str())
+            .execute(&mut *tx)
+            .await?;
+            let has_receipt: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM completion_receipts WHERE source_event_id = ?)",
+            )
+            .bind(id.as_str())
+            .fetch_one(&mut *tx)
+            .await?;
+            if !has_receipt {
+                return Err(TurboError::InvalidMessage(
+                    "publication completion has no durable payload or receipt".into(),
+                ));
             }
-            delete_query.execute(&mut *tx).await?;
+            sqlx::query("DELETE FROM publication_journal WHERE source_event_id = ?")
+                .bind(id.as_str())
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM records WHERE source_event_id = ?")
+                .bind(id.as_str())
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("DELETE FROM recovery_admissions WHERE source_event_id = ?")
+                .bind(id.as_str())
+                .execute(&mut *tx)
+                .await?;
         }
         tx.commit().await?;
+        metrics::counter!("storage_completion_receipts_created_total")
+            .increment(source_event_ids.len() as u64);
         Ok(())
     }
 
@@ -1425,8 +1655,35 @@ impl RecordStore for SQLiteStore {
         static SINGLE_ROW_PLACEHOLDER: &str = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
         let mut all_ids = Vec::with_capacity(count);
+        let mut serialized = Vec::with_capacity(count);
+        let mut batch_bytes = 0u64;
+        let batch_limit = self.recovery_batch_limit();
+        for record in records {
+            let mut buf = Vec::with_capacity(1024);
+            record.message.write_json(&mut buf);
+            let message_end = buf.len();
+            simd_json_to_writer(&mut buf, &record.hydrated_metadata)
+                .map_err(|e| TurboError::Internal(format!("recovery serialization failed: {e}")))?;
+            batch_bytes = batch_bytes
+                .saturating_add(buf.len() as u64)
+                .saturating_add(4096);
+            if batch_bytes > batch_limit {
+                metrics::counter!("sqlite_recovery_payload_rejected_total").increment(1);
+                return Err(TurboError::Internal("serialized recovery batch exceeds configured in-flight storage allowance; checkpoint preserved, increase the validated payload envelope before replay".into()));
+            }
+            serialized.push(PreparedRecoveryRecord {
+                json: String::from_utf8(buf)
+                    .map_err(|e| TurboError::Internal(format!("recovery JSON UTF-8: {e}")))?,
+                message_end,
+                source_event_id: record.source_event_id(),
+                at_uri: record.get_at_uri(),
+            });
+        }
 
-        for chunk in records.chunks(MAX_ROWS_PER_INSERT) {
+        for (chunk, serialized) in records
+            .chunks(MAX_ROWS_PER_INSERT)
+            .zip(serialized.chunks(MAX_ROWS_PER_INSERT))
+        {
             let mut tx = self.pool.begin().await?;
 
             let placeholders: String = std::iter::repeat_n(SINGLE_ROW_PLACEHOLDER, chunk.len())
@@ -1447,28 +1704,15 @@ impl RecordStore for SQLiteStore {
 
             let mut query = sqlx::query(&insert_sql);
 
-            // Serialize every row's message+metadata into one owned buffer each
-            // (a single allocation per row instead of two), then bind the two
-            // non-overlapping UTF-8 slices. The buffers are collected before the
-            // binds so sqlx's borrowed `&str` arguments outlive the query.
-            let mut serialized: Vec<(String, usize)> = Vec::with_capacity(chunk.len());
-            for record in chunk {
-                let mut buf = Vec::with_capacity(1024);
-                record.message.write_json(&mut buf);
-                let message_end = buf.len();
-                simd_json_to_writer(&mut buf, &record.hydrated_metadata).unwrap();
-                serialized.push((String::from_utf8(buf).expect("JSON is UTF-8"), message_end));
-            }
-
-            for (record, (combined, message_end)) in chunk.iter().zip(&serialized) {
-                let message_json = &combined[..*message_end];
-                let metadata_json = &combined[*message_end..];
+            for (record, prepared) in chunk.iter().zip(serialized) {
+                let message_json = &prepared.json[..prepared.message_end];
+                let metadata_json = &prepared.json[prepared.message_end..];
 
                 query = query
-                    .bind(record.get_at_uri())
+                    .bind(prepared.at_uri.as_deref())
                     .bind(record.get_did())
                     .bind(record.message.time_us.map(|t| t as i64))
-                    .bind(record.source_event_id().to_string())
+                    .bind(prepared.source_event_id.as_str())
                     .bind(message_json)
                     .bind(metadata_json)
                     .bind(record.processed_at.to_rfc3339())
@@ -1486,16 +1730,18 @@ impl RecordStore for SQLiteStore {
             // row whose batch later fails before publication/broadcast remains
             // journaled, so a retry re-publishes it instead of dropping it
             // (design D9). Successful batches clear the journal after publish.
-            let journal_sql = "INSERT INTO publication_journal (source_event_id, at_uri, created_at) \
-                VALUES (?, ?, ?) ON CONFLICT(source_event_id) DO NOTHING";
-            let mut journal_query = sqlx::query(journal_sql);
-            for record in chunk {
-                journal_query = journal_query
-                    .bind(record.source_event_id().to_string())
-                    .bind(record.get_at_uri())
+            let journal_values = std::iter::repeat_n("(?, ?, ?)", chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let journal_sql = format!("INSERT INTO publication_journal (source_event_id, at_uri, created_at) VALUES {journal_values} ON CONFLICT(source_event_id) DO NOTHING");
+            let mut journal = sqlx::query(&journal_sql);
+            for prepared in serialized {
+                journal = journal
+                    .bind(prepared.source_event_id.as_str())
+                    .bind(prepared.at_uri.as_deref())
                     .bind(&now_str);
             }
-            journal_query.execute(&mut *tx).await?;
+            journal.execute(&mut *tx).await?;
             tx.commit().await?;
             all_ids.extend(
                 rows.into_iter()
@@ -1524,6 +1770,11 @@ mod tests {
         let pragma_config = test_pragma_config();
         maintain_test_db(&db_path, pragma_config).await;
         SQLiteStore::new(&db_path, pragma_config).await.unwrap()
+    }
+
+    async fn mark_cleanup_receipts(store: &SQLiteStore) {
+        sqlx::query("UPDATE records SET source_event_id = COALESCE(source_event_id, 'cleanup-fixture-' || id)").execute(&store.pool).await.unwrap();
+        sqlx::query("INSERT OR IGNORE INTO completion_receipts(source_event_id,source_time_us,covered,completed_at) SELECT source_event_id,time_us,0,created_at FROM records").execute(&store.pool).await.unwrap();
     }
 
     fn test_pragma_config() -> SQLitePragmaConfig {
@@ -1762,6 +2013,10 @@ mod tests {
         let first_id = first.source_event_id();
         let second_id = second.source_event_id();
         store.store_batch(&[first, second]).await.unwrap();
+        store
+            .clear_publication_journal(&[first_id.clone(), second_id.clone()])
+            .await
+            .unwrap();
 
         // Crash before the coalesced checkpoint write: no durable checkpoint.
         assert_eq!(store.load_ingestion_checkpoint().await.unwrap(), None);
@@ -1817,6 +2072,8 @@ mod tests {
         let pragma_config = test_pragma_config();
         maintain_test_db(&db_path, pragma_config).await;
         let store = SQLiteStore::new(&db_path, pragma_config).await.unwrap();
+        // Isolate VACUUM from the startup schema WAL allocation it also reclaims.
+        assert!(store.checkpoint_wal().await.unwrap());
 
         // Simulate scheduler gating: a deferral reason must be observable.
         store.record_vacuum_deferral(VacuumGatingReason::RecoveryPhase);
@@ -1886,6 +2143,8 @@ mod tests {
             .await
             .unwrap();
         }
+
+        mark_cleanup_receipts(&store).await;
 
         // After the first chunk the pause callback signals pressure and the
         // loop yields with partial progress, resuming on the next cycle
@@ -2006,7 +2265,10 @@ mod tests {
         let store = create_test_db().await;
 
         let cutoff = Utc::now() - Duration::days(7);
-        let deleted = store.cleanup_old_records(cutoff, 1000, 50, None).await.unwrap();
+        let deleted = store
+            .cleanup_old_records(cutoff, 1000, 50, None)
+            .await
+            .unwrap();
 
         assert_eq!(deleted, 0, "Should delete nothing from empty DB");
 
@@ -2063,8 +2325,12 @@ mod tests {
         .await
         .unwrap();
 
+        mark_cleanup_receipts(&store).await;
         let cutoff = now - Duration::days(7);
-        let deleted = store.cleanup_old_records(cutoff, 1000, 50, None).await.unwrap();
+        let deleted = store
+            .cleanup_old_records(cutoff, 1000, 50, None)
+            .await
+            .unwrap();
 
         assert_eq!(deleted, 1, "Should delete 1 old record");
 
@@ -2106,6 +2372,7 @@ mod tests {
             .unwrap();
         }
 
+        mark_cleanup_receipts(&store).await;
         let size_before = store.get_db_size().await.unwrap();
         assert!(size_before > 0, "DB should have size");
 
@@ -2186,7 +2453,7 @@ mod tests {
             .bind(format!("at://vacuum{i}.bsky.social/app.bsky.feed.post/1"))
             .bind(format!("did:plc:vacuum{i}"))
             .bind(1000i64 + i as i64)
-            .bind(r#"{"foo":"bar","payload":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"#)
+            .bind(format!(r#"{{"foo":"bar","payload":"{}"}}"#, "x".repeat(4096)))
             .bind(r#"{}"#)
             .bind(&old_time_str)
             .bind(&now_str)
@@ -2199,6 +2466,7 @@ mod tests {
             .await
             .unwrap();
         }
+        mark_cleanup_receipts(store).await;
     }
 
     #[tokio::test]
@@ -2232,7 +2500,10 @@ mod tests {
             "DELETE alone must not shrink the database file"
         );
 
-        let run = store.run_vacuum(max_size_bytes, &VacuumRunPolicy::default()).await.unwrap();
+        let run = store
+            .run_vacuum(max_size_bytes, &VacuumRunPolicy::default())
+            .await
+            .unwrap();
         assert!(
             run.size_after < run.size_before,
             "VACUUM must actually shrink the file ({} -> {})",
@@ -2277,6 +2548,11 @@ mod tests {
             .unwrap();
         assert!(deleted > 0);
 
+        // This scenario isolates reusable-page bloat from independent WAL pressure.
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&store.pool)
+            .await
+            .unwrap();
         let size = store.get_db_size().await.unwrap();
         let large_max = size * 2;
 
@@ -2301,5 +2577,363 @@ mod tests {
         );
 
         store.close().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+    use crate::models::jetstream::{JetstreamMessage, MessageKind};
+
+    async fn store() -> (tempfile::TempDir, SQLiteStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("receipts.db");
+        let pragmas = SQLitePragmaConfig {
+            cache_size_kib: 64,
+            mmap_size_mb: 0,
+            journal_size_limit_mb: 1,
+        };
+        SQLiteStore::maintain_schema(&path, pragmas, Duration::from_secs(1))
+            .await
+            .unwrap();
+        let store = SQLiteStore::new(&path, pragmas).await.unwrap();
+        (dir, store)
+    }
+
+    fn record(time_us: u64) -> EnrichedRecord {
+        EnrichedRecord::new_with_timestamp(
+            JetstreamMessage {
+                did: "did:plc:receipt".into(),
+                time_us: Some(time_us),
+                seq: None,
+                kind: MessageKind::Identity,
+                commit: None,
+                raw_json: None,
+            },
+            Utc::now(),
+        )
+    }
+
+    fn checkpoint(ordinal: u64, time_us: u64) -> IngestionCheckpoint {
+        IngestionCheckpoint {
+            ingress_ordinal: ordinal,
+            cursor: SourceCursor {
+                time_us,
+                source_seq: None,
+                source_event_id: record(time_us).source_event_id(),
+            },
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn publication_compacts_payload_and_retains_ahead_of_frontier_receipt() {
+        let (_dir, store) = store().await;
+        let pending = record(1_000_000);
+        let later = record(2_000_000);
+        store
+            .store_batch(&[pending.clone(), later.clone()])
+            .await
+            .unwrap();
+        store
+            .bind_ingress(
+                "epoch-a",
+                &[
+                    (pending.source_event_id(), 1, 1_000_000),
+                    (later.source_event_id(), 2, 2_000_000),
+                ],
+            )
+            .await
+            .unwrap();
+        store
+            .clear_publication_journal(&[later.source_event_id()])
+            .await
+            .unwrap();
+        assert_eq!(store.count_records().await.unwrap(), 1);
+        let (completed, unpublished) = store
+            .resolve_completion_state(&[pending.source_event_id(), later.source_event_id()])
+            .await
+            .unwrap();
+        assert!(completed.contains(&later.source_event_id()));
+        assert!(unpublished.contains_key(&pending.source_event_id()));
+        store
+            .advance_ingestion_checkpoint_for_epoch(&checkpoint(1, 10_000_000_000), "epoch-a")
+            .await
+            .unwrap();
+        assert_eq!(store.prune_completion_receipts(3600, 100).await.unwrap(), 0);
+        let before = store.load_ingestion_checkpoint().await.unwrap();
+        assert_eq!(
+            store
+                .cleanup_old_records(Utc::now() + chrono::Duration::days(1), 100, 0, None)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(store.load_ingestion_checkpoint().await.unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn ordinal_reuse_does_not_cover_old_epoch_and_replay_can_rebind() {
+        let (_dir, store) = store().await;
+        let completed = record(1_000_000);
+        store.store_batch(&[completed.clone()]).await.unwrap();
+        store
+            .bind_ingress("old-epoch", &[(completed.source_event_id(), 1, 1_000_000)])
+            .await
+            .unwrap();
+        store
+            .clear_publication_journal(&[completed.source_event_id()])
+            .await
+            .unwrap();
+        store
+            .advance_ingestion_checkpoint_for_epoch(&checkpoint(1, 10_000_000_000), "new-epoch")
+            .await
+            .unwrap();
+        assert_eq!(store.prune_completion_receipts(3600, 100).await.unwrap(), 0);
+        store
+            .bind_ingress("new-epoch", &[(completed.source_event_id(), 2, 1_000_000)])
+            .await
+            .unwrap();
+        store
+            .advance_ingestion_checkpoint_for_epoch(&checkpoint(2, 10_000_000_001), "new-epoch")
+            .await
+            .unwrap();
+        assert_eq!(store.prune_completion_receipts(3600, 100).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn receipt_expiry_drains_sustained_arrivals_without_pruning_protected_state() {
+        let (_dir, store) = store().await;
+        let pending = record(1);
+        let pending_id = pending.source_event_id();
+        store.store_batch(&[pending]).await.unwrap();
+        let durable = checkpoint(100_000, 7_200_000_000);
+        store.advance_ingestion_checkpoint(&durable).await.unwrap();
+        sqlx::query(
+            "INSERT INTO completion_receipts(source_event_id,source_time_us,covered,completed_at) VALUES
+             ('uncovered',1,0,'2026-01-01'),
+             ('overlap',4000000000,1,'2026-01-01'),
+             ('boundary',3600000000,1,'2026-01-01'),
+             ('unknown-time',NULL,1,'2026-01-01'),
+             (?,1,1,'2026-01-01')",
+        )
+        .bind(pending_id.as_str())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        let mut protected_ids = vec![
+            "uncovered".to_string(),
+            "overlap".to_string(),
+            "boundary".to_string(),
+            "unknown-time".to_string(),
+            pending_id.to_string(),
+        ];
+        protected_ids.sort_unstable();
+
+        // Each wave represents 1200 receipts becoming eligible in a minute.
+        // A single 1000-row chunk per ordinary tick would grow the backlog.
+        for minute in 1..=10i64 {
+            sqlx::query(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1200)
+                 INSERT INTO completion_receipts(source_event_id,source_time_us,covered,completed_at)
+                 SELECT printf('expired-%d-%d',?,i),1,1,'2026-01-01' FROM n",
+            )
+            .bind(minute)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+            let mut deleted = 0;
+            let mut passes = 0;
+            loop {
+                passes += 1;
+                assert!(
+                    passes <= 3,
+                    "eligible receipts must finish in bounded passes"
+                );
+                let progress = store
+                    .prune_completion_receipts_with_budget(3600, 1000, Duration::from_secs(1))
+                    .await
+                    .unwrap();
+                deleted += progress.receipts_deleted;
+                if !progress.needs_reschedule {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                deleted, 1200,
+                "minute {minute} must drain eligible arrivals"
+            );
+            let remaining_ids: Vec<String> = sqlx::query_scalar(
+                "SELECT source_event_id FROM completion_receipts ORDER BY source_event_id",
+            )
+            .fetch_all(&store.pool)
+            .await
+            .unwrap();
+            assert_eq!(remaining_ids, protected_ids);
+        }
+        assert_eq!(store.count_records().await.unwrap(), 1);
+        let journaled: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM publication_journal WHERE source_event_id=?)",
+        )
+        .bind(pending_id.as_str())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert!(journaled);
+        assert_eq!(
+            store.load_ingestion_checkpoint().await.unwrap(),
+            Some(durable)
+        );
+    }
+
+    #[tokio::test]
+    async fn receipt_expiry_reschedules_full_chunks_when_the_budget_is_exhausted() {
+        let (_dir, store) = store().await;
+        store
+            .advance_ingestion_checkpoint(&checkpoint(100_000, 7_200_000_000))
+            .await
+            .unwrap();
+        sqlx::query(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<2500)
+             INSERT INTO completion_receipts(source_event_id,source_time_us,covered,completed_at)
+             SELECT printf('expired-%d',i),1,1,'2026-01-01' FROM n",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+
+        for expected in [
+            ReceiptPruneResult {
+                receipts_deleted: 1000,
+                needs_reschedule: true,
+            },
+            ReceiptPruneResult {
+                receipts_deleted: 1000,
+                needs_reschedule: true,
+            },
+            ReceiptPruneResult {
+                receipts_deleted: 500,
+                needs_reschedule: false,
+            },
+        ] {
+            let progress = store
+                .prune_completion_receipts_with_budget(3600, 1000, Duration::ZERO)
+                .await
+                .unwrap();
+            assert_eq!(progress, expected);
+            tokio::task::yield_now().await;
+        }
+        let receipts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM completion_receipts")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(receipts, 0);
+    }
+
+    #[tokio::test]
+    async fn failed_receipt_transaction_preserves_payload_and_journal() {
+        let (_dir, store) = store().await;
+        let pending = record(1_000_000);
+        store.store_batch(&[pending.clone()]).await.unwrap();
+        sqlx::query("CREATE TRIGGER fail_receipt BEFORE INSERT ON completion_receipts BEGIN SELECT RAISE(ABORT, 'simulated disk failure'); END").execute(&store.pool).await.unwrap();
+        assert!(store
+            .clear_publication_journal(&[pending.source_event_id()])
+            .await
+            .is_err());
+        let (completed, unpublished) = store
+            .resolve_completion_state(&[pending.source_event_id()])
+            .await
+            .unwrap();
+        assert!(completed.is_empty());
+        assert!(unpublished.contains_key(&pending.source_event_id()));
+        assert_eq!(store.load_ingestion_checkpoint().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn serialized_recovery_bound_fails_before_any_payload_or_progress_write() {
+        let (_dir, store) = store().await;
+        store.configure_capacity(crate::storage::capacity::StoragePolicy {
+            max_recovery_batch_bytes: 4096,
+            ..Default::default()
+        });
+        let pending = record(1_000_000);
+        assert!(store.store_batch(&[pending.clone()]).await.is_err());
+        assert_eq!(store.count_records().await.unwrap(), 0);
+        assert_eq!(store.load_ingestion_checkpoint().await.unwrap(), None);
+        let journal: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM publication_journal")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(journal, 0);
+        store.configure_capacity(Default::default());
+        assert!(store.store_batch(&[pending]).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn partial_receipt_failure_rolls_back_the_whole_completion_batch() {
+        let (_dir, store) = store().await;
+        let pending = record(1_000_000);
+        store.store_batch(&[pending.clone()]).await.unwrap();
+        let missing = SourceEventId::from("missing-payload".to_string());
+        assert!(store
+            .clear_publication_journal(&[pending.source_event_id(), missing])
+            .await
+            .is_err());
+        let (completed, unpublished) = store
+            .resolve_completion_state(&[pending.source_event_id()])
+            .await
+            .unwrap();
+        assert!(completed.is_empty());
+        assert_eq!(unpublished.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn incompatible_recovery_index_blocks_startup() {
+        let (dir, store) = store().await;
+        let pragmas = store.pragma_config;
+        let mut connection = store.pool.acquire().await.unwrap();
+        sqlx::query("DROP INDEX idx_completion_receipts_expiry")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE INDEX idx_completion_receipts_expiry ON completion_receipts(source_time_us)",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        drop(connection);
+        store.close().await.unwrap();
+        let error = SQLiteStore::new(dir.path().join("receipts.db"), pragmas)
+            .await
+            .err()
+            .unwrap();
+        assert!(error
+            .to_string()
+            .contains("incompatible required recovery index"));
+    }
+
+    #[tokio::test]
+    async fn successful_completion_survives_restart_without_payload() {
+        let (dir, store) = store().await;
+        let completed = record(1_000_000);
+        store.store_batch(&[completed.clone()]).await.unwrap();
+        store
+            .clear_publication_journal(&[completed.source_event_id()])
+            .await
+            .unwrap();
+        let pragmas = store.pragma_config;
+        store.close().await.unwrap();
+        let reopened = SQLiteStore::new(dir.path().join("receipts.db"), pragmas)
+            .await
+            .unwrap();
+        let (found, pending) = reopened
+            .resolve_completion_state(&[completed.source_event_id()])
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(pending.is_empty());
+        assert_eq!(reopened.count_records().await.unwrap(), 0);
     }
 }

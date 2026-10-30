@@ -463,6 +463,7 @@ fn health_http_response(status: HealthStatus) -> (StatusCode, HealthResponse) {
 
 fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> String {
     let mut output = String::new();
+    append_storage_retention_metrics(&mut output, diagnostics);
 
     append_gauge_metric(
         &mut output,
@@ -896,7 +897,11 @@ fn prometheus_metrics_from_diagnostics(diagnostics: &HealthDiagnostics) -> Strin
     output.push_str("# HELP jetstream_turbo_vacuum_gating_reason Current VACUUM deferral gating reason (1 = active for this label).\n");
     output.push_str("# TYPE jetstream_turbo_vacuum_gating_reason gauge\n");
     for reason in ["memory_pressure", "recovery_phase", "window", "force_defer"] {
-        let value = if active_gating_reason == Some(reason) { 1.0 } else { 0.0 };
+        let value = if active_gating_reason == Some(reason) {
+            1.0
+        } else {
+            0.0
+        };
         output.push_str("jetstream_turbo_vacuum_gating_reason{reason=\"");
         output.push_str(reason);
         output.push_str("\"} ");
@@ -1267,6 +1272,10 @@ fn append_fetch_kind_metrics(
     fetch: &crate::client::BlueskyFetchKindDiagnostics,
 ) {
     output.push_str(&format!(
+        "# TYPE jetstream_turbo_bluesky_http_requests_total counter\njetstream_turbo_bluesky_http_requests_total{{kind=\"{kind}\"}} {}\n# TYPE jetstream_turbo_bluesky_http_entities_total counter\njetstream_turbo_bluesky_http_entities_total{{kind=\"{kind}\"}} {}\n",
+        fetch.http_requests_total, fetch.http_entities_total
+    ));
+    output.push_str(&format!(
         "# HELP jetstream_turbo_bluesky_api_requests_total Bluesky API requests by collector kind (rate = requests/sec).\n\
          # TYPE jetstream_turbo_bluesky_api_requests_total counter\n\
          jetstream_turbo_bluesky_api_requests_total{{kind=\"{kind}\"}} {}\n",
@@ -1433,6 +1442,141 @@ fn append_bluesky_coordination_metrics(
     }
 }
 
+fn append_storage_retention_metrics(output: &mut String, diagnostics: &HealthDiagnostics) {
+    if let Some(capacity) = &diagnostics.sqlite_state.capacity {
+        append_counter_metric(
+            output,
+            "jetstream_turbo_sqlite_reclamation_failures_total",
+            "Physical reclamation failures, including capacity deferrals.",
+            capacity.reclamation.failures_total,
+        );
+        append_counter_metric(
+            output,
+            "jetstream_turbo_sqlite_busy_checkpoints_total",
+            "Bounded WAL checkpoints blocked by active readers.",
+            capacity.reclamation.busy_checkpoints_total,
+        );
+        if let Some(reason) = capacity.reclamation.last_failure_reason {
+            output.push_str(&format!(
+                "jetstream_turbo_sqlite_reclamation_last_failure{{reason=\"{reason}\"}} 1\n"
+            ));
+        }
+        for (name, value) in [
+            ("sqlite_allocated_bytes", capacity.allocated_bytes),
+            ("sqlite_occupied_bytes", capacity.occupied_bytes),
+            ("sqlite_freelist_bytes", capacity.freelist_bytes),
+            ("sqlite_wal_bytes", capacity.wal_bytes),
+            ("sqlite_target_bytes", capacity.target_bytes),
+            ("sqlite_reserve_bytes", capacity.reserve_bytes),
+            (
+                "sqlite_growth_allowance_bytes",
+                capacity.growth_allowance_bytes,
+            ),
+            (
+                "sqlite_protected_payload_sample_bytes",
+                capacity.protected_payload_bytes,
+            ),
+            (
+                "sqlite_protected_payload_sample_records",
+                capacity.protected_records,
+            ),
+            ("sqlite_protected_receipts", capacity.protected_receipts),
+            (
+                "sqlite_admission_allowed",
+                u64::from(capacity.admission_allowed),
+            ),
+        ] {
+            append_gauge_metric(
+                output,
+                &format!("jetstream_turbo_{name}"),
+                "Storage capacity and recovery state; payload samples cover at most 1000 rows.",
+                value.to_string(),
+            );
+        }
+        append_gauge_metric(
+            output,
+            "jetstream_turbo_sqlite_free_bytes",
+            "Measured filesystem free space.",
+            optional_u64_metric_value(capacity.free_bytes),
+        );
+    }
+    if let Some(cache) = &diagnostics.persistent_cache {
+        for (name, value) in [
+            ("profile_disk_hits_total", cache.profile_disk_hits),
+            ("post_disk_hits_total", cache.post_disk_hits),
+            ("profile_disk_misses_total", cache.profile_disk_misses),
+            ("post_disk_misses_total", cache.post_disk_misses),
+            ("expired_or_invalid_total", cache.expired_or_invalid),
+            ("evictions_total", cache.evictions),
+            ("bypasses_total", cache.bypasses),
+            ("persistence_errors_total", cache.persistence_errors),
+            ("persistence_drops_total", cache.persistence_drops),
+        ] {
+            append_counter_metric(
+                output,
+                &format!("jetstream_turbo_hydration_{name}"),
+                "Persistent entity cache outcomes; hits count entities, not HTTP requests.",
+                value,
+            );
+        }
+        for (name, value) in [
+            ("queue_depth", cache.queue_depth as u64),
+            ("queue_bytes", cache.queue_bytes as u64),
+            ("logical_bytes", cache.logical_bytes),
+            ("growth_allowed", u64::from(cache.growth_allowed)),
+        ] {
+            append_gauge_metric(
+                output,
+                &format!("jetstream_turbo_hydration_{name}"),
+                "Bounded optional cache state.",
+                value.to_string(),
+            );
+        }
+    }
+    if let Some(logs) = &diagnostics.application_logs {
+        for (name, value) in [
+            ("queue", logs.queue_drops),
+            ("oversize", logs.oversize_drops),
+            ("budget", logs.budget_drops),
+            ("io", logs.io_drops),
+        ] {
+            output.push_str(&format!(
+                "jetstream_turbo_log_dropped_total{{reason=\"{name}\"}} {value}\n"
+            ));
+        }
+        append_counter_metric(
+            output,
+            "jetstream_turbo_log_retention_failures_total",
+            "File sink maintenance failures.",
+            logs.retention_failures,
+        );
+        append_gauge_metric(
+            output,
+            "jetstream_turbo_log_allocated_bytes",
+            "Combined application file allocation.",
+            logs.allocated_bytes.to_string(),
+        );
+        append_gauge_metric(
+            output,
+            "jetstream_turbo_log_main_bytes",
+            "Main application file bytes.",
+            logs.main_bytes.to_string(),
+        );
+        append_gauge_metric(
+            output,
+            "jetstream_turbo_log_batch_bytes",
+            "Batch report file bytes.",
+            logs.batch_bytes.to_string(),
+        );
+        append_gauge_metric(
+            output,
+            "jetstream_turbo_log_oldest_segment_age_seconds",
+            "Age of the first entry in the oldest owned segment.",
+            logs.oldest_segment_age_seconds.to_string(),
+        );
+    }
+}
+
 fn append_gauge_metric(output: &mut String, name: &str, help: &str, value: String) {
     output.push_str("# HELP ");
     output.push_str(name);
@@ -1518,11 +1662,12 @@ mod tests {
         MaintenanceAuthError,
     };
     use crate::models::enriched::EnrichedRecord;
-    use crate::models::jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType};    use crate::turbocharger::{
+    use crate::models::jetstream::{CommitData, JetstreamMessage, MessageKind, OperationType};
+    use crate::turbocharger::{
         CacheStateDiagnostics, HealthDiagnostics, HealthStatus, MemoryPeakDiagnostics,
         MonitorBroadcastEnvelope, NotRedisStateDiagnostics, PipelineProgress,
-        PipelineReadinessState, ProcessMemoryDiagnostics, ProgressThresholds,
-        ReadinessDiagnostics, SQLiteStateDiagnostics,
+        PipelineReadinessState, ProcessMemoryDiagnostics, ProgressThresholds, ReadinessDiagnostics,
+        SQLiteStateDiagnostics,
     };
     use axum::extract::ws::Message;
     use axum::http::StatusCode;
@@ -1537,6 +1682,8 @@ mod tests {
         let progress = PipelineProgress::new(6, 10_000);
         let _ = progress.valid_ingress();
         HealthDiagnostics {
+            application_logs: None,
+            persistent_cache: None,
             runtime_identity: crate::turbocharger::RuntimeIdentityDiagnostics::load(
                 Some("test-release"),
                 std::path::Path::new("/definitely/missing/termination.env"),
@@ -1656,6 +1803,7 @@ mod tests {
                 isolation_budget_exhausted: 1,
             },
             sqlite_state: SQLiteStateDiagnostics {
+                capacity: None,
                 available: true,
                 db_size_bytes: Some(8192),
                 wal_size_bytes: Some(0),
@@ -1789,7 +1937,10 @@ mod tests {
         );
 
         // A configured key requires an exact header match.
-        assert_eq!(verify_maintenance_key(Some("op-key"), Some("op-key")), Ok(()));
+        assert_eq!(
+            verify_maintenance_key(Some("op-key"), Some("op-key")),
+            Ok(())
+        );
         assert_eq!(
             verify_maintenance_key(Some("op-key"), None),
             Err(MaintenanceAuthError::Invalid)
@@ -1807,7 +1958,10 @@ mod tests {
             Err(MaintenanceAuthError::Invalid)
         );
         // The configured key is trimmed but the presented value is not.
-        assert_eq!(verify_maintenance_key(Some(" op-key "), Some("op-key")), Ok(()));
+        assert_eq!(
+            verify_maintenance_key(Some(" op-key "), Some("op-key")),
+            Ok(())
+        );
     }
 
     #[test]
@@ -1948,6 +2102,44 @@ mod tests {
         assert!(!output.contains("request_fingerprint="));
         assert!(!output.contains("did:plc:"));
         assert!(!output.contains("fingerprint=\""));
+    }
+
+    #[test]
+    fn persistent_cache_metrics_separate_entity_hits_from_actual_http_attempts() {
+        let mut diagnostics = sample_diagnostics();
+        diagnostics.persistent_cache =
+            Some(crate::hydration::entity_cache::PersistentCacheDiagnostics {
+                profile_disk_hits: 17,
+                post_disk_hits: 23,
+                profile_disk_misses: 4,
+                post_disk_misses: 6,
+                expired_or_invalid: 2,
+                evictions: 3,
+                bypasses: 1,
+                persistence_errors: 5,
+                persistence_drops: 7,
+                queue_depth: 8,
+                queue_bytes: 1024,
+                logical_bytes: 4096,
+                growth_allowed: false,
+            });
+        diagnostics.bluesky_fetch.profiles.http_requests_total = 2;
+        diagnostics.bluesky_fetch.profiles.http_entities_total = 4;
+        let output = prometheus_metrics_from_diagnostics(&diagnostics);
+        assert!(output.contains("jetstream_turbo_hydration_profile_disk_hits_total 17\n"));
+        assert!(
+            output.contains("jetstream_turbo_bluesky_http_requests_total{kind=\"profiles\"} 2\n")
+        );
+        assert!(output.contains("jetstream_turbo_hydration_growth_allowed 0\n"));
+        for line in output
+            .lines()
+            .filter(|line| line.starts_with("jetstream_turbo_hydration_"))
+        {
+            assert!(
+                !line.contains('{'),
+                "entity cache metrics have no identifier labels: {line}"
+            );
+        }
     }
 
     #[test]
@@ -2320,7 +2512,10 @@ mod tests {
         let connection_id = uuid::Uuid::new_v4();
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<MonitorBroadcastEnvelope>(8);
         for _ in 0..3 {
-            outgoing_tx.send(sample_envelope(next_ordinal())).await.unwrap();
+            outgoing_tx
+                .send(sample_envelope(next_ordinal()))
+                .await
+                .unwrap();
         }
         drop(outgoing_tx);
 
