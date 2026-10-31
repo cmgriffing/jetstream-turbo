@@ -273,9 +273,11 @@ async fn assert_production_startup(disk_pressure: bool) {
         .env("STREAM_NAME", "test-stream")
         .env("JETSTREAM_HOSTS", r#"["ws://127.0.0.1:9"]"#)
         .env("MAX_DB_SIZE_MB", "6144")
+        // Exercise startup on CI disks without requiring the production 16 GiB
+        // reserve. The storage policy still adds its 2 GiB growth allowance.
         .env(
             "DISK_MIN_FREE_MB",
-            if disk_pressure { "1000000000" } else { "16384" },
+            if disk_pressure { "1000000000" } else { "1" },
         )
         .env("CLEANUP_CHUNK_SIZE", "1")
         .env("CLEANUP_CHUNK_DELAY_MS", "1000")
@@ -295,22 +297,27 @@ async fn assert_production_startup(disk_pressure: bool) {
         .unwrap();
     let deadline = Instant::now() + STARTUP_BUDGET;
     let mut listener_available = false;
+    let mut last_readiness = String::from("no readiness response");
     while Instant::now() < deadline {
-        if client
+        match client
             .get(format!("http://127.0.0.1:{http_port}/ready"))
             .send()
             .await
-            .is_ok_and(|response| {
-                response.status()
-                    == if disk_pressure {
-                        reqwest::StatusCode::SERVICE_UNAVAILABLE
-                    } else {
-                        reqwest::StatusCode::OK
-                    }
-            })
         {
-            listener_available = true;
-            break;
+            Ok(response) => {
+                let status = response.status();
+                last_readiness = format!("HTTP {status}");
+                let expected = if disk_pressure {
+                    reqwest::StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    reqwest::StatusCode::OK
+                };
+                if status == expected {
+                    listener_available = true;
+                    break;
+                }
+            }
+            Err(error) => last_readiness = error.to_string(),
         }
         if child.try_wait().unwrap().is_some() {
             break;
@@ -333,12 +340,37 @@ async fn assert_production_startup(disk_pressure: bool) {
             false
         );
     }
-    let _ = child.start_kill();
+    let failure_diagnostics = if listener_available {
+        String::new()
+    } else {
+        match client
+            .get(format!("http://127.0.0.1:{http_port}/api/v1/health"))
+            .send()
+            .await
+        {
+            Ok(response) => match response.json::<serde_json::Value>().await {
+                Ok(health) => serde_json::json!({
+                    "readiness": health["data"]["readiness"],
+                    "capacity": health["data"]["diagnostics"]["sqlite_state"]["capacity"],
+                    "memory_pressure": health["data"]["diagnostics"]["runtime_memory"]["pressure_state"],
+                }).to_string(),
+                Err(error) => format!("health response decode failed: {error}"),
+            },
+            Err(error) => format!("health request failed: {error}"),
+        }
+    };
+    let killed_by_test = child.try_wait().unwrap().is_none();
+    if killed_by_test {
+        let _ = child.start_kill();
+    }
     let output = child.wait_with_output().await.unwrap();
     assert!(
         listener_available,
-        "production binary did not become ready within {STARTUP_BUDGET:?}; status={:?}; stderr={}",
+        "production binary did not become ready within {STARTUP_BUDGET:?}; \
+         last_readiness={last_readiness}; health={failure_diagnostics}; \
+         killed_by_test={killed_by_test}; status={:?}; stdout={}; stderr={}",
         output.status,
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 }
