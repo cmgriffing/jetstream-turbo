@@ -39,6 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
+      MEMORY_MEASUREMENT_SCOPE: process_rss
       MEMORY_SUITE_SCALE: ${{ github.event_name == 'pull_request' && 'smoke' || 'production' }}
       MEMORY_SUITE_EVENT_VOLUME: ${{ inputs.event_volume || '10000' }}
       MEMORY_ARTIFACT_DIR: target/runtime-memory-artifacts

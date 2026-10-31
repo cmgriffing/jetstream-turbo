@@ -7,14 +7,15 @@ use jetstream_turbo_rs::hydration::{Hydrator, TurboCache};
 use jetstream_turbo_rs::models::bluesky::BlueskyPost;
 use jetstream_turbo_rs::models::enriched::EnrichedRecord;
 use jetstream_turbo_rs::models::jetstream::JetstreamMessage;
+use jetstream_turbo_rs::models::recovery::SourceEventId;
 use jetstream_turbo_rs::storage::{RecordStore, SQLitePragmaConfig, SQLiteStore};
 use jetstream_turbo_rs::testing::{
     create_message_batch, create_profile, MockPostFetcher, MockProfileFetcher,
 };
 use jetstream_turbo_rs::turbocharger::{
-    CgroupMemoryDiagnostics, MemoryComponentDiagnostics, MemoryRunArtifact, MemoryRunBaseline,
-    MemoryRunComparison, MemoryRunConfiguration, ProcessMemoryBreakdown, RuntimeMemorySample,
-    WorkloadPhase,
+    CgroupMemoryDiagnostics, MemoryComponentDiagnostics, MemoryMaintenanceEvidence,
+    MemoryMeasurementScope, MemoryRunArtifact, MemoryRunBaseline, MemoryRunComparison,
+    MemoryRunConfiguration, ProcessMemoryBreakdown, RuntimeMemorySample, WorkloadPhase,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
@@ -22,20 +23,35 @@ const MIB: u64 = 1024 * 1024;
 
 #[tokio::test]
 async fn production_shaped_memory_suite_smoke() {
-    run_suite(500, 128, "smoke").await;
+    let scope = measurement_scope();
+    run_suite(500, 128, "smoke", scope).await;
 }
 
 #[tokio::test]
 #[ignore = "scheduled/release production-scale memory gate"]
 async fn production_scale_memory_suite() {
+    let scope = measurement_scope();
     let event_volume = std::env::var("MEMORY_SUITE_EVENT_VOLUME")
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(10_000);
-    run_suite(event_volume, 4_096, "production").await;
+    run_suite(event_volume, 4_096, "production", scope).await;
 }
 
-async fn run_suite(event_volume: usize, smoke_cache_entries: usize, scale: &str) {
+fn measurement_scope() -> MemoryMeasurementScope {
+    match std::env::var("MEMORY_MEASUREMENT_SCOPE") {
+        Ok(value) => value.parse().unwrap_or_else(|error| panic!("{error}")),
+        Err(std::env::VarError::NotPresent) => MemoryMeasurementScope::ProcessRss,
+        Err(error) => panic!("invalid MEMORY_MEASUREMENT_SCOPE: {error}"),
+    }
+}
+
+async fn run_suite(
+    event_volume: usize,
+    smoke_cache_entries: usize,
+    scale: &str,
+    measurement_scope: MemoryMeasurementScope,
+) {
     let settings = jetstream_turbo_rs::Settings::default();
     let (user_cache_entries, post_cache_entries, negative_cache_entries) = if scale == "production"
     {
@@ -52,6 +68,7 @@ async fn run_suite(event_volume: usize, smoke_cache_entries: usize, scale: &str)
         )
     };
     let configuration = MemoryRunConfiguration {
+        measurement_scope: Some(measurement_scope),
         envelope: settings.memory_envelope(),
         user_cache_entries,
         post_cache_entries,
@@ -384,11 +401,39 @@ async fn run_suite(event_volume: usize, smoke_cache_entries: usize, scale: &str)
         0,
     ));
 
+    let maintenance_fixture = MaintenanceFixture::seed(&store).await;
+    let before_cleanup = store.get_state_snapshot().await.expect("pre-cleanup state");
     let max_size = settings.max_db_size_mb.saturating_mul(MIB) as i64;
-    store
-        .cleanup_with_vacuum(0, max_size, 0.0, 500, 0, None)
+    let cleanup = store
+        .cleanup_with_vacuum(1, max_size, 0.0, 500, 0, None)
         .await
         .expect("bounded cleanup phase");
+    assert_eq!(
+        cleanup.records_deleted, MAINTENANCE_LEGACY_ROWS,
+        "cleanup must delete the bounded receipt-backed legacy fixture"
+    );
+    let legacy_remaining: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM records WHERE source_event_id LIKE 'memory-maintenance-legacy-%'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("remaining legacy payload count");
+    assert_eq!(
+        legacy_remaining, 0,
+        "eligible legacy payloads must be removed"
+    );
+    maintenance_fixture.assert_protected(&store).await;
+    let after_cleanup = store
+        .get_state_snapshot()
+        .await
+        .expect("post-cleanup state");
+    assert!(
+        after_cleanup.freelist_count > before_cleanup.freelist_count,
+        "cleanup must create free pages: before={}, after={}, deleted={}",
+        before_cleanup.freelist_count,
+        after_cleanup.freelist_count,
+        cleanup.records_deleted
+    );
     samples.push(sample(
         WorkloadPhase::Cleanup,
         checkpoint,
@@ -397,13 +442,43 @@ async fn run_suite(event_volume: usize, smoke_cache_entries: usize, scale: &str)
         0,
         0,
     ));
-    store
+    assert!(store.checkpoint_wal().await.expect("pre-VACUUM checkpoint"));
+    let database_bytes_before_vacuum = std::fs::metadata(&db_path)
+        .expect("pre-VACUUM database allocation")
+        .len();
+    let vacuum = store
         .run_vacuum(
             max_size,
             &jetstream_turbo_rs::storage::VacuumRunPolicy::default(),
         )
         .await
         .expect("VACUUM phase");
+    let database_bytes_after_vacuum = std::fs::metadata(&db_path)
+        .expect("post-VACUUM database allocation")
+        .len();
+    assert!(
+        database_bytes_after_vacuum < database_bytes_before_vacuum,
+        "VACUUM must reclaim deletion-created allocation: before={database_bytes_before_vacuum}, \
+         after={database_bytes_after_vacuum}, free_pages={}",
+        after_cleanup.freelist_count
+    );
+    assert!(
+        vacuum.bytes_reclaimed > 0,
+        "VACUUM must report physical reclamation"
+    );
+    maintenance_fixture.assert_protected(&store).await;
+    let maintenance = MemoryMaintenanceEvidence {
+        completed_publications: maintenance_fixture.completed_ids.len() as u64,
+        completed_receipts: maintenance_fixture.completed_ids.len() as u64,
+        legacy_rows_seeded: MAINTENANCE_LEGACY_ROWS,
+        cleanup_deleted_rows: cleanup.records_deleted,
+        protected_pending_rows: 1,
+        protected_unproven_rows: 1,
+        free_pages_before_cleanup: before_cleanup.freelist_count as u64,
+        free_pages_after_cleanup: after_cleanup.freelist_count as u64,
+        database_bytes_before_vacuum,
+        database_bytes_after_vacuum,
+    };
     samples.push(sample(
         WorkloadPhase::Vacuum,
         checkpoint,
@@ -445,11 +520,12 @@ async fn run_suite(event_volume: usize, smoke_cache_entries: usize, scale: &str)
     let comparison = MemoryRunComparison::compare(&baseline, candidate);
     let attribution = MemoryRunArtifact::attribution(&configuration, &samples);
     let artifact = MemoryRunArtifact {
-        schema_version: 1,
+        schema_version: 2,
         run_id: format!("runtime-memory-{scale}-{started_at_unix_millis}"),
         started_at_unix_millis,
         completed_at_unix_millis: unix_millis(),
         configuration,
+        maintenance: Some(maintenance),
         baseline: Some(baseline),
         comparison: Some(comparison),
         attribution,
@@ -477,6 +553,137 @@ async fn run_suite(event_volume: usize, smoke_cache_entries: usize, scale: &str)
         0,
         "collector coordination is verified separately and must settle to zero"
     );
+}
+
+// One cleanup call deletes at most 500 rows. Multi-page payloads provide bounded
+// reclamation evidence without depending on an exact SQLite page layout.
+const MAINTENANCE_LEGACY_ROWS: u64 = 128;
+
+struct MaintenanceFixture {
+    completed_ids: Vec<SourceEventId>,
+    pending_id: SourceEventId,
+    pending_message: String,
+    unproven_message: String,
+}
+
+impl MaintenanceFixture {
+    async fn seed(store: &SQLiteStore) -> Self {
+        let expired_at = chrono::Utc::now() - chrono::Duration::days(2);
+        let publications: Vec<_> = (0..5)
+            .map(|index| {
+                let mut message = create_message_batch(1)
+                    .pop()
+                    .expect("maintenance publication");
+                message.did = Arc::from(format!("did:plc:memory-maintenance-{index}"));
+                message.time_us = Some(expired_at.timestamp_micros() as u64 + index);
+                message.raw_json = None;
+                let mut record = EnrichedRecord::new(message);
+                record.processed_at = expired_at;
+                record
+            })
+            .collect();
+        store
+            .store_batch(&publications)
+            .await
+            .expect("maintenance publication storage");
+        let completed_ids: Vec<_> = publications[..4]
+            .iter()
+            .map(EnrichedRecord::source_event_id)
+            .collect();
+        store
+            .clear_publication_journal(&completed_ids)
+            .await
+            .expect("normal publication completion compacts payloads");
+        for id in &completed_ids {
+            let state: (i64, i64, i64) = sqlx::query_as(
+                "SELECT (SELECT COUNT(*) FROM records WHERE source_event_id=?1), \
+                 (SELECT COUNT(*) FROM publication_journal WHERE source_event_id=?1), \
+                 (SELECT COUNT(*) FROM completion_receipts WHERE source_event_id=?1)",
+            )
+            .bind(id.as_str())
+            .fetch_one(store.pool())
+            .await
+            .expect("normal completion state");
+            assert_eq!(
+                state,
+                (0, 0, 1),
+                "completion must compact payload/journal and retain receipt"
+            );
+        }
+        let pending_id = publications[4].source_event_id();
+        let pending_message =
+            serde_json::to_string(&publications[4].message).expect("pending publication contents");
+        let expired_at = expired_at.to_rfc3339();
+        let payload = "bounded disposable payload ".repeat(1_300);
+        let mut tx = store
+            .pool()
+            .begin()
+            .await
+            .expect("legacy fixture transaction");
+        // Normal completion deliberately cannot create this legacy state. Seed
+        // receipt-backed old payloads explicitly, without pending journal rows.
+        for index in 0..MAINTENANCE_LEGACY_ROWS {
+            let source_id = format!("memory-maintenance-legacy-{index}");
+            let message =
+                serde_json::json!({"fixture": &source_id, "payload": &payload}).to_string();
+            sqlx::query(
+                "INSERT INTO records(source_event_id,message,created_at,hydrated_at) VALUES(?,?,?,?)",
+            )
+            .bind(&source_id).bind(message).bind(&expired_at).bind(&expired_at)
+            .execute(&mut *tx).await.expect("legacy payload fixture");
+            sqlx::query(
+                "INSERT INTO completion_receipts(source_event_id,covered,completed_at) VALUES(?,0,?)",
+            )
+            .bind(&source_id).bind(&expired_at)
+            .execute(&mut *tx).await.expect("legacy completion proof");
+        }
+        let unproven_message =
+            serde_json::json!({"fixture": "protected unproven legacy payload"}).to_string();
+        sqlx::query(
+            "INSERT INTO records(source_event_id,message,created_at,hydrated_at) VALUES('memory-maintenance-unproven',?,?,?)",
+        )
+        .bind(&unproven_message).bind(&expired_at).bind(&expired_at)
+        .execute(&mut *tx).await.expect("unproven legacy control");
+        tx.commit().await.expect("legacy fixture committed");
+        let fixture = Self {
+            completed_ids,
+            pending_id,
+            pending_message,
+            unproven_message,
+        };
+        fixture.assert_protected(store).await;
+        fixture
+    }
+
+    async fn assert_protected(&self, store: &SQLiteStore) {
+        let pending: (String, i64) = sqlx::query_as(
+            "SELECT message, (SELECT COUNT(*) FROM publication_journal WHERE source_event_id=?1) \
+             FROM records WHERE source_event_id=?1",
+        )
+        .bind(self.pending_id.as_str())
+        .fetch_one(store.pool())
+        .await
+        .expect("pending publication remains recoverable");
+        assert_eq!(
+            pending,
+            (self.pending_message.clone(), 1),
+            "pending contents and journal must survive maintenance"
+        );
+        let unproven: (String, i64, i64) = sqlx::query_as(
+            "SELECT message, (SELECT COUNT(*) FROM completion_receipts WHERE source_event_id=?1), \
+             (SELECT COUNT(*) FROM publication_journal WHERE source_event_id=?1) \
+             FROM records WHERE source_event_id=?1",
+        )
+        .bind("memory-maintenance-unproven")
+        .fetch_one(store.pool())
+        .await
+        .expect("unproven legacy payload remains protected");
+        assert_eq!(
+            unproven,
+            (self.unproven_message.clone(), 0, 0),
+            "unproven contents must survive without completion proof"
+        );
+    }
 }
 
 fn sample(

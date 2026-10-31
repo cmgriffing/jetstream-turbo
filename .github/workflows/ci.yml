@@ -44,6 +44,8 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    env:
+      MEMORY_MEASUREMENT_SCOPE: process_rss
 
     steps:
       - name: Checkout repository
