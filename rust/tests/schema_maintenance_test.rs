@@ -3,6 +3,7 @@ use jetstream_turbo_rs::storage::{
     verify_required_indexes, SQLitePragmaConfig, SQLiteStore, SchemaMaintenanceError,
     SchemaVerification, REQUIRED_INDEXES,
 };
+use jetstream_turbo_rs::turbocharger::{CgroupMemoryDiagnostics, MemoryEnvelope};
 use jetstream_turbo_rs::utils::logging::retention::{LogOwner, LogPolicy};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
@@ -15,6 +16,61 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const LARGE_FIXTURE_ROWS: usize = 100_000;
 const VERIFICATION_BUDGET: Duration = Duration::from_secs(1);
 const STARTUP_BUDGET: Duration = Duration::from_secs(2);
+const MIB: u64 = 1024 * 1024;
+
+fn startup_memory_envelope(
+    host_memory_bytes: Option<u64>,
+    cgroup: &CgroupMemoryDiagnostics,
+) -> MemoryEnvelope {
+    let defaults = jetstream_turbo_rs::Settings::default().memory_envelope();
+    // This fixture tests schema startup, not memory acceptance. Its child still
+    // observes the real cgroup, which can include unrelated CI jobs and cache.
+    // Cover the entire reported capacity, not just an instantaneous usage sample.
+    let capacity_bytes = defaults
+        .host_memory_bytes
+        .max(host_memory_bytes.unwrap_or(0))
+        .max(cgroup.max_bytes.unwrap_or(0))
+        .max(cgroup.current_bytes.unwrap_or(0));
+    let recovery_mb = capacity_bytes.div_ceil(MIB) + 1024;
+    MemoryEnvelope {
+        recovery_bytes: recovery_mb * MIB,
+        soft_pressure_bytes: (recovery_mb + 1024) * MIB,
+        emergency_bytes: (recovery_mb + 2048) * MIB,
+        external_hard_limit_bytes: (recovery_mb + 3072) * MIB,
+        host_memory_bytes: (recovery_mb + 3072) * MIB + defaults.required_host_headroom_bytes,
+        ..defaults
+    }
+}
+
+#[test]
+fn startup_envelope_covers_shared_runner_capacity_with_valid_headroom() {
+    for (host_mb, limit_mb, usage_mb) in [
+        (Some(16_384), Some(8192), Some(6144)),
+        (Some(16_384), None, Some(6144)),
+        (Some(8192), Some(32_768), Some(10_240)),
+        (None, None, Some(12_288)),
+        (None, None, None),
+    ] {
+        let host = host_mb.map(|mb| mb * MIB);
+        let cgroup = CgroupMemoryDiagnostics {
+            max_bytes: limit_mb.map(|mb| mb * MIB),
+            current_bytes: usage_mb.map(|mb| mb * MIB),
+            ..CgroupMemoryDiagnostics::default()
+        };
+        let envelope = startup_memory_envelope(host, &cgroup);
+        envelope.validate().expect("valid startup fixture envelope");
+        let capacity = [host, cgroup.max_bytes, cgroup.current_bytes]
+            .into_iter()
+            .flatten()
+            .max()
+            .unwrap_or(0);
+        assert!(envelope.recovery_bytes > capacity);
+        assert!(
+            envelope.recovery_bytes
+                > jetstream_turbo_rs::Settings::default().conservative_memory_working_set_bytes()
+        );
+    }
+}
 
 async fn run_schema_maintenance(directory: &std::path::Path) -> std::process::Output {
     let output = Command::new(env!("CARGO_BIN_EXE_jetstream-turbo"))
@@ -266,6 +322,19 @@ async fn assert_production_startup(disk_pressure: bool) {
     let http_port = port_probe.local_addr().unwrap().port();
     drop(port_probe);
 
+    let host_memory_bytes = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                line.strip_prefix("MemTotal:")?
+                    .split_whitespace()
+                    .next()?
+                    .parse::<u64>()
+                    .ok()?
+                    .checked_mul(1024)
+            })
+        });
+    let envelope = startup_memory_envelope(host_memory_bytes, &CgroupMemoryDiagnostics::collect());
     let mut child = Command::new(env!("CARGO_BIN_EXE_jetstream-turbo"))
         .current_dir(temp_dir.path())
         .env("BLUESKY_HANDLE", "test.bsky.social")
@@ -282,6 +351,23 @@ async fn assert_production_startup(disk_pressure: bool) {
         .env("CLEANUP_CHUNK_SIZE", "1")
         .env("CLEANUP_CHUNK_DELAY_MS", "1000")
         .env("CLEANUP_CHECK_INTERVAL_MINUTES", "60")
+        .envs(
+            [
+                ("MEMORY_RECOVERY_MB", envelope.recovery_bytes),
+                ("MEMORY_SOFT_PRESSURE_MB", envelope.soft_pressure_bytes),
+                ("MEMORY_EMERGENCY_MB", envelope.emergency_bytes),
+                (
+                    "MEMORY_EXTERNAL_HARD_LIMIT_MB",
+                    envelope.external_hard_limit_bytes,
+                ),
+                ("MEMORY_HOST_TOTAL_MB", envelope.host_memory_bytes),
+                (
+                    "MEMORY_REQUIRED_HOST_HEADROOM_MB",
+                    envelope.required_host_headroom_bytes,
+                ),
+            ]
+            .map(|(name, bytes)| (name, (bytes / MIB).to_string())),
+        )
         .env("TURBO__BLUESKY_API_URL", auth_server.uri())
         .env("TURBO__DB_DIR", temp_dir.path())
         .env("TURBO__HTTP_PORT", http_port.to_string())
