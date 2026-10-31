@@ -36,7 +36,8 @@ leaving a 112.8 MiB process residual (allocator, runtime, and SQLite allocations
 that cannot be reliably assigned from RSS). After cache clearing and all
 transients, RSS was 197.5 MiB and remained below the 3 GiB recovery threshold.
 This macOS run explicitly reported Linux anonymous/file RSS, cgroup, PSI, swap,
-and OOM dimensions as unavailable; the scheduled Linux job supplies them.
+and OOM dimensions as unavailable. Linux runs collect those dimensions when
+available; collecting cgroup data alone does not establish service isolation.
 
 No new dominant leak was demonstrated after the collector fix. The additional
 remediation is therefore generic bounding: byte-weighted caches, O(1) bounded
@@ -91,3 +92,36 @@ The acceptance result passed hard-limit, component/count bound, backlog,
 checkpoint monotonicity, transient settling, and warmed-slope checks. Pressure
 actions and controlled emergency exit remain disabled by default pending the
 ordered canary described in `runtime-memory-operations.md`.
+
+## Measurement scope and artifact versions
+
+New total-memory artifacts use schema version 2 and record
+`configuration.measurement_scope`: `process_rss` selects `process.rss_bytes`,
+and `service_cgroup` selects `cgroup.current_bytes`. Hard-limit, transient
+recovery, warmed-growth, observed-peak, and residual attribution all follow that
+selection. Both raw diagnostic objects remain available, including collection
+errors. Missing selected measurements (or an empty run) fail acceptance; an
+unavailable alternate source does not change the selected result.
+
+Direct Cargo tests and the wrapper default to `process_rss`. Both hosted CI jobs
+explicitly select it for every trigger, including production-volume runs. A
+shared runner's cgroup can contain unrelated processes and filesystem cache, so
+its occupancy cannot be attributed to this workload. RSS acceptance measures
+the test process and excludes kernel cache and other service processes. It does
+not demonstrate whole-service containment.
+
+Checked-in historical artifacts remain schema version 1, without an explicit
+scope. Their reader retains the original cgroup-first, RSS-fallback semantics;
+they are not relabelled as process-scoped results. Version 2 input without a
+valid explicit scope is rejected. The separate concurrency sweep still reports
+`peak_rss_bytes` and uses its own schema version 1. Compare runs only after
+identifying schema, scope, workload size, and runner context; process and service
+measurements are different evidence.
+
+The maintenance fixture now records completion compaction separately from TTL
+cleanup: normal publication completion immediately removes payloads/journals
+and retains receipts. Bounded expired receipt-backed legacy payloads exercise
+cleanup, while pending publications and payloads without completion proof remain
+protected. Artifact maintenance evidence includes positive deletion counts,
+free pages, and relative database allocation reduction after checkpoint/VACUUM.
+Phase labels alone cannot satisfy these checks.

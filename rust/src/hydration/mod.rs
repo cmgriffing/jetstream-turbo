@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod entity_cache;
 pub mod hydrator;
 pub mod resolver;
 

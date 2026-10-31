@@ -28,8 +28,8 @@ pub use runtime_identity::{
 };
 pub use runtime_memory::{
     CgroupMemoryDiagnostics, MemoryComponentDiagnostics, MemoryEnvelope, MemoryIncident,
-    MemoryIncidentClass, MemoryObserver, MemoryPressureActions, MemoryPressureCoordinator,
-    MemoryPressureState, MemoryRunArtifact, MemoryRunBaseline, MemoryRunComparison,
-    MemoryRunConfiguration, MemoryRunEvaluation, ProcessMemoryBreakdown, RuntimeMemorySample,
-    WorkloadPhase, WorkloadPhaseTracker,
+    MemoryIncidentClass, MemoryMaintenanceEvidence, MemoryMeasurementScope, MemoryObserver,
+    MemoryPressureActions, MemoryPressureCoordinator, MemoryPressureState, MemoryRunArtifact,
+    MemoryRunBaseline, MemoryRunComparison, MemoryRunConfiguration, MemoryRunEvaluation,
+    ProcessMemoryBreakdown, RuntimeMemorySample, WorkloadPhase, WorkloadPhaseTracker,
 };

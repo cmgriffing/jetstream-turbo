@@ -123,6 +123,16 @@ jobs:
           source: "rust/deploy/capture-memory-incident.sh,rust/deploy/latest-memory-incident.sh"
           target: "/tmp/${{ env.SERVICE_NAME }}-candidate-${{ env.RELEASE_ID }}/"
 
+      - name: Copy offline storage migration tool to VPS
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.VPS_TURBO_HOST }}
+          username: deploy
+          key: ${{ secrets.VPS_TURBO_SSH_KEY }}
+          strip_components: 2
+          source: "rust/scripts/migrate_storage.py"
+          target: "/tmp/${{ env.SERVICE_NAME }}-candidate-${{ env.RELEASE_ID }}/"
+
       - name: Install versioned candidate
         uses: appleboy/ssh-action@master
         with:
@@ -130,6 +140,7 @@ jobs:
           username: deploy
           key: ${{ secrets.VPS_TURBO_SSH_KEY }}
           script: |
+            set -euo pipefail
             sudo install -o ${{ env.SERVICE_NAME }} -g ${{ env.SERVICE_NAME }} -m 0755 \
               /tmp/${{ env.SERVICE_NAME }}-candidate-${{ env.RELEASE_ID }}/${{ env.BINARY_NAME }} \
               ${{ env.DEPLOY_PATH }}/releases/${{ env.RELEASE_ID }}/${{ env.BINARY_NAME }}
@@ -139,6 +150,42 @@ jobs:
             sudo install -o ${{ env.SERVICE_NAME }} -g ${{ env.SERVICE_NAME }} -m 0755 \
               /tmp/${{ env.SERVICE_NAME }}-candidate-${{ env.RELEASE_ID }}/latest-memory-incident.sh \
               ${{ env.DEPLOY_PATH }}/releases/${{ env.RELEASE_ID }}/latest-memory-incident.sh
+            printf '%s\n' completion_receipts_v1 | sudo tee \
+              ${{ env.DEPLOY_PATH }}/releases/${{ env.RELEASE_ID }}/recovery-format >/dev/null
+
+      - name: Install offline storage migration tool
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_TURBO_HOST }}
+          username: deploy
+          key: ${{ secrets.VPS_TURBO_SSH_KEY }}
+          script: |
+            sudo install -o ${{ env.SERVICE_NAME }} -g ${{ env.SERVICE_NAME }} -m 0755 \
+              /tmp/${{ env.SERVICE_NAME }}-candidate-${{ env.RELEASE_ID }}/migrate_storage.py \
+              ${{ env.DEPLOY_PATH }}/releases/${{ env.RELEASE_ID }}/migrate_storage.py
+
+      - name: Copy isolated log policy tools to VPS
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.VPS_TURBO_HOST }}
+          username: deploy
+          key: ${{ secrets.VPS_TURBO_SSH_KEY }}
+          strip_components: 2
+          source: "rust/deploy/configure-journal.sh,rust/deploy/prepare-legacy-logs.sh,rust/deploy/systemd/journald@jetstream-turbo.conf"
+          target: "/tmp/${{ env.SERVICE_NAME }}-candidate-${{ env.RELEASE_ID }}/"
+
+      - name: Preflight log isolation and legacy file migration
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_TURBO_HOST }}
+          username: deploy
+          key: ${{ secrets.VPS_TURBO_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            sudo bash /tmp/${{ env.SERVICE_NAME }}-candidate-${{ env.RELEASE_ID }}/configure-journal.sh preflight
+            sudo env DEPLOY_PATH=${{ env.DEPLOY_PATH }} bash /tmp/${{ env.SERVICE_NAME }}-candidate-${{ env.RELEASE_ID }}/prepare-legacy-logs.sh check
+            sudo bash /tmp/${{ env.SERVICE_NAME }}-candidate-${{ env.RELEASE_ID }}/configure-journal.sh install \
+              /tmp/${{ env.SERVICE_NAME }}-candidate-${{ env.RELEASE_ID }}/systemd/journald@jetstream-turbo.conf
 
       - name: Copy systemd service file to Host
         uses: appleboy/scp-action@master
@@ -219,3 +266,12 @@ jobs:
               READINESS_INTERVAL_SECS=2 \
               bash /tmp/activate-candidate.sh \
               ${{ env.DEPLOY_PATH }}/releases/${{ env.RELEASE_ID }}/${{ env.BINARY_NAME }}
+
+      - name: Measure isolated journal allocation after activation
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_TURBO_HOST }}
+          username: deploy
+          key: ${{ secrets.VPS_TURBO_SSH_KEY }}
+          script: |
+            sudo bash /tmp/${{ env.SERVICE_NAME }}-candidate-${{ env.RELEASE_ID }}/configure-journal.sh check

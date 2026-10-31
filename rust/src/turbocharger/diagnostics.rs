@@ -51,6 +51,8 @@ pub struct HealthDiagnostics {
     pub runtime_memory: RuntimeMemoryDiagnostics,
     pub cache_state: CacheStateDiagnostics,
     pub sqlite_state: SQLiteStateDiagnostics,
+    pub application_logs: Option<crate::utils::logging::retention::LogDiagnostics>,
+    pub persistent_cache: Option<crate::hydration::entity_cache::PersistentCacheDiagnostics>,
     pub not_redis_state: NotRedisStateDiagnostics,
     pub pipeline_progress: PipelineProgressSnapshot,
     pub completion_frontier: crate::turbocharger::coordinator::CompletionFrontierSnapshot,
@@ -126,6 +128,7 @@ pub struct CacheStateDiagnostics {
 #[serde(rename_all = "snake_case")]
 pub struct SQLiteStateDiagnostics {
     pub available: bool,
+    pub capacity: Option<crate::storage::capacity::StorageCapacity>,
     pub db_size_bytes: Option<i64>,
     pub wal_size_bytes: Option<i64>,
     pub page_count: Option<i64>,
@@ -249,6 +252,10 @@ impl DiagnosticsCollector {
 
     /// Pure assembly: combine component snapshots into a `HealthDiagnostics`
     /// value.  Does not mutate any internal state.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "assembles independently collected component snapshots"
+    )]
     pub fn assemble_health(
         runtime_identity: crate::turbocharger::RuntimeIdentityDiagnostics,
         memory: (ProcessMemoryDiagnostics, RuntimeMemoryDiagnostics),
@@ -269,6 +276,8 @@ impl DiagnosticsCollector {
             runtime_memory: memory.1,
             cache_state,
             sqlite_state,
+            application_logs: crate::utils::logging::retention::log_diagnostics(),
+            persistent_cache: None,
             not_redis_state,
             pipeline_progress,
             completion_frontier,

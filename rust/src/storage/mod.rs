@@ -1,3 +1,4 @@
+pub mod capacity;
 pub mod redis;
 pub mod rotation;
 pub mod schema;
@@ -11,6 +12,6 @@ pub use schema::{
 };
 pub use sqlite::{
     CleanupResult, RecordStore, SQLitePragmaConfig, SQLiteStateSnapshot, SQLiteStore,
-    VacuumExecutionMode, VacuumGatingReason, VacuumPendingReason, VacuumRunPolicy,
-    VacuumRunResult, VacuumState,
+    VacuumExecutionMode, VacuumGatingReason, VacuumPendingReason, VacuumRunPolicy, VacuumRunResult,
+    VacuumState,
 };

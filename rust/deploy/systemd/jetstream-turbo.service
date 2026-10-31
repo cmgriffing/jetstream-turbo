@@ -23,6 +23,7 @@ MemorySwapMax=512M
 EnvironmentFile=/opt/jetstream-turbo/.env
 ExecStopPost=/opt/jetstream-turbo/current/capture-memory-incident.sh
 
+LogNamespace=jetstream-turbo
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=jetstream-turbo

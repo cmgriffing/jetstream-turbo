@@ -12,6 +12,7 @@ use crate::models::{
 };
 use crate::storage::{EventPublisher, RecordStore, RedisStore, SQLitePragmaConfig, SQLiteStore};
 use crate::telemetry::ErrorReporter;
+use crate::turbocharger::broadcast::MonitorBroadcastEnvelope;
 use crate::turbocharger::coordinator::CompletionFrontier;
 use crate::turbocharger::diagnostics::{
     derive_health, CacheStateDiagnostics, DiagnosticsCollector, HealthDiagnostics, HealthStatus,
@@ -27,7 +28,6 @@ use crate::turbocharger::runtime_memory::{
     ProcessMemoryBreakdown, RuntimeMemorySample, WorkloadPhase, WorkloadPhaseTracker,
     MAX_MONITOR_RECORD_BYTES,
 };
-use crate::turbocharger::broadcast::MonitorBroadcastEnvelope;
 use crate::turbocharger::{FailureSupervisor, RecoveryDecision};
 use chrono::{DateTime, Timelike, Utc};
 use futures::StreamExt;
@@ -40,7 +40,7 @@ use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
-use tokio::time::{interval, sleep, timeout_at, Instant};
+use tokio::time::{interval, timeout_at, Instant};
 use tracing::{error, info, trace, warn};
 
 const BATCH_SIZE: usize = 25;
@@ -117,6 +117,7 @@ pub struct TurboCharger<M, P, Po, S, E> {
     /// In-band identifier broadcast with every record: the process epoch of
     /// the runtime that produced them (design D2).
     turbo_epoch: String,
+    active_ingress_epoch: StdMutex<String>,
     progress: Arc<PipelineProgress>,
     completion_frontier: Arc<Mutex<CompletionFrontier>>,
     failure_supervisor: Arc<FailureSupervisor>,
@@ -233,10 +234,14 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             settings.user_cache_limit_mb.saturating_mul(MIB),
             settings.post_cache_limit_mb.saturating_mul(MIB),
             settings.negative_post_cache_limit_mb.saturating_mul(MIB),
+        )
+        .with_ttls(
+            Duration::from_secs(settings.profile_cache_ttl_seconds),
+            Duration::from_secs(settings.post_cache_ttl_seconds),
         );
 
         // Initialize hydrator
-        let hydrator = Hydrator::new_with_mode(
+        let mut hydrator = Hydrator::new_with_mode(
             cache,
             bluesky_client.clone(),
             bluesky_client.clone(),
@@ -258,6 +263,35 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             .await?,
         );
         let checkpoint = sqlite_store.load_ingestion_checkpoint().await?;
+        sqlite_store.configure_capacity(settings.storage_policy());
+        let capacity = sqlite_store.capacity_snapshot().await?;
+        if settings.hydration_disk_cache_enabled {
+            let initialization = crate::hydration::entity_cache::PersistentEntityCache::new(
+                sqlite_store.pool().clone(),
+                crate::hydration::entity_cache::PersistentCacheConfig {
+                    profile_ttl: Duration::from_secs(settings.profile_cache_ttl_seconds),
+                    post_ttl: Duration::from_secs(settings.post_cache_ttl_seconds),
+                    queue_capacity: settings.hydration_cache_queue_capacity,
+                    timeout: Duration::from_millis(settings.hydration_cache_timeout_ms),
+                },
+            );
+            match tokio::time::timeout(Duration::from_millis(settings.hydration_cache_timeout_ms), initialization).await {
+                Ok(Ok(persistent)) => {
+                    persistent.set_growth_allowed(capacity.admission_allowed);
+                    persistent.set_max_bytes(settings.hydration_disk_cache_max_mb * MIB);
+                    hydrator = hydrator.with_persistent_cache(Arc::new(persistent));
+                }
+                _ => warn!("Optional persistent cache initialization failed or timed out; using RAM/API hydration"),
+            }
+        }
+        if !capacity.admission_allowed {
+            warn!(
+                reason = capacity.reason,
+                allocated_bytes = capacity.allocated_bytes,
+                free_bytes = capacity.free_bytes,
+                "Starting with disk-pressure-gated admission"
+            );
+        }
         let completion_frontier =
             Arc::new(Mutex::new(CompletionFrontier::new(checkpoint.as_ref())));
         let jetstream_client = if settings.jetstream_cursor_replay_enabled {
@@ -279,7 +313,9 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
         // effective replay maximum; live-mode capacity is restored by
         // withholding permits in `replay_reserved_permits` (one coordinator-
         // owned pool, no second semaphore).
-        let semaphore = Arc::new(Semaphore::new(settings.effective_max_batch_concurrency().max(1)));
+        let semaphore = Arc::new(Semaphore::new(
+            settings.effective_max_batch_concurrency().max(1),
+        ));
         let memory_pressure = MemoryPressureCoordinator::new(
             settings.memory_envelope(),
             settings.max_concurrent_requests,
@@ -309,14 +345,9 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
         // Initialize monitor broadcast channel
         let (broadcast_sender, _) = broadcast::channel(settings.monitor_broadcast_capacity);
 
-        // VACUUM temp headroom is validated at startup so a pending VACUUM on
-        // a production-sized database cannot hit ENOSPC mid-run.
-        let vacuum_temp_dir = vacuum_temp_dir_path(&settings);
+        // Capacity for reclamation is checked at execution time. Diagnostics
+        // and safe logical cleanup must also start on an oversized store.
         let checkpoint_coalescer = CheckpointCoalescer::from_settings(&settings);
-        if settings.vacuum_execution_mode == crate::storage::VacuumExecutionMode::FileBackedTempStore {
-            let db_size = sqlite_store.get_db_size().await?;
-            SQLiteStore::verify_temp_volume_headroom(&vacuum_temp_dir, db_size)?;
-        }
 
         info!("TurboCharger initialized successfully");
 
@@ -334,6 +365,7 @@ impl TurboCharger<JetstreamClient, BlueskyClient, BlueskyClient, SQLiteStore, Re
             error_reporter,
             diagnostics_collector,
             runtime_identity,
+            active_ingress_epoch: StdMutex::new(turbo_epoch.clone()),
             turbo_epoch,
             progress,
             completion_frontier,
@@ -368,6 +400,24 @@ where
         let mut last_stats = std::time::Instant::now();
         let mut batch_reporter = BatchReporter::new(BATCH_SIZE);
         let checkpoint = self.sqlite_store.load_ingestion_checkpoint().await?;
+        // Run-loop restarts can reuse ordinals too. Discard only volatile
+        // frontier state and use a fresh epoch; durable receipts stay protected
+        // until replay rebinds their identities into this run's proven frontier.
+        *self
+            .active_ingress_epoch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) =
+            format!("{}-{}", self.turbo_epoch, uuid::Uuid::new_v4());
+        *self.completion_frontier.lock().await = CompletionFrontier::new(checkpoint.as_ref());
+        *self
+            .checkpoint_frontier_pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+        *self
+            .checkpoint_coalescer
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) =
+            CheckpointCoalescer::from_settings(&self.settings);
         self.transition_memory_phase(if checkpoint.is_some() {
             WorkloadPhase::Replay
         } else {
@@ -389,9 +439,10 @@ where
 
         loop {
             tokio::select! {
-                result = message_stream.next() => {
+                result = message_stream.next(), if self.sqlite_store.admission_allowed() => {
                     match result {
                         Some(Ok(message)) => {
+                            self.hydrator.observe_message(&message);
                             if self.should_process_message(&message) {
                                 if let Some(event) = Self::accept_ingress_event(
                                     self.progress.as_ref(),
@@ -660,8 +711,7 @@ where
         }
         let effective_capacity = replay_permits.saturating_sub(reserved.len());
         drop(reserved);
-        metrics::gauge!("jetstream_turbo_effective_batch_permits")
-            .set(effective_capacity as f64);
+        metrics::gauge!("jetstream_turbo_effective_batch_permits").set(effective_capacity as f64);
         for phase_value in [
             WorkloadPhase::Startup,
             WorkloadPhase::LiveIngestion,
@@ -894,7 +944,8 @@ where
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .state();
-        let desired_reserved = if pressure_state == crate::turbocharger::MemoryPressureState::Normal {
+        let desired_reserved = if pressure_state == crate::turbocharger::MemoryPressureState::Normal
+        {
             0
         } else {
             available_capacity.saturating_sub(actions.target_permits)
@@ -963,11 +1014,19 @@ where
         batch: IngressBatch,
         batch_tasks: &mut JoinSet<RunResult<BatchCompletion>>,
     ) -> TurboResult<()> {
+        self.sqlite_store.refresh_admission().await?;
+        if let Some(cache) = self.hydrator.persistent_cache() {
+            cache.set_growth_allowed(self.sqlite_store.admission_allowed());
+        }
         let hydrator = self.hydrator.clone();
         let record_store = Arc::clone(&self.record_store);
         let event_publisher = Arc::clone(&self.event_publisher);
         let broadcast_sender = self.broadcast_sender.clone();
-        let turbo_epoch = self.turbo_epoch.clone();
+        let turbo_epoch = self
+            .active_ingress_epoch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         let progress = Arc::clone(&self.progress);
         let batch_id = progress.batch_started();
         let timeout = self
@@ -1060,12 +1119,17 @@ where
         let batch_id = self.progress.batch_started();
         self.progress.batch_running(batch_id);
         let failed_range = batch.range().clone();
+        let ingress_epoch = self
+            .active_ingress_epoch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         let count = Self::process_batch_internal(
             self.hydrator.clone(),
             Arc::clone(&self.record_store),
             Arc::clone(&self.event_publisher),
             self.broadcast_sender.clone(),
-            self.turbo_epoch.clone(),
+            ingress_epoch,
             batch,
             Arc::clone(&self.progress),
             batch_id,
@@ -1150,9 +1214,14 @@ where
                 .mark_written(Instant::now());
             return Ok(None);
         };
+        let ingress_epoch = self
+            .active_ingress_epoch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         if let Err(error) = self
             .sqlite_store
-            .advance_ingestion_checkpoint(&checkpoint)
+            .advance_ingestion_checkpoint_for_epoch(&checkpoint, &ingress_epoch)
             .await
         {
             *self
@@ -1200,7 +1269,7 @@ where
         let snapshot = self.progress.snapshot(self.progress_thresholds());
         metrics::gauge!("jetstream_recovery_phase")
             .set(recovery_phase_code(snapshot.recovery_phase));
-        info!(
+        tracing::debug!(
             recovery_phase = ?snapshot.recovery_phase,
             committed_event_time_us = checkpoint.cursor.time_us,
             committed_lag_us,
@@ -1242,6 +1311,19 @@ where
             .iter()
             .map(|event| event.cursor.source_event_id.clone())
             .collect::<Vec<_>>();
+        let admissions = events
+            .iter()
+            .map(|event| {
+                (
+                    event.cursor.source_event_id.clone(),
+                    event.ordinal,
+                    event.cursor.time_us,
+                )
+            })
+            .collect::<Vec<_>>();
+        // Bind replayed receipts before duplicate filtering so checkpoint coverage
+        // is proven in this epoch rather than inferred from reused ordinals.
+        record_store.bind_ingress(&turbo_epoch, &admissions).await?;
         // Completion for replay filtering is publication-gated (design D9):
         // "completed" means published at least once; events that are durably
         // stored but were never published come back with their stored records
@@ -1334,6 +1416,9 @@ where
             }
         }
 
+        // Associate fresh payloads only after their journaled storage succeeds.
+        record_store.bind_ingress(&turbo_epoch, &admissions).await?;
+
         // Combined in-epoch delivery order: freshly hydrated events first (in
         // ingress order), then the recovered stored records.
         let broadcast_records = fresh_ordinals
@@ -1368,7 +1453,8 @@ where
         let receivers = broadcast_sender.receiver_count();
         let mut successful_sends = 0;
         for (ingress_ordinal, enriched) in broadcast_records {
-            let envelope = MonitorBroadcastEnvelope::new(enriched, turbo_epoch.as_str(), ingress_ordinal);
+            let envelope =
+                MonitorBroadcastEnvelope::new(enriched, turbo_epoch.as_str(), ingress_ordinal);
             let monitor_record_bytes = serde_json::to_vec(&envelope)
                 .ok()
                 .and_then(|payload| u64::try_from(payload.len()).ok());
@@ -1387,6 +1473,8 @@ where
             // these records (at-least-once), which is the specified behavior.
             metrics::counter!("jetstream_publication_journal_clear_failures_total").increment(1);
             warn!(error = %error, "Failed to clear publication journal after broadcast");
+            lifecycle.failed();
+            return Err(error);
         }
         lifecycle.completed(count);
 
@@ -1450,17 +1538,17 @@ pub(crate) struct BatchCompletion {
 }
 
 /// Bounded in-band epoch identifier broadcast with every record (design D2):
-/// the identity comes from `runtime_identity` (release identifier plus process
-/// start time), so a restart produces a distinct epoch without any
-/// coordination. The monitor resets ordinal state when this value changes.
+/// A random nonce fences durable receipt ordinals even across same-second
+/// restarts of the same release. The stored value is cloned for every batch.
 pub(crate) fn derive_turbo_epoch(
     release_identifier: Option<&str>,
     process_started_at_unix_seconds: u64,
 ) -> String {
     format!(
-        "{}-{}",
+        "{}-{}-{}",
         release_identifier.unwrap_or("unknown"),
-        process_started_at_unix_seconds
+        process_started_at_unix_seconds,
+        uuid::Uuid::new_v4()
     )
 }
 
@@ -1590,7 +1678,11 @@ fn vacuum_temp_dir_path(settings: &Settings) -> std::path::PathBuf {
         .map(str::trim)
         .filter(|dir| !dir.is_empty())
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
+        .unwrap_or_else(|| {
+            std::env::var_os("SQLITE_TMPDIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir)
+        })
 }
 
 /// Effective batch-permit target for the current phase and pressure state.
@@ -1658,9 +1750,8 @@ impl CheckpointCoalescer {
             .batch_interval
             .is_some_and(|interval| self.completions_since_write >= interval);
         let interval_due = self.interval_ms.is_some_and(|ms| {
-            self.last_write.is_none_or(|last| {
-                now.duration_since(last) >= Duration::from_millis(ms)
-            })
+            self.last_write
+                .is_none_or(|last| now.duration_since(last) >= Duration::from_millis(ms))
         });
         batch_due || interval_due
     }
@@ -1761,7 +1852,16 @@ where
         let transport_connected = pipeline_progress.connected_endpoint.is_some();
         let recovery_phase = pipeline_progress.recovery_phase;
         let unrecoverable_gap = pipeline_progress.unrecoverable_gap.clone();
-        let readiness = if unrecoverable_gap.is_some() {
+        let readiness = if !self.sqlite_store.admission_allowed() {
+            ReadinessDiagnostics {
+                state: PipelineReadinessState::Stale,
+                stage: Some(PipelineStage::Ingress),
+                reason: Some("disk_pressure".to_string()),
+                transport_connected,
+                recovery_phase,
+                unrecoverable_gap: None,
+            }
+        } else if unrecoverable_gap.is_some() {
             ReadinessDiagnostics {
                 state: PipelineReadinessState::Stale,
                 stage: Some(PipelineStage::Ingress),
@@ -1848,7 +1948,8 @@ where
                 session_count,
                 &pipeline_progress,
                 self.settings.pipeline_progress_readiness_enabled,
-            ) && !containment.persistent
+            ) && self.sqlite_store.admission_allowed()
+                && !containment.persistent
                 && memory_pressure_state == crate::turbocharger::MemoryPressureState::Normal,
             serving: dependency_healthy,
             recovering: readiness.state == PipelineReadinessState::Recovering,
@@ -1924,6 +2025,7 @@ where
         let sqlite_state = match self.sqlite_store.get_state_snapshot().await {
             Ok(snapshot) => SQLiteStateDiagnostics {
                 available: sqlite_available,
+                capacity: self.sqlite_store.capacity_snapshot().await.ok(),
                 db_size_bytes: Some(snapshot.db_size_bytes),
                 wal_size_bytes: snapshot.wal_size_bytes,
                 page_count: Some(snapshot.page_count),
@@ -1951,6 +2053,7 @@ where
             },
             Err(e) => SQLiteStateDiagnostics {
                 available: sqlite_available,
+                capacity: None,
                 db_size_bytes: None,
                 wal_size_bytes: None,
                 page_count: None,
@@ -2002,7 +2105,7 @@ where
         let bluesky_coordination = self.bluesky_client.coordination_diagnostics().await;
         let completion_frontier = self.completion_frontier.lock().await.snapshot();
 
-        DiagnosticsCollector::assemble_health(
+        let mut diagnostics = DiagnosticsCollector::assemble_health(
             self.runtime_identity.clone(),
             (
                 process_memory,
@@ -2015,118 +2118,131 @@ where
             completion_frontier,
             self.failure_supervisor.snapshot(),
             (bluesky_fetch, bluesky_coordination),
-        )
+        );
+        diagnostics.persistent_cache = self
+            .hydrator
+            .persistent_cache()
+            .map(|cache| cache.diagnostics());
+        diagnostics
     }
 
     pub async fn check_and_cleanup_db(
         &self,
     ) -> TurboResult<Option<crate::storage::sqlite::CleanupResult>> {
         let max_size_bytes = (self.settings.max_db_size_mb as i64) * 1024 * 1024;
-        let current_size = self.sqlite_store.get_db_size().await?;
-
-        if current_size > max_size_bytes {
-            info!(
-                "Database size {}MB exceeds limit {}MB, running cleanup",
-                current_size / (1024 * 1024),
-                self.settings.max_db_size_mb
-            );
-            let previous_phase = self.memory_phase.current();
-            self.transition_memory_phase(WorkloadPhase::Cleanup);
-            // Cleanup chunks pause while memory pressure is elevated and
-            // resume on a later cycle without exceeding backoff behavior.
-            let gauge_pressure = || {
-                self.memory_pressure
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .state()
-                    != crate::turbocharger::MemoryPressureState::Normal
-            };
-            let cleanup_result = self
-                .sqlite_store
-                .cleanup_with_vacuum(
-                    self.settings.db_retention_days,
-                    max_size_bytes,
-                    self.settings.vacuum_freelist_ratio,
-                    self.settings.cleanup_chunk_size,
-                    self.settings.cleanup_chunk_delay_ms,
-                    Some(&gauge_pressure),
-                )
-                .await;
-            self.transition_memory_phase(previous_phase);
-            let result = cleanup_result?;
-            info!(
-                "Cleanup complete: {} records deleted, new size: {}MB, vacuum_pending: {}",
-                result.records_deleted,
-                result.new_size_bytes / (1024 * 1024),
-                result.vacuum_pending
-            );
-            return Ok(Some(result));
-        }
-
-        // Under budget: still evaluate proactive freelist-bloat reclamation
-        // (no records are deleted in this path).
-        self.sqlite_store
-            .check_vacuum_bloat(max_size_bytes, self.settings.vacuum_freelist_ratio)
+        let result = self
+            .sqlite_store
+            .cleanup_with_vacuum(
+                self.settings.db_retention_days,
+                max_size_bytes,
+                self.settings.vacuum_freelist_ratio,
+                self.settings.cleanup_chunk_size,
+                self.settings.cleanup_chunk_delay_ms,
+                None,
+            )
             .await?;
-        Ok(None)
+        if let Some(cache) = self.hydrator.persistent_cache() {
+            cache
+                .maintain(
+                    self.settings.hydration_disk_cache_max_mb * 1024 * 1024,
+                    self.settings.cleanup_chunk_size,
+                    !self.sqlite_store.admission_allowed(),
+                )
+                .await?;
+        } else {
+            crate::hydration::entity_cache::maintain_pool(
+                self.sqlite_store.pool(),
+                self.settings.hydration_disk_cache_max_mb * 1024 * 1024,
+                self.settings.cleanup_chunk_size,
+                !self.sqlite_store.admission_allowed(),
+                Duration::from_secs(self.settings.profile_cache_ttl_seconds),
+                Duration::from_secs(self.settings.post_cache_ttl_seconds),
+            )
+            .await?;
+        }
+        if !self.sqlite_store.checkpoint_wal().await? {
+            metrics::counter!("sqlite_reclamation_deferrals_total", "reason" => "busy_checkpoint")
+                .increment(1);
+        }
+        self.sqlite_store.capacity_snapshot().await?;
+        Ok(Some(result))
     }
 
     pub fn start_db_cleanup_task(self: &Arc<Self>) {
-        let this = self.clone();
-        let base_interval_minutes = this.settings.cleanup_check_interval_minutes;
-        let max_interval_minutes = this.settings.cleanup_backoff_max_minutes;
-        let reset_skip_count = this.settings.cleanup_backoff_reset_count;
-
+        // Expired receipts can arrive faster than one chunk per normal cleanup
+        // interval. Keep draining in short, cooperative runs until caught up.
+        let receipts = Arc::clone(self);
         tokio::spawn(async move {
-            let mut current_interval_minutes = base_interval_minutes;
-            let mut consecutive_skip_count = 0u32;
-
+            let normal_interval =
+                Duration::from_secs(receipts.settings.storage_cleanup_interval_seconds);
+            let mut delay = Duration::ZERO;
             loop {
-                sleep(Duration::from_secs(current_interval_minutes * 60)).await;
-
-                match this.check_and_cleanup_db().await {
-                    Ok(Some(result)) => {
-                        info!(
-                            "Scheduled cleanup: {} records deleted, {}MB remaining, next check in {}min",
-                            result.records_deleted,
-                            result.new_size_bytes / (1024 * 1024),
-                            current_interval_minutes
-                        );
-                        current_interval_minutes =
-                            (current_interval_minutes * 2).min(max_interval_minutes);
-                        consecutive_skip_count = 0;
+                tokio::time::sleep(delay).await;
+                delay = match receipts
+                    .sqlite_store
+                    .prune_completion_receipts_with_budget(
+                        receipts.settings.replay_receipt_retention_seconds,
+                        receipts.settings.cleanup_chunk_size,
+                        Duration::from_millis(250),
+                    )
+                    .await
+                {
+                    Ok(result) if result.needs_reschedule => Duration::from_millis(1),
+                    Ok(_) => normal_interval,
+                    Err(error) => {
+                        error!(%error, "Scheduled receipt cleanup failed");
+                        normal_interval
                     }
-                    Ok(None) => {
-                        consecutive_skip_count += 1;
-                        if consecutive_skip_count >= reset_skip_count {
-                            info!(
-                                "Resetting cleanup backoff: {} consecutive skips under threshold",
-                                consecutive_skip_count
-                            );
-                            current_interval_minutes = base_interval_minutes;
-                            consecutive_skip_count = 0;
-                        }
-                    }
-                    Err(e) => {
-                        error!("Database cleanup failed: {}", e);
-                        current_interval_minutes =
-                            (current_interval_minutes * 2).min(max_interval_minutes);
-                        consecutive_skip_count = 0;
-                    }
+                };
+            }
+        });
+        // Admission sampling continues during a long VACUUM. Already admitted
+        // work and the bounded source channel remain subject to existing memory
+        // and concurrency limits; the growth allowance reserves their WAL cost.
+        let sampler = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut ticks = interval(Duration::from_secs(1));
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticks.tick().await;
+                if let Err(error) = sampler.sqlite_store.refresh_admission().await {
+                    sampler.sqlite_store.set_disk_pressure(true);
+                    metrics::counter!("sqlite_capacity_errors_total").increment(1);
+                    warn!(%error, "Storage admission accounting failed; growth paused");
                 }
-
-                // Awaited VACUUM scheduling: run a pending VACUUM inside the
-                // low-traffic window, or immediately once it has been deferred
-                // past the maximum defer duration.
-                if let Err(e) = this.maybe_run_pending_vacuum().await {
-                    error!("Scheduled VACUUM failed: {}", e);
+                if let Some(cache) = sampler.hydrator.persistent_cache() {
+                    cache.set_growth_allowed(sampler.sqlite_store.admission_allowed());
                 }
             }
         });
-        info!(
-            "Started database cleanup task (base: {}min, max: {}min, reset after {} skips)",
-            base_interval_minutes, max_interval_minutes, reset_skip_count
-        );
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut ticks = interval(Duration::from_secs(
+                this.settings.storage_cleanup_interval_seconds,
+            ));
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticks.tick().await;
+                if let Err(error) = this.check_and_cleanup_db().await {
+                    error!(%error, "Scheduled storage cleanup failed");
+                }
+            }
+        });
+        // A long reclamation must not suppress periodic expiry attempts.
+        let this = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut ticks = interval(Duration::from_secs(
+                this.settings.storage_cleanup_interval_seconds,
+            ));
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticks.tick().await;
+                if let Err(error) = this.maybe_run_pending_vacuum().await {
+                    metrics::counter!("sqlite_reclamation_failures_total").increment(1);
+                    warn!(%error, "Reclamation deferred; pending state preserved");
+                }
+            }
+        });
     }
 
     /// Queues a forced VACUUM at the next scheduler tick, bypassing
@@ -2154,9 +2270,7 @@ where
         }
 
         let now = Utc::now();
-        let operator_override = self
-            .vacuum_override_requested
-            .swap(false, Ordering::SeqCst);
+        let operator_override = self.vacuum_override_requested.swap(false, Ordering::SeqCst);
         let pressure_elevated = {
             self.memory_pressure
                 .lock()
@@ -2199,13 +2313,21 @@ where
         let policy = crate::storage::VacuumRunPolicy {
             mode: self.settings.vacuum_execution_mode,
             temp_dir: self.vacuum_temp_dir_path(),
-            max_in_memory_db_bytes: (self.settings.vacuum_max_pooled_memory_db_mb
+            max_in_memory_db_bytes: (self
+                .settings
+                .vacuum_max_pooled_memory_db_mb
                 .saturating_mul(1024 * 1024)) as i64,
         };
         let previous_phase = self.memory_phase.current();
         self.transition_memory_phase(WorkloadPhase::Vacuum);
+        self.sqlite_store.set_maintenance_active(true);
         let run_result = self.sqlite_store.run_vacuum(max_size_bytes, &policy).await;
+        if let Err(error) = &run_result {
+            self.sqlite_store.record_reclamation_failure(error);
+        }
+        self.sqlite_store.set_maintenance_active(false);
         self.transition_memory_phase(previous_phase);
+        self.sqlite_store.capacity_snapshot().await?;
         let run = run_result?;
         info!(
             reason = ?vacuum_state.pending_reason,
@@ -2242,12 +2364,14 @@ where
                 if let Some(seconds) = snapshot.vacuum_deferred_seconds {
                     metrics::gauge!("jetstream_turbo_vacuum_deferred_seconds").set(seconds as f64);
                 }
-                let active_reason = snapshot
-                    .vacuum_gating_reason
-                    .map(|reason| reason.as_str());
+                let active_reason = snapshot.vacuum_gating_reason.map(|reason| reason.as_str());
                 for reason in ["memory_pressure", "recovery_phase", "window", "force_defer"] {
                     metrics::gauge!("jetstream_turbo_vacuum_gating_reason", "reason" => reason)
-                        .set(if active_reason == Some(reason) { 1.0 } else { 0.0 });
+                        .set(if active_reason == Some(reason) {
+                            1.0
+                        } else {
+                            0.0
+                        });
                 }
                 metrics::gauge!("jetstream_turbo_db_over_budget").set(if snapshot.over_budget {
                     1.0
@@ -2599,6 +2723,14 @@ mod tests {
             persistence_threshold: 2,
             isolation_request_budget: 4,
         }
+    }
+
+    #[test]
+    fn recovery_epochs_are_unique_for_same_release_and_start_second() {
+        let first = derive_turbo_epoch(Some("release"), 42);
+        let second = derive_turbo_epoch(Some("release"), 42);
+        assert_ne!(first, second);
+        assert!(first.starts_with("release-42-"));
     }
 
     #[test]
@@ -3219,7 +3351,7 @@ mod tests {
                     }),
                     Arc::new(MockEventPublisher::new()),
                     broadcast::channel(1).0,
-            "test-epoch".to_string(),
+                    "test-epoch".to_string(),
                     test_ingress_batch(vec![create_post_message(2)]),
                     progress,
                     batch_id,
@@ -3456,13 +3588,10 @@ mod tests {
     fn vacuum_gate_defers_on_overflowing_pressure_and_phase() {
         // Window is always "open" in these cases because the decision under
         // test is the pressure/phase gating, not the window clock.
-        let window_open = Utc::now()
-            .with_hour(3)
-            .expect("hour 3 exists");
+        let window_open = Utc::now().with_hour(3).expect("hour 3 exists");
         let fresh_pending = Some(window_open);
 
-        let pressure_deferred =
-            vacuum_decide(window_open, fresh_pending, true, false, false);
+        let pressure_deferred = vacuum_decide(window_open, fresh_pending, true, false, false);
         assert!(!pressure_deferred.run);
         assert!(!pressure_deferred.forced);
         assert_eq!(
@@ -3470,13 +3599,7 @@ mod tests {
             Some(crate::storage::VacuumGatingReason::MemoryPressure)
         );
 
-        let phase_deferred = vacuum_decide(
-            window_open,
-            fresh_pending,
-            false,
-            true,
-            false,
-        );
+        let phase_deferred = vacuum_decide(window_open, fresh_pending, false, true, false);
         assert!(!phase_deferred.run);
         assert_eq!(
             phase_deferred.deferral_reason,
@@ -3486,9 +3609,7 @@ mod tests {
 
     #[test]
     fn vacuum_gate_defer_reason_prefers_pressure_over_phase_over_window() {
-        let now = Utc::now()
-            .with_hour(12)
-            .expect("hour 12 exists");
+        let now = Utc::now().with_hour(12).expect("hour 12 exists");
         let pending = Some(now);
 
         let both = vacuum_decide(now, pending, true, true, false);
@@ -3787,9 +3908,16 @@ mod tests {
             );
             seen_ordinals.push(envelope.ingress_ordinal);
         }
-        assert_eq!(seen_ordinals, expected_ordinals, "ordinals must match the assigned ingress ordinals");
+        assert_eq!(
+            seen_ordinals, expected_ordinals,
+            "ordinals must match the assigned ingress ordinals"
+        );
         let unique: HashSet<u64> = seen_ordinals.iter().copied().collect();
-        assert_eq!(unique.len(), seen_ordinals.len(), "ordinals are unique within the epoch");
+        assert_eq!(
+            unique.len(),
+            seen_ordinals.len(),
+            "ordinals are unique within the epoch"
+        );
     }
 
     #[tokio::test]
@@ -3877,8 +4005,14 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(!completion.0.is_empty(), "retry published so event is complete");
-        assert!(completion.1.is_empty(), "publication journal must be cleared after success");
+        assert!(
+            !completion.0.is_empty(),
+            "retry published so event is complete"
+        );
+        assert!(
+            completion.1.is_empty(),
+            "publication journal must be cleared after success"
+        );
     }
 
     #[tokio::test]
@@ -3957,7 +4091,10 @@ mod tests {
         while let Ok(_envelope) = receiver.try_recv() {
             rebroadcast += 1;
         }
-        assert_eq!(rebroadcast, 1, "the affected event must be re-broadcast exactly once on retry");
+        assert_eq!(
+            rebroadcast, 1,
+            "the affected event must be re-broadcast exactly once on retry"
+        );
     }
 
     fn event_id_for_message(message: &JetstreamMessage) -> SourceEventId {

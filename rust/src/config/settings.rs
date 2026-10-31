@@ -37,6 +37,21 @@ pub struct Settings {
 
     // Cleanup Configuration
     pub max_db_size_mb: u64,
+    /// Optional persistent hydration cache rollback switch.
+    pub hydration_disk_cache_enabled: bool,
+    pub profile_cache_ttl_seconds: u64,
+    pub post_cache_ttl_seconds: u64,
+    pub hydration_disk_cache_max_mb: u64,
+    pub hydration_cache_queue_capacity: usize,
+    pub hydration_cache_timeout_ms: u64,
+    pub disk_min_free_mb: u64,
+    pub replay_receipt_retention_seconds: u64,
+    pub storage_cleanup_interval_seconds: u64,
+    pub log_segment_max_mb: u64,
+    pub log_total_max_mb: u64,
+    pub log_retention_seconds: u64,
+    pub log_queue_capacity: usize,
+    pub log_max_record_bytes: usize,
     pub db_retention_days: u32,
     pub cleanup_check_interval_minutes: u64,
     pub vacuum_freelist_ratio: f64,
@@ -198,9 +213,23 @@ impl Default for Settings {
             rotation_minutes: 1,
             // 8 GB RAM / 40 GB disk baseline:
             // tuned for higher throughput while still bounding growth.
-            max_db_size_mb: 20 * 1024,
+            max_db_size_mb: 6144,
+            hydration_disk_cache_enabled: true,
+            profile_cache_ttl_seconds: 300,
+            post_cache_ttl_seconds: 300,
+            hydration_disk_cache_max_mb: 4096,
+            hydration_cache_queue_capacity: 1024,
+            hydration_cache_timeout_ms: 50,
+            disk_min_free_mb: 16384,
+            replay_receipt_retention_seconds: 3600,
+            storage_cleanup_interval_seconds: 60,
+            log_segment_max_mb: 100,
+            log_total_max_mb: 512,
+            log_retention_seconds: 7 * 86400,
+            log_queue_capacity: 256,
+            log_max_record_bytes: 64 * 1024,
             db_retention_days: 3,
-            cleanup_check_interval_minutes: 5,
+            cleanup_check_interval_minutes: 1,
             // Freelist pages (freed by DELETE but not returned to the OS)
             // above 10% of the database trigger a proactive VACUUM.
             vacuum_freelist_ratio: 0.10,
@@ -341,6 +370,38 @@ impl Settings {
         }
 
         // Cleanup Configuration
+        for (environment, setting) in [
+            (
+                "HYDRATION_DISK_CACHE_ENABLED",
+                "hydration_disk_cache_enabled",
+            ),
+            ("PROFILE_CACHE_TTL_SECONDS", "profile_cache_ttl_seconds"),
+            ("POST_CACHE_TTL_SECONDS", "post_cache_ttl_seconds"),
+            ("HYDRATION_DISK_CACHE_MAX_MB", "hydration_disk_cache_max_mb"),
+            (
+                "HYDRATION_CACHE_QUEUE_CAPACITY",
+                "hydration_cache_queue_capacity",
+            ),
+            ("HYDRATION_CACHE_TIMEOUT_MS", "hydration_cache_timeout_ms"),
+            ("DISK_MIN_FREE_MB", "disk_min_free_mb"),
+            (
+                "REPLAY_RECEIPT_RETENTION_SECONDS",
+                "replay_receipt_retention_seconds",
+            ),
+            (
+                "STORAGE_CLEANUP_INTERVAL_SECONDS",
+                "storage_cleanup_interval_seconds",
+            ),
+            ("LOG_SEGMENT_MAX_MB", "log_segment_max_mb"),
+            ("LOG_TOTAL_MAX_MB", "log_total_max_mb"),
+            ("LOG_RETENTION_SECONDS", "log_retention_seconds"),
+            ("LOG_QUEUE_CAPACITY", "log_queue_capacity"),
+            ("LOG_MAX_RECORD_BYTES", "log_max_record_bytes"),
+        ] {
+            if let Ok(value) = std::env::var(environment) {
+                builder = builder.set_override(setting, value)?;
+            }
+        }
         if let Ok(max_db_size_mb) = std::env::var("MAX_DB_SIZE_MB") {
             builder = builder.set_override("max_db_size_mb", max_db_size_mb)?;
         }
@@ -377,8 +438,7 @@ impl Settings {
             builder = builder.set_override("vacuum_temp_dir", temp_dir)?;
         }
         if let Ok(threshold) = std::env::var("VACUUM_MAX_POOLED_MEMORY_DB_MB") {
-            builder =
-                builder.set_override("vacuum_max_pooled_memory_db_mb", threshold)?;
+            builder = builder.set_override("vacuum_max_pooled_memory_db_mb", threshold)?;
         }
 
         if let Ok(value) = std::env::var("REPLAY_MAX_CONCURRENT_BATCHES") {
@@ -585,8 +645,7 @@ impl Settings {
 
         let settings = builder.build()?;
         let mut settings: Settings = settings.try_deserialize()?;
-        settings.maintenance_api_key =
-            normalize_optional_setting(settings.maintenance_api_key);
+        settings.maintenance_api_key = normalize_optional_setting(settings.maintenance_api_key);
         settings.retry_base_delay = duration_from_env_ms(
             "BLUESKY_RETRY_BASE_DELAY_MS",
             Settings::default().retry_base_delay,
@@ -613,6 +672,78 @@ impl Settings {
         Ok(settings)
     }
 
+    /// Shared admission policy so validation and the running store reserve the
+    /// same allowance for already admitted work.
+    pub fn storage_policy(&self) -> crate::storage::capacity::StoragePolicy {
+        const MIB: u64 = 1024 * 1024;
+        crate::storage::capacity::StoragePolicy {
+            target_bytes: self.max_db_size_mb.saturating_mul(MIB),
+            reserve_bytes: self.disk_min_free_mb.saturating_mul(MIB),
+            growth_bytes: self
+                .in_flight_payload_limit_mb
+                .saturating_mul(MIB)
+                .saturating_mul(4)
+                .max(crate::storage::capacity::EMERGENCY_FLOOR),
+            max_recovery_batch_bytes: self.in_flight_payload_limit_mb.saturating_mul(MIB)
+                / self.effective_max_batch_concurrency().max(1) as u64,
+        }
+    }
+
+    pub fn validate_storage_policy(&self) -> Result<()> {
+        for (name, value) in [
+            ("MAX_DB_SIZE_MB", self.max_db_size_mb),
+            (
+                "HYDRATION_DISK_CACHE_MAX_MB",
+                self.hydration_disk_cache_max_mb,
+            ),
+            ("PROFILE_CACHE_TTL_SECONDS", self.profile_cache_ttl_seconds),
+            ("POST_CACHE_TTL_SECONDS", self.post_cache_ttl_seconds),
+            ("DISK_MIN_FREE_MB", self.disk_min_free_mb),
+            (
+                "HYDRATION_CACHE_QUEUE_CAPACITY",
+                self.hydration_cache_queue_capacity as u64,
+            ),
+            (
+                "HYDRATION_CACHE_TIMEOUT_MS",
+                self.hydration_cache_timeout_ms,
+            ),
+            ("CLEANUP_CHUNK_SIZE", self.cleanup_chunk_size as u64),
+            ("LOG_SEGMENT_MAX_MB", self.log_segment_max_mb),
+            ("LOG_TOTAL_MAX_MB", self.log_total_max_mb),
+            ("LOG_RETENTION_SECONDS", self.log_retention_seconds),
+            ("LOG_QUEUE_CAPACITY", self.log_queue_capacity as u64),
+            ("LOG_MAX_RECORD_BYTES", self.log_max_record_bytes as u64),
+        ] {
+            if value == 0 || value > (i64::MAX as u64) / (1024 * 1024) {
+                anyhow::bail!("{name} must be positive and fit byte accounting");
+            }
+        }
+        if self.hydration_disk_cache_max_mb >= self.max_db_size_mb {
+            anyhow::bail!("HYDRATION_DISK_CACHE_MAX_MB must be below aggregate MAX_DB_SIZE_MB");
+        }
+        let policy = self.storage_policy();
+        if policy.target_bytes <= policy.growth_bytes {
+            anyhow::bail!(
+                "MAX_DB_SIZE_MB must exceed the storage growth allowance ({} MiB, the greater of 2048 MiB and four times IN_FLIGHT_PAYLOAD_LIMIT_MB)",
+                policy.growth_bytes / (1024 * 1024)
+            );
+        }
+        if !(1..=60).contains(&self.storage_cleanup_interval_seconds) {
+            anyhow::bail!("STORAGE_CLEANUP_INTERVAL_SECONDS must be between 1 and 60");
+        }
+        if self.replay_receipt_retention_seconds < 3600.max(self.jetstream_cursor_overlap_secs) {
+            anyhow::bail!(
+                "REPLAY_RECEIPT_RETENTION_SECONDS must cover 3600 seconds and cursor overlap"
+            );
+        }
+        if self.log_segment_max_mb > self.log_total_max_mb
+            || self.log_max_record_bytes as u64 > self.log_segment_max_mb * 1024 * 1024
+        {
+            anyhow::bail!("log record, segment and total limits must fit in that order");
+        }
+        Ok(())
+    }
+
     fn validate_schema_maintenance(&self) -> Result<()> {
         if self.db_dir.trim().is_empty() {
             anyhow::bail!("db_dir must not be empty");
@@ -633,6 +764,7 @@ impl Settings {
     }
 
     fn validate(&self) -> Result<()> {
+        self.validate_storage_policy()?;
         if self.stream_name.is_empty() {
             anyhow::bail!(
                 "STREAM_NAME environment variable is required\n\n\
@@ -816,8 +948,7 @@ impl Settings {
             anyhow::bail!("vacuum_max_pooled_memory_db_mb must be greater than 0");
         }
         if self.vacuum_execution_mode == VacuumExecutionMode::PooledMemory
-            && (self.max_db_size_mb as u128)
-                > (self.vacuum_max_pooled_memory_db_mb as u128)
+            && (self.max_db_size_mb as u128) > (self.vacuum_max_pooled_memory_db_mb as u128)
         {
             anyhow::bail!(
                 "vacuum_execution_mode = pooled_memory is unsafe above vacuum_max_pooled_memory_db_mb ({} MB): \
@@ -835,7 +966,9 @@ impl Settings {
         {
             let path = std::path::Path::new(temp_dir);
             if !path.is_dir() {
-                anyhow::bail!("vacuum_temp_dir ({temp_dir} / VACUUM_TEMP_DIR) must be an existing directory");
+                anyhow::bail!(
+                    "vacuum_temp_dir ({temp_dir} / VACUUM_TEMP_DIR) must be an existing directory"
+                );
             }
         }
 
@@ -892,7 +1025,8 @@ impl Settings {
     /// process start until `live` is reached again, so the envelope math uses
     /// the replay ceiling, not the live permit count.
     pub fn effective_max_batch_concurrency(&self) -> usize {
-        self.replay_max_concurrent_batches.max(self.max_concurrent_requests)
+        self.replay_max_concurrent_batches
+            .max(self.max_concurrent_requests)
     }
 
     pub fn memory_envelope(&self) -> crate::turbocharger::runtime_memory::MemoryEnvelope {
@@ -1028,7 +1162,7 @@ mod tests {
         assert!(!settings.jetstream_hosts.is_empty());
         assert_eq!(settings.wanted_collections, "app.bsky.feed.post");
         assert_eq!(settings.batch_size, 10);
-        assert_eq!(settings.max_db_size_mb, 20 * 1024);
+        assert_eq!(settings.max_db_size_mb, 6144);
         assert_eq!(settings.max_concurrent_requests, 9);
         assert_eq!(settings.channel_capacity, 1_000);
         assert_eq!(settings.monitor_broadcast_capacity, 32);
@@ -1091,6 +1225,53 @@ mod tests {
         assert_eq!(settings.recovery_max_delay, Duration::from_secs(300));
         assert_eq!(settings.recovery_persistence_threshold, 3);
         assert_eq!(settings.isolation_request_budget, 8);
+    }
+
+    #[test]
+    fn storage_policy_rejects_incompatible_budgets_and_short_replay_coverage() {
+        let settings = Settings::default();
+        assert!(settings.validate_storage_policy().is_ok());
+        let mut invalid = settings.clone();
+        invalid.hydration_disk_cache_max_mb = invalid.max_db_size_mb;
+        assert!(invalid
+            .validate_storage_policy()
+            .unwrap_err()
+            .to_string()
+            .contains("HYDRATION_DISK_CACHE_MAX_MB"));
+        invalid = settings.clone();
+        invalid.jetstream_cursor_overlap_secs = 7200;
+        assert!(invalid.validate_storage_policy().is_err());
+        invalid.replay_receipt_retention_seconds = 7200;
+        assert!(invalid.validate_storage_policy().is_ok());
+        invalid.storage_cleanup_interval_seconds = 61;
+        assert!(invalid.validate_storage_policy().is_err());
+        invalid = settings;
+        invalid.log_max_record_bytes = 101 * 1024 * 1024;
+        assert!(invalid.validate_storage_policy().is_err());
+    }
+
+    #[test]
+    fn storage_policy_rejects_targets_that_cannot_admit_an_empty_store() {
+        let mut settings = Settings {
+            max_db_size_mb: 1024,
+            hydration_disk_cache_max_mb: 512,
+            ..Settings::default()
+        };
+        let error = settings.validate_storage_policy().unwrap_err().to_string();
+        assert!(error.contains("MAX_DB_SIZE_MB must exceed the storage growth allowance"));
+
+        settings.max_db_size_mb = 2048;
+        assert!(settings.validate_storage_policy().is_err());
+        settings.max_db_size_mb = 2049;
+        assert!(settings.validate_storage_policy().is_ok());
+
+        // Larger payload envelopes must use the same calculation at startup.
+        settings.in_flight_payload_limit_mb = 1024;
+        settings.max_db_size_mb = 4096;
+        assert!(settings.validate_storage_policy().is_err());
+        settings.max_db_size_mb = 4097;
+        assert!(settings.validate_storage_policy().is_ok());
+        assert_eq!(settings.storage_policy().growth_bytes, 4096 * 1024 * 1024);
     }
 
     #[test]
@@ -1418,7 +1599,10 @@ mod tests {
         // Below the safety threshold the legacy mode remains a rollback switch.
         let mut pooled_below_threshold = pooled_above_threshold.clone();
         pooled_below_threshold.vacuum_temp_dir = None;
-        pooled_below_threshold.max_db_size_mb = 1024;
+        // The target must also exceed the 2 GiB admission growth allowance.
+        pooled_below_threshold.vacuum_max_pooled_memory_db_mb = 3072;
+        pooled_below_threshold.max_db_size_mb = 3072;
+        pooled_below_threshold.hydration_disk_cache_max_mb = 512;
         assert!(pooled_below_threshold.validate().is_ok());
 
         // A configured temp directory must exist at startup.
@@ -1430,11 +1614,9 @@ mod tests {
     #[test]
     fn vacuum_run_policy_verification_rejects_thin_headroom() {
         let temp_dir = tempfile::tempdir().unwrap();
-        assert!(crate::storage::SQLiteStore::verify_temp_volume_headroom(
-            temp_dir.path(),
-            0
-        )
-        .is_ok());
+        assert!(
+            crate::storage::SQLiteStore::verify_temp_volume_headroom(temp_dir.path(), 0).is_ok()
+        );
         // A 1-exabyte requirement can never be satisfied by a real volume.
         assert!(crate::storage::SQLiteStore::verify_temp_volume_headroom(
             temp_dir.path(),

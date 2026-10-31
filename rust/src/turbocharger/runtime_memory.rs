@@ -381,7 +381,10 @@ pub fn parse_proc_cgroup(contents: &str) -> CgroupIdentity {
         };
         if hierarchy == "0" && controllers.is_empty() {
             identity.v2_path.get_or_insert_with(|| path.to_string());
-        } else if controllers.split(',').any(|controller| controller == "memory") {
+        } else if controllers
+            .split(',')
+            .any(|controller| controller == "memory")
+        {
             identity
                 .v1_memory_path
                 .get_or_insert_with(|| path.to_string());
@@ -489,8 +492,7 @@ pub fn resolve_cgroup_memory_paths(
             }
         } else {
             attempted.push(
-                "v1 memory controller line present but no cgroup memory mount resolved"
-                    .to_string(),
+                "v1 memory controller line present but no cgroup memory mount resolved".to_string(),
             );
         }
     }
@@ -776,8 +778,44 @@ impl MemoryRunComparison {
     }
 }
 
+/// Acceptance-run accounting, independent of the workload's scale or the
+/// production pressure controller's cgroup-first accounting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryMeasurementScope {
+    ProcessRss,
+    ServiceCgroup,
+}
+
+impl MemoryMeasurementScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProcessRss => "process_rss",
+            Self::ServiceCgroup => "service_cgroup",
+        }
+    }
+}
+
+impl std::str::FromStr for MemoryMeasurementScope {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "process_rss" => Ok(Self::ProcessRss),
+            "service_cgroup" => Ok(Self::ServiceCgroup),
+            _ => Err(format!(
+                "invalid MEMORY_MEASUREMENT_SCOPE {value:?}; expected process_rss or service_cgroup"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryRunConfiguration {
+    /// `None` preserves historical v1 cgroup-first/RSS-fallback semantics.
+    /// New v2 artifacts require an explicit scope at the artifact boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement_scope: Option<MemoryMeasurementScope>,
     pub envelope: MemoryEnvelope,
     pub user_cache_entries: usize,
     pub post_cache_entries: usize,
@@ -800,6 +838,16 @@ pub struct MemoryRunConfiguration {
     pub conservative_working_set_bytes: u64,
 }
 
+impl MemoryRunConfiguration {
+    fn sample_usage_bytes(&self, sample: &RuntimeMemorySample) -> Option<u64> {
+        match self.measurement_scope {
+            Some(MemoryMeasurementScope::ProcessRss) => sample.process.rss_bytes,
+            Some(MemoryMeasurementScope::ServiceCgroup) => sample.cgroup.current_bytes,
+            None => sample.cgroup.current_bytes.or(sample.process.rss_bytes),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryAttributionSummary {
     pub observed_peak_bytes: Option<u64>,
@@ -809,7 +857,21 @@ pub struct MemoryAttributionSummary {
     pub residual_peak_bytes: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryMaintenanceEvidence {
+    pub completed_publications: u64,
+    pub completed_receipts: u64,
+    pub legacy_rows_seeded: u64,
+    pub cleanup_deleted_rows: u64,
+    pub protected_pending_rows: u64,
+    pub protected_unproven_rows: u64,
+    pub free_pages_before_cleanup: u64,
+    pub free_pages_after_cleanup: u64,
+    pub database_bytes_before_vacuum: u64,
+    pub database_bytes_after_vacuum: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct MemoryRunArtifact {
     pub schema_version: u32,
     pub run_id: String,
@@ -819,8 +881,97 @@ pub struct MemoryRunArtifact {
     pub baseline: Option<MemoryRunBaseline>,
     pub comparison: Option<MemoryRunComparison>,
     pub samples: Vec<RuntimeMemorySample>,
+    pub maintenance: Option<MemoryMaintenanceEvidence>,
     pub attribution: MemoryAttributionSummary,
     pub evaluation: MemoryRunEvaluation,
+}
+
+fn validate_artifact_scope(
+    version: u32,
+    scope: Option<MemoryMeasurementScope>,
+) -> Result<(), String> {
+    match (version, scope) {
+        (1, None) | (2, Some(_)) => Ok(()),
+        (1, Some(_)) => Err(
+            "schema v1 uses historical cgroup-first/RSS-fallback accounting and cannot declare measurement_scope".into(),
+        ),
+        (2, None) => Err("schema v2 requires configuration.measurement_scope".into()),
+        (version, _) => Err(format!("unsupported memory artifact schema version {version}")),
+    }
+}
+
+impl Serialize for MemoryRunArtifact {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        validate_artifact_scope(self.schema_version, self.configuration.measurement_scope)
+            .map_err(serde::ser::Error::custom)?;
+        let mut fields = serializer.serialize_struct(
+            "MemoryRunArtifact",
+            10 + usize::from(self.maintenance.is_some()),
+        )?;
+        fields.serialize_field("schema_version", &self.schema_version)?;
+        fields.serialize_field("run_id", &self.run_id)?;
+        fields.serialize_field("started_at_unix_millis", &self.started_at_unix_millis)?;
+        fields.serialize_field("completed_at_unix_millis", &self.completed_at_unix_millis)?;
+        fields.serialize_field("configuration", &self.configuration)?;
+        fields.serialize_field("baseline", &self.baseline)?;
+        fields.serialize_field("comparison", &self.comparison)?;
+        fields.serialize_field("samples", &self.samples)?;
+        if let Some(maintenance) = &self.maintenance {
+            fields.serialize_field("maintenance", maintenance)?;
+        }
+        fields.serialize_field("attribution", &self.attribution)?;
+        fields.serialize_field("evaluation", &self.evaluation)?;
+        fields.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for MemoryRunArtifact {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Interpret absent scope only here, where the artifact version is known.
+        #[derive(Deserialize)]
+        struct ArtifactFields {
+            schema_version: u32,
+            run_id: String,
+            started_at_unix_millis: u64,
+            completed_at_unix_millis: u64,
+            configuration: MemoryRunConfiguration,
+            baseline: Option<MemoryRunBaseline>,
+            comparison: Option<MemoryRunComparison>,
+            samples: Vec<RuntimeMemorySample>,
+            #[serde(default)]
+            maintenance: Option<MemoryMaintenanceEvidence>,
+            attribution: MemoryAttributionSummary,
+            evaluation: MemoryRunEvaluation,
+        }
+
+        let fields = ArtifactFields::deserialize(deserializer)?;
+        validate_artifact_scope(
+            fields.schema_version,
+            fields.configuration.measurement_scope,
+        )
+        .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            schema_version: fields.schema_version,
+            run_id: fields.run_id,
+            started_at_unix_millis: fields.started_at_unix_millis,
+            completed_at_unix_millis: fields.completed_at_unix_millis,
+            configuration: fields.configuration,
+            baseline: fields.baseline,
+            comparison: fields.comparison,
+            samples: fields.samples,
+            maintenance: fields.maintenance,
+            attribution: fields.attribution,
+            evaluation: fields.evaluation,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -842,6 +993,33 @@ impl MemoryRunArtifact {
         samples: &[RuntimeMemorySample],
     ) -> MemoryRunEvaluation {
         let mut failures = Vec::new();
+        let mut measurements_complete = true;
+        if let Some(scope) = configuration.measurement_scope {
+            if samples.is_empty() {
+                measurements_complete = false;
+                failures.push(format!(
+                    "{} memory evidence is missing: no samples",
+                    scope.as_str()
+                ));
+            }
+            for sample in samples {
+                if configuration.sample_usage_bytes(sample).is_none() {
+                    measurements_complete = false;
+                    let collection_error = match scope {
+                        MemoryMeasurementScope::ProcessRss => &sample.process.collection_error,
+                        MemoryMeasurementScope::ServiceCgroup => &sample.cgroup.collection_error,
+                    };
+                    failures.push(format!(
+                        "{} measurement unavailable in phase {}: {}",
+                        scope.as_str(),
+                        sample.phase.as_str(),
+                        collection_error
+                            .as_deref()
+                            .unwrap_or("no collection error provided")
+                    ));
+                }
+            }
+        }
         let mut phases_observed = Vec::new();
         for sample in samples {
             if !phases_observed.contains(&sample.phase) {
@@ -863,14 +1041,13 @@ impl MemoryRunArtifact {
             }
         }
 
-        let hard_limit_held = samples.iter().all(|sample| {
-            sample
-                .cgroup
-                .current_bytes
-                .or(sample.process.rss_bytes)
-                .is_none_or(|bytes| bytes < configuration.envelope.external_hard_limit_bytes)
+        let hard_limit_crossed = samples.iter().any(|sample| {
+            configuration
+                .sample_usage_bytes(sample)
+                .is_some_and(|bytes| bytes >= configuration.envelope.external_hard_limit_bytes)
         });
-        if !hard_limit_held {
+        let hard_limit_held = measurements_complete && !hard_limit_crossed;
+        if hard_limit_crossed {
             failures.push("external hard memory limit was crossed".to_string());
         }
 
@@ -889,8 +1066,7 @@ impl MemoryRunArtifact {
             let effective_max_batches = configuration
                 .replay_max_concurrent_batches
                 .max(configuration.max_concurrent_requests);
-            sample.queued_batches.saturating_add(sample.running_batches)
-                <= effective_max_batches
+            sample.queued_batches.saturating_add(sample.running_batches) <= effective_max_batches
                 && sample.active_permits <= sample.maximum_permits
                 && sample.maximum_permits <= effective_max_batches
         });
@@ -907,22 +1083,23 @@ impl MemoryRunArtifact {
             failures.push("durable checkpoint regressed".to_string());
         }
 
-        let transients_settled = [
+        let transient_above_recovery = [
             WorkloadPhase::Replay,
             WorkloadPhase::DatabaseContention,
             WorkloadPhase::Cleanup,
             WorkloadPhase::Vacuum,
         ]
         .into_iter()
-        .all(|phase| {
+        .any(|phase| {
             samples
                 .iter()
                 .rev()
                 .find(|sample| sample.phase == phase)
-                .and_then(sample_usage_bytes)
-                .is_none_or(|bytes| bytes < configuration.envelope.recovery_bytes)
+                .and_then(|sample| configuration.sample_usage_bytes(sample))
+                .is_some_and(|bytes| bytes >= configuration.envelope.recovery_bytes)
         });
-        if !transients_settled {
+        let transients_settled = measurements_complete && !transient_above_recovery;
+        if transient_above_recovery {
             failures.push("a bounded workload transient did not settle below recovery".to_string());
         }
 
@@ -935,15 +1112,17 @@ impl MemoryRunArtifact {
                     && sample.components.negative_cache_entries
                         >= configuration.negative_cache_entries
             })
-            .filter_map(sample_usage_bytes)
+            .filter_map(|sample| configuration.sample_usage_bytes(sample))
             .collect::<Vec<_>>();
-        let warmed_slope_held = warmed
-            .first()
-            .zip(warmed.last())
-            .is_none_or(|(first, last)| {
-                last.saturating_sub(*first) <= configuration.allowed_warmed_growth_bytes
-            });
-        if !warmed_slope_held {
+        let warmed_growth_exceeded =
+            warmed
+                .first()
+                .zip(warmed.last())
+                .is_some_and(|(first, last)| {
+                    last.saturating_sub(*first) > configuration.allowed_warmed_growth_bytes
+                });
+        let warmed_slope_held = measurements_complete && !warmed_growth_exceeded;
+        if warmed_growth_exceeded {
             failures.push("warmed memory developed a sustained positive slope".to_string());
         }
 
@@ -964,7 +1143,10 @@ impl MemoryRunArtifact {
         configuration: &MemoryRunConfiguration,
         samples: &[RuntimeMemorySample],
     ) -> MemoryAttributionSummary {
-        let observed_peak_bytes = samples.iter().filter_map(sample_usage_bytes).max();
+        let observed_peak_bytes = samples
+            .iter()
+            .filter_map(|sample| configuration.sample_usage_bytes(sample))
+            .max();
         let attributed_component_peak_bytes = samples
             .iter()
             .map(|sample| {
@@ -999,10 +1181,6 @@ impl MemoryRunArtifact {
         let payload = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
         fs::write(path, payload)
     }
-}
-
-fn sample_usage_bytes(sample: &RuntimeMemorySample) -> Option<u64> {
-    sample.cgroup.current_bytes.or(sample.process.rss_bytes)
 }
 
 fn ratio(candidate: f64, baseline: f64) -> Option<f64> {
@@ -1263,9 +1441,8 @@ mod tests {
         );
         assert_eq!(v2.v1_memory_path, None);
 
-        let v1 = parse_proc_cgroup(
-            "12:cpu,cpuacct:/a/b\n11:memory:/system.slice/jetstream.service\n",
-        );
+        let v1 =
+            parse_proc_cgroup("12:cpu,cpuacct:/a/b\n11:memory:/system.slice/jetstream.service\n");
         assert_eq!(
             v1.v1_memory_path.as_deref(),
             Some("/system.slice/jetstream.service")
@@ -1280,7 +1457,10 @@ mod tests {
             parse_proc_cgroup("12:cpu:/only-non-memory\n"),
             CgroupIdentity::default()
         );
-        assert_eq!(parse_proc_cgroup("malformed-line"), CgroupIdentity::default());
+        assert_eq!(
+            parse_proc_cgroup("malformed-line"),
+            CgroupIdentity::default()
+        );
     }
 
     #[test]
@@ -1294,9 +1474,7 @@ mod tests {
             Some("/sys/fs/cgroup/memory")
         );
         // A v2-only mount table resolves no v1 mount.
-        let empty = parse_mountinfo(
-            "36 35 0:31 / /sys/fs/cgroup rw,nosuid - cgroup2 cgroup2 rw\n",
-        );
+        let empty = parse_mountinfo("36 35 0:31 / /sys/fs/cgroup rw,nosuid - cgroup2 cgroup2 rw\n");
         assert_eq!(resolve_v1_memory_mount(&empty), None);
     }
 
@@ -1308,8 +1486,7 @@ mod tests {
         write_file(&nested, "memory.current", "42\n");
 
         let identity = parse_proc_cgroup("0::/system.slice/jetstream.service\n");
-        let resolved =
-            resolve_cgroup_memory_paths(&identity, &v2_root, None).unwrap();
+        let resolved = resolve_cgroup_memory_paths(&identity, &v2_root, None).unwrap();
         assert_eq!(resolved.hierarchy, CgroupHierarchy::V2);
         assert_eq!(resolved.memory_dir, nested.display().to_string());
 
@@ -1327,11 +1504,9 @@ mod tests {
 
     #[test]
     fn cgroup_path_resolution_failure_names_attempted_locations() {
-        let identity = parse_proc_cgroup(
-            "11:memory:/system.slice/service\n0::/system.slice/service\n",
-        );
-        let result =
-            resolve_cgroup_memory_paths(&identity, Path::new("/nonexistent-v2"), None);
+        let identity =
+            parse_proc_cgroup("11:memory:/system.slice/service\n0::/system.slice/service\n");
+        let result = resolve_cgroup_memory_paths(&identity, Path::new("/nonexistent-v2"), None);
         let error = result.unwrap_err();
         assert!(error.contains("/nonexistent-v2/system.slice/service/memory.current"));
         assert!(error.contains("no cgroup memory mount resolved"));
@@ -1396,7 +1571,11 @@ mod tests {
         assert_eq!(diagnostics.max_bytes, None, "v1 -1 limit means unlimited");
         assert_eq!(diagnostics.max_unlimited, Some(true));
         assert_eq!(diagnostics.high_bytes, Some(4096));
-        assert_eq!(diagnostics.events.max, Some(7), "failcnt maps to max events");
+        assert_eq!(
+            diagnostics.events.max,
+            Some(7),
+            "failcnt maps to max events"
+        );
         assert_eq!(diagnostics.events.oom_kill, None, "v1 has no kill counters");
         assert_eq!(diagnostics.pressure_some_avg10, Some(2.5));
         assert_eq!(diagnostics.collection_error, None);
@@ -1417,7 +1596,9 @@ mod tests {
         assert_eq!(diagnostics.current_bytes, None);
         assert_eq!(diagnostics.max_bytes, None);
         assert_eq!(diagnostics.pressure_some_avg10, None);
-        let error = diagnostics.collection_error.expect("error must be explicit");
+        let error = diagnostics
+            .collection_error
+            .expect("error must be explicit");
         assert!(error.contains("unavailable"));
         assert!(error.contains("/injected/memory.current"));
     }
@@ -1529,6 +1710,7 @@ mod tests {
     #[test]
     fn run_evaluation_rejects_checkpoint_regression_and_unbounded_work() {
         let configuration = MemoryRunConfiguration {
+            measurement_scope: Some(MemoryMeasurementScope::ProcessRss),
             envelope: envelope(),
             user_cache_entries: 10,
             post_cache_entries: 10,
@@ -1580,6 +1762,352 @@ mod tests {
         assert!(!evaluation.passed);
         assert!(!evaluation.checkpoints_monotonic);
         assert!(!evaluation.work_bounds_held);
+    }
+
+    fn scoped_run_configuration(scope: MemoryMeasurementScope) -> MemoryRunConfiguration {
+        MemoryRunConfiguration {
+            measurement_scope: Some(scope),
+            envelope: envelope(),
+            user_cache_entries: 1,
+            post_cache_entries: 1,
+            negative_cache_entries: 1,
+            max_concurrent_requests: 2,
+            replay_max_concurrent_batches: 2,
+            channel_capacity: 2,
+            max_ingress_event_bytes: 10,
+            monitor_broadcast_capacity: 2,
+            in_flight_payload_limit_bytes: 20,
+            sqlite_max_connections: 1,
+            sqlite_cache_bytes_per_connection: 10,
+            database_size_bytes: 1,
+            event_volume: 10,
+            settling_window_seconds: 1,
+            allowed_warmed_growth_bytes: 10,
+            conservative_working_set_bytes: 90,
+        }
+    }
+
+    fn scoped_samples(
+        scope: MemoryMeasurementScope,
+        selected: Option<u64>,
+        unselected: Option<u64>,
+    ) -> Vec<RuntimeMemorySample> {
+        [
+            WorkloadPhase::LiveIngestion,
+            WorkloadPhase::LiveIngestion,
+            WorkloadPhase::Replay,
+            WorkloadPhase::DatabaseContention,
+            WorkloadPhase::Cleanup,
+            WorkloadPhase::Vacuum,
+        ]
+        .into_iter()
+        .map(|phase| {
+            let (rss, cgroup) = match scope {
+                MemoryMeasurementScope::ProcessRss => (selected, unselected),
+                MemoryMeasurementScope::ServiceCgroup => (unselected, selected),
+            };
+            RuntimeMemorySample {
+                phase,
+                process: ProcessMemoryBreakdown {
+                    rss_bytes: rss,
+                    ..ProcessMemoryBreakdown::default()
+                },
+                cgroup: CgroupMemoryDiagnostics {
+                    current_bytes: cgroup,
+                    ..CgroupMemoryDiagnostics::default()
+                },
+                components: MemoryComponentDiagnostics {
+                    user_cache_entries: 1,
+                    user_cache_entry_limit: 1,
+                    user_cache_bytes: 10,
+                    user_cache_limit_bytes: 10,
+                    post_cache_entries: 1,
+                    post_cache_entry_limit: 1,
+                    post_cache_bytes: 10,
+                    post_cache_limit_bytes: 10,
+                    negative_cache_entries: 1,
+                    negative_cache_entry_limit: 1,
+                    negative_cache_bytes: 10,
+                    negative_cache_limit_bytes: 10,
+                    ..MemoryComponentDiagnostics::default()
+                },
+                ..RuntimeMemorySample::default()
+            }
+        })
+        .collect()
+    }
+
+    const EXPLICIT_SCOPES: [MemoryMeasurementScope; 2] = [
+        MemoryMeasurementScope::ProcessRss,
+        MemoryMeasurementScope::ServiceCgroup,
+    ];
+
+    #[test]
+    fn selected_scope_ignores_high_alternate_usage_and_attributes_selected_peak() {
+        for scope in EXPLICIT_SCOPES {
+            let configuration = scoped_run_configuration(scope);
+            let samples = scoped_samples(scope, Some(50), Some(500));
+            let evaluation = MemoryRunArtifact::evaluate(&configuration, &samples);
+            assert!(evaluation.passed, "{scope:?}: {:?}", evaluation.failures);
+            let attribution = MemoryRunArtifact::attribution(&configuration, &samples);
+            assert_eq!(attribution.observed_peak_bytes, Some(50), "{scope:?}");
+            assert_eq!(attribution.residual_peak_bytes, Some(20), "{scope:?}");
+            assert_eq!(
+                samples[0].process.rss_bytes,
+                match scope {
+                    MemoryMeasurementScope::ProcessRss => Some(50),
+                    MemoryMeasurementScope::ServiceCgroup => Some(500),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn hard_limit_follows_selected_scope_despite_small_alternate_usage() {
+        for scope in EXPLICIT_SCOPES {
+            let configuration = scoped_run_configuration(scope);
+            let samples = scoped_samples(scope, Some(450), Some(50));
+            let evaluation = MemoryRunArtifact::evaluate(&configuration, &samples);
+            assert!(!evaluation.hard_limit_held, "{scope:?}");
+            assert!(!evaluation.passed, "{scope:?}");
+            let attribution = MemoryRunArtifact::attribution(&configuration, &samples);
+            assert_eq!(attribution.observed_peak_bytes, Some(450), "{scope:?}");
+            assert_eq!(attribution.residual_peak_bytes, Some(420), "{scope:?}");
+        }
+    }
+
+    #[test]
+    fn recovery_follows_selected_scope_despite_small_alternate_usage() {
+        for scope in EXPLICIT_SCOPES {
+            let configuration = scoped_run_configuration(scope);
+            let mut samples = scoped_samples(scope, Some(50), Some(50));
+            match scope {
+                MemoryMeasurementScope::ProcessRss => samples[2].process.rss_bytes = Some(150),
+                MemoryMeasurementScope::ServiceCgroup => {
+                    samples[2].cgroup.current_bytes = Some(150)
+                }
+            }
+            let evaluation = MemoryRunArtifact::evaluate(&configuration, &samples);
+            assert!(evaluation.hard_limit_held, "{scope:?}");
+            assert!(!evaluation.transients_settled, "{scope:?}");
+            assert!(evaluation.warmed_slope_held, "{scope:?}");
+        }
+    }
+
+    #[test]
+    fn warmed_growth_follows_selected_scope_and_ignores_alternate_growth() {
+        for scope in EXPLICIT_SCOPES {
+            let configuration = scoped_run_configuration(scope);
+            let mut samples = scoped_samples(scope, Some(50), Some(50));
+            match scope {
+                MemoryMeasurementScope::ProcessRss => samples[1].process.rss_bytes = Some(70),
+                MemoryMeasurementScope::ServiceCgroup => samples[1].cgroup.current_bytes = Some(70),
+            }
+            let evaluation = MemoryRunArtifact::evaluate(&configuration, &samples);
+            assert!(evaluation.hard_limit_held, "{scope:?}");
+            assert!(evaluation.transients_settled, "{scope:?}");
+            assert!(!evaluation.warmed_slope_held, "{scope:?}");
+
+            match scope {
+                MemoryMeasurementScope::ProcessRss => {
+                    samples[1].process.rss_bytes = Some(50);
+                    samples[1].cgroup.current_bytes = Some(70);
+                }
+                MemoryMeasurementScope::ServiceCgroup => {
+                    samples[1].cgroup.current_bytes = Some(50);
+                    samples[1].process.rss_bytes = Some(70);
+                }
+            }
+            let evaluation = MemoryRunArtifact::evaluate(&configuration, &samples);
+            assert!(evaluation.passed, "{scope:?}: {:?}", evaluation.failures);
+        }
+    }
+
+    #[test]
+    fn selected_measurement_missing_in_any_phase_fails_without_fallback() {
+        for scope in EXPLICIT_SCOPES {
+            let configuration = scoped_run_configuration(scope);
+            for index in 0..6 {
+                let mut samples = scoped_samples(scope, Some(50), Some(50));
+                match scope {
+                    MemoryMeasurementScope::ProcessRss => {
+                        samples[index].process.rss_bytes = None;
+                        samples[index].process.collection_error = Some("RSS unavailable".into());
+                    }
+                    MemoryMeasurementScope::ServiceCgroup => {
+                        samples[index].cgroup.current_bytes = None;
+                        samples[index].cgroup.collection_error = Some("cgroup unavailable".into());
+                    }
+                }
+                let evaluation = MemoryRunArtifact::evaluate(&configuration, &samples);
+                assert!(!evaluation.passed, "{scope:?}, sample {index}");
+                assert!(
+                    evaluation.failures.iter().any(|failure| {
+                        failure.contains(scope.as_str())
+                            && failure.contains(samples[index].phase.as_str())
+                            && failure.contains("unavailable")
+                    }),
+                    "{scope:?}: {:?}",
+                    evaluation.failures
+                );
+            }
+            let samples = scoped_samples(scope, None, Some(50));
+            let attribution = MemoryRunArtifact::attribution(&configuration, &samples);
+            assert_eq!(attribution.observed_peak_bytes, None, "{scope:?}");
+            assert_eq!(attribution.residual_peak_bytes, None, "{scope:?}");
+        }
+    }
+
+    #[test]
+    fn unavailable_unselected_measurements_do_not_fail_complete_selected_evidence() {
+        for scope in EXPLICIT_SCOPES {
+            let configuration = scoped_run_configuration(scope);
+            let samples = scoped_samples(scope, Some(50), None);
+            let evaluation = MemoryRunArtifact::evaluate(&configuration, &samples);
+            assert!(evaluation.passed, "{scope:?}: {:?}", evaluation.failures);
+        }
+    }
+
+    #[test]
+    fn empty_explicit_run_fails_for_missing_memory_evidence() {
+        for scope in EXPLICIT_SCOPES {
+            let evaluation = MemoryRunArtifact::evaluate(&scoped_run_configuration(scope), &[]);
+            assert!(!evaluation.passed);
+            assert!(!evaluation.hard_limit_held);
+            assert!(evaluation.failures.iter().any(|failure| {
+                failure.contains(scope.as_str()) && failure.contains("no samples")
+            }));
+        }
+    }
+
+    #[test]
+    fn scope_parser_accepts_only_explicit_accounting_choices() {
+        for scope in EXPLICIT_SCOPES {
+            assert_eq!(scope.as_str().parse::<MemoryMeasurementScope>(), Ok(scope));
+        }
+        for invalid in ["", "rss", "legacy", "cgroup_first", "PROCESS_RSS"] {
+            let error = invalid.parse::<MemoryMeasurementScope>().unwrap_err();
+            assert!(error.contains(invalid));
+            assert!(error.contains("MEMORY_MEASUREMENT_SCOPE"));
+        }
+    }
+
+    fn explicit_artifact(scope: MemoryMeasurementScope) -> MemoryRunArtifact {
+        let configuration = scoped_run_configuration(scope);
+        let samples = scoped_samples(scope, Some(50), Some(500));
+        MemoryRunArtifact {
+            schema_version: 2,
+            run_id: "synthetic-scoped-run".into(),
+            started_at_unix_millis: 1,
+            completed_at_unix_millis: 2,
+            attribution: MemoryRunArtifact::attribution(&configuration, &samples),
+            evaluation: MemoryRunArtifact::evaluate(&configuration, &samples),
+            configuration,
+            samples,
+            baseline: None,
+            comparison: None,
+            maintenance: None,
+        }
+    }
+
+    #[test]
+    fn v2_round_trip_preserves_scope_raw_measurements_and_results() {
+        for scope in EXPLICIT_SCOPES {
+            let artifact = explicit_artifact(scope);
+            let serialized = serde_json::to_string(&artifact).unwrap();
+            let decoded: MemoryRunArtifact = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(decoded, artifact);
+            assert_eq!(decoded.configuration.measurement_scope, Some(scope));
+            assert_eq!(decoded.schema_version, 2);
+        }
+    }
+
+    #[test]
+    fn v2_round_trip_preserves_unavailable_raw_sources_and_collection_errors() {
+        for scope in EXPLICIT_SCOPES {
+            let mut artifact = explicit_artifact(scope);
+            artifact.samples[0].process.rss_bytes = None;
+            artifact.samples[0].process.collection_error = Some("original RSS error".into());
+            artifact.samples[1].cgroup.current_bytes = None;
+            artifact.samples[1].cgroup.collection_error = Some("original cgroup error".into());
+            artifact.evaluation =
+                MemoryRunArtifact::evaluate(&artifact.configuration, &artifact.samples);
+            artifact.attribution =
+                MemoryRunArtifact::attribution(&artifact.configuration, &artifact.samples);
+            assert!(!artifact.evaluation.passed);
+            let serialized = serde_json::to_string(&artifact).unwrap();
+            let decoded: MemoryRunArtifact = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(decoded, artifact);
+        }
+    }
+
+    #[test]
+    fn v2_reader_rejects_missing_null_or_invalid_scope() {
+        let valid =
+            serde_json::to_value(explicit_artifact(MemoryMeasurementScope::ProcessRss)).unwrap();
+        let mut missing = valid.clone();
+        missing["configuration"]
+            .as_object_mut()
+            .unwrap()
+            .remove("measurement_scope");
+        let mut null = valid.clone();
+        null["configuration"]["measurement_scope"] = serde_json::Value::Null;
+        let mut invalid = valid;
+        invalid["configuration"]["measurement_scope"] = serde_json::json!("legacy");
+        for incomplete in [missing, null, invalid] {
+            assert!(serde_json::from_value::<MemoryRunArtifact>(incomplete).is_err());
+        }
+    }
+
+    #[test]
+    fn historical_v1_artifacts_preserve_evidence_and_legacy_accounting() {
+        for historical in [
+            include_str!("../../../docs/run-artifacts/restore-replay-convergence/runtime-memory-smoke.json"),
+            include_str!("../../../docs/run-artifacts/restore-replay-convergence/runtime-memory-production.json"),
+        ] {
+            let original: serde_json::Value = serde_json::from_str(historical).unwrap();
+            let artifact: MemoryRunArtifact = serde_json::from_str(historical).unwrap();
+            assert_eq!(artifact.configuration.measurement_scope, None);
+            assert_eq!(serde_json::to_value(&artifact).unwrap(), original);
+
+            let samples = scoped_samples(MemoryMeasurementScope::ProcessRss, Some(450), Some(50));
+            let mut configuration = scoped_run_configuration(MemoryMeasurementScope::ProcessRss);
+            configuration.measurement_scope = artifact.configuration.measurement_scope;
+            assert!(MemoryRunArtifact::evaluate(&configuration, &samples).passed);
+            assert_eq!(MemoryRunArtifact::attribution(&configuration, &samples).observed_peak_bytes, Some(50));
+            let fallback_samples = scoped_samples(MemoryMeasurementScope::ProcessRss, Some(450), None);
+            assert!(!MemoryRunArtifact::evaluate(&configuration, &fallback_samples).hard_limit_held);
+            assert_eq!(MemoryRunArtifact::attribution(&configuration, &fallback_samples).observed_peak_bytes, Some(450));
+        }
+    }
+
+    #[test]
+    fn reader_rejects_unknown_versions_and_relabelled_v1_scope() {
+        for version in [0, 1, 3] {
+            let mut artifact =
+                serde_json::to_value(explicit_artifact(MemoryMeasurementScope::ProcessRss))
+                    .unwrap();
+            artifact["schema_version"] = serde_json::json!(version);
+            assert!(serde_json::from_value::<MemoryRunArtifact>(artifact).is_err());
+        }
+    }
+
+    #[test]
+    fn writer_rejects_invalid_version_scope_combinations_without_creating_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        for (version, scope) in [
+            (2, None),
+            (1, Some(MemoryMeasurementScope::ProcessRss)),
+            (3, Some(MemoryMeasurementScope::ServiceCgroup)),
+        ] {
+            let mut artifact = explicit_artifact(MemoryMeasurementScope::ProcessRss);
+            artifact.schema_version = version;
+            artifact.configuration.measurement_scope = scope;
+            assert!(serde_json::to_string(&artifact).is_err());
+            let path = temp.path().join(format!("invalid-v{version}.json"));
+            assert!(artifact.write_json(&path).is_err());
+            assert!(!path.exists());
+        }
     }
 
     #[test]

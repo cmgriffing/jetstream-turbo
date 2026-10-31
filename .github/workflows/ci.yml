@@ -44,6 +44,8 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    env:
+      MEMORY_MEASUREMENT_SCOPE: process_rss
 
     steps:
       - name: Checkout repository
@@ -60,3 +62,10 @@ jobs:
       - name: Run tests
         working-directory: rust
         run: cargo test --all-targets --all-features
+
+      - name: Verify deployment log policy and offline storage migration
+        working-directory: rust
+        run: |
+          bash deploy/test-log-policy.sh
+          bash deploy/test-activate-candidate.sh
+          python3 -m unittest discover -s scripts -p 'test_migrate_storage.py'

@@ -18,9 +18,20 @@ activation_started_at=""
 current_link="$deploy_path/current"
 previous_link="$deploy_path/previous"
 candidate_release=$(dirname "$candidate_binary")
+recovery_format=completion_receipts_v1
+
+compatible_release() {
+    local marker="$1/recovery-format"
+    [[ -f "$marker" && ! -L "$marker" ]] && [[ $(cat "$marker") == "$recovery_format" ]]
+}
 
 if [[ ! -x "$candidate_binary" ]]; then
     echo "Candidate binary is not executable: $candidate_binary" >&2
+    exit 2
+fi
+
+if ! compatible_release "$candidate_release"; then
+    echo "Candidate lacks supported recovery-format marker ($recovery_format): $candidate_release" >&2
     exit 2
 fi
 
@@ -48,7 +59,7 @@ poll_readiness() {
 
 emit_diagnostics() {
     "$systemctl_bin" status "$service_name" --no-pager || true
-    "$journalctl_bin" -u "$service_name" --since "$activation_started_at" --no-pager -n 100 || true
+    "$journalctl_bin" --namespace=jetstream-turbo -u "$service_name" --since "$activation_started_at" --no-pager -n 100 || true
 }
 
 # Publish the release identifier consumed by the service at startup
@@ -57,7 +68,7 @@ emit_diagnostics() {
 write_release_identifier() {
     local env_file="$deploy_path/.env"
     local release_id
-    release_id=$(basename "$candidate_release")
+    release_id=$(basename "${1:-$candidate_release}")
     touch "$env_file"
     if grep -q '^JETSTREAM_TURBO_RELEASE_ID=' "$env_file"; then
         sed -i.bak 's/^JETSTREAM_TURBO_RELEASE_ID=.*/JETSTREAM_TURBO_RELEASE_ID='"$release_id"'/' "$env_file"
@@ -102,14 +113,20 @@ fi
 echo "Candidate failed readiness deadline: $candidate_release" >&2
 emit_diagnostics
 
-if [[ -n "$old_release" ]]; then
-    echo "Rolling back to previous release: $old_release" >&2
+if [[ -n "$old_release" ]] && compatible_release "$old_release"; then
+    echo "Rolling back to compatible previous release: $old_release" >&2
     ln -sfn "$old_release" "$current_link"
+    write_release_identifier "$old_release"
     "$systemctl_bin" restart "$service_name"
     if ! poll_readiness; then
         echo "Rollback release also failed readiness" >&2
         emit_diagnostics
     fi
+else
+    # The candidate may already have replaced full payloads with receipts. An
+    # unproven older binary must never start against this state automatically.
+    "$systemctl_bin" stop "$service_name"
+    echo "Automatic rollback refused: previous release does not declare $recovery_format compatibility. Service stopped; current candidate and database retained. Use the documented compatible-state recovery procedure before selecting another binary." >&2
 fi
 
 exit 1

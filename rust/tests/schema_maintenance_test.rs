@@ -3,6 +3,8 @@ use jetstream_turbo_rs::storage::{
     verify_required_indexes, SQLitePragmaConfig, SQLiteStore, SchemaMaintenanceError,
     SchemaVerification, REQUIRED_INDEXES,
 };
+use jetstream_turbo_rs::turbocharger::{CgroupMemoryDiagnostics, MemoryEnvelope};
+use jetstream_turbo_rs::utils::logging::retention::{LogOwner, LogPolicy};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use std::process::Stdio;
@@ -14,6 +16,117 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const LARGE_FIXTURE_ROWS: usize = 100_000;
 const VERIFICATION_BUDGET: Duration = Duration::from_secs(1);
 const STARTUP_BUDGET: Duration = Duration::from_secs(2);
+const MIB: u64 = 1024 * 1024;
+
+fn startup_memory_envelope(
+    host_memory_bytes: Option<u64>,
+    cgroup: &CgroupMemoryDiagnostics,
+) -> MemoryEnvelope {
+    let defaults = jetstream_turbo_rs::Settings::default().memory_envelope();
+    // This fixture tests schema startup, not memory acceptance. Its child still
+    // observes the real cgroup, which can include unrelated CI jobs and cache.
+    // Cover the entire reported capacity, not just an instantaneous usage sample.
+    let capacity_bytes = defaults
+        .host_memory_bytes
+        .max(host_memory_bytes.unwrap_or(0))
+        .max(cgroup.max_bytes.unwrap_or(0))
+        .max(cgroup.current_bytes.unwrap_or(0));
+    let recovery_mb = capacity_bytes.div_ceil(MIB) + 1024;
+    MemoryEnvelope {
+        recovery_bytes: recovery_mb * MIB,
+        soft_pressure_bytes: (recovery_mb + 1024) * MIB,
+        emergency_bytes: (recovery_mb + 2048) * MIB,
+        external_hard_limit_bytes: (recovery_mb + 3072) * MIB,
+        host_memory_bytes: (recovery_mb + 3072) * MIB + defaults.required_host_headroom_bytes,
+        ..defaults
+    }
+}
+
+#[test]
+fn startup_envelope_covers_shared_runner_capacity_with_valid_headroom() {
+    for (host_mb, limit_mb, usage_mb) in [
+        (Some(16_384), Some(8192), Some(6144)),
+        (Some(16_384), None, Some(6144)),
+        (Some(8192), Some(32_768), Some(10_240)),
+        (None, None, Some(12_288)),
+        (None, None, None),
+    ] {
+        let host = host_mb.map(|mb| mb * MIB);
+        let cgroup = CgroupMemoryDiagnostics {
+            max_bytes: limit_mb.map(|mb| mb * MIB),
+            current_bytes: usage_mb.map(|mb| mb * MIB),
+            ..CgroupMemoryDiagnostics::default()
+        };
+        let envelope = startup_memory_envelope(host, &cgroup);
+        envelope.validate().expect("valid startup fixture envelope");
+        let capacity = [host, cgroup.max_bytes, cgroup.current_bytes]
+            .into_iter()
+            .flatten()
+            .max()
+            .unwrap_or(0);
+        assert!(envelope.recovery_bytes > capacity);
+        assert!(
+            envelope.recovery_bytes
+                > jetstream_turbo_rs::Settings::default().conservative_memory_working_set_bytes()
+        );
+    }
+}
+
+async fn run_schema_maintenance(directory: &std::path::Path) -> std::process::Output {
+    let output = Command::new(env!("CARGO_BIN_EXE_jetstream-turbo"))
+        .current_dir(directory)
+        .env("TURBO__DB_DIR", directory)
+        .env("RUST_LOG", "info")
+        .arg("schema-maintenance")
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "maintenance failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Starting offline schema maintenance"));
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("Application file logging unavailable"),
+        "maintenance must select stdout directly rather than fail file initialization"
+    );
+    output
+}
+
+#[tokio::test]
+async fn schema_maintenance_uses_stdout_without_creating_a_log_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    run_schema_maintenance(directory.path()).await;
+    assert!(!directory.path().join("logs").exists());
+}
+
+#[tokio::test]
+async fn schema_maintenance_does_not_touch_an_existing_file_log_owner() {
+    let directory = tempfile::tempdir().unwrap();
+    let logs = directory.path().join("logs");
+    std::fs::create_dir(&logs).unwrap();
+    let segment = logs.join(format!(
+        "jetstream-turbo.main.{}.{}.log",
+        chrono::Utc::now().timestamp(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&segment, b"service log").unwrap();
+    let owner = LogOwner::start(&logs, LogPolicy::default()).unwrap();
+    let snapshot = || {
+        std::fs::read_dir(&logs)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), std::fs::read(entry.path()).unwrap())
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let before = snapshot();
+    run_schema_maintenance(directory.path()).await;
+    assert_eq!(snapshot(), before);
+    assert_eq!(owner.diagnostics().allocated_bytes, 11);
+}
 
 fn test_pragma_config() -> SQLitePragmaConfig {
     SQLitePragmaConfig {
@@ -176,6 +289,15 @@ async fn maintained_large_database_opens_store_within_startup_budget() {
 
 #[tokio::test]
 async fn production_binary_passes_readiness_before_scheduled_cleanup() {
+    assert_production_startup(false).await;
+}
+
+#[tokio::test]
+async fn disk_pressure_startup_serves_diagnostics_without_admitting_growth() {
+    assert_production_startup(true).await;
+}
+
+async fn assert_production_startup(disk_pressure: bool) {
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("jetstream.db");
     let pool = create_large_unmaintained_fixture(&db_path).await;
@@ -200,16 +322,52 @@ async fn production_binary_passes_readiness_before_scheduled_cleanup() {
     let http_port = port_probe.local_addr().unwrap().port();
     drop(port_probe);
 
+    let host_memory_bytes = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                line.strip_prefix("MemTotal:")?
+                    .split_whitespace()
+                    .next()?
+                    .parse::<u64>()
+                    .ok()?
+                    .checked_mul(1024)
+            })
+        });
+    let envelope = startup_memory_envelope(host_memory_bytes, &CgroupMemoryDiagnostics::collect());
     let mut child = Command::new(env!("CARGO_BIN_EXE_jetstream-turbo"))
         .current_dir(temp_dir.path())
         .env("BLUESKY_HANDLE", "test.bsky.social")
         .env("BLUESKY_APP_PASSWORD", "test-password")
         .env("STREAM_NAME", "test-stream")
         .env("JETSTREAM_HOSTS", r#"["ws://127.0.0.1:9"]"#)
-        .env("MAX_DB_SIZE_MB", "1")
+        .env("MAX_DB_SIZE_MB", "6144")
+        // Exercise startup on CI disks without requiring the production 16 GiB
+        // reserve. The storage policy still adds its 2 GiB growth allowance.
+        .env(
+            "DISK_MIN_FREE_MB",
+            if disk_pressure { "1000000000" } else { "1" },
+        )
         .env("CLEANUP_CHUNK_SIZE", "1")
         .env("CLEANUP_CHUNK_DELAY_MS", "1000")
         .env("CLEANUP_CHECK_INTERVAL_MINUTES", "60")
+        .envs(
+            [
+                ("MEMORY_RECOVERY_MB", envelope.recovery_bytes),
+                ("MEMORY_SOFT_PRESSURE_MB", envelope.soft_pressure_bytes),
+                ("MEMORY_EMERGENCY_MB", envelope.emergency_bytes),
+                (
+                    "MEMORY_EXTERNAL_HARD_LIMIT_MB",
+                    envelope.external_hard_limit_bytes,
+                ),
+                ("MEMORY_HOST_TOTAL_MB", envelope.host_memory_bytes),
+                (
+                    "MEMORY_REQUIRED_HOST_HEADROOM_MB",
+                    envelope.required_host_headroom_bytes,
+                ),
+            ]
+            .map(|(name, bytes)| (name, (bytes / MIB).to_string())),
+        )
         .env("TURBO__BLUESKY_API_URL", auth_server.uri())
         .env("TURBO__DB_DIR", temp_dir.path())
         .env("TURBO__HTTP_PORT", http_port.to_string())
@@ -225,15 +383,27 @@ async fn production_binary_passes_readiness_before_scheduled_cleanup() {
         .unwrap();
     let deadline = Instant::now() + STARTUP_BUDGET;
     let mut listener_available = false;
+    let mut last_readiness = String::from("no readiness response");
     while Instant::now() < deadline {
-        if client
+        match client
             .get(format!("http://127.0.0.1:{http_port}/ready"))
             .send()
             .await
-            .is_ok_and(|response| response.status().is_success())
         {
-            listener_available = true;
-            break;
+            Ok(response) => {
+                let status = response.status();
+                last_readiness = format!("HTTP {status}");
+                let expected = if disk_pressure {
+                    reqwest::StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    reqwest::StatusCode::OK
+                };
+                if status == expected {
+                    listener_available = true;
+                    break;
+                }
+            }
+            Err(error) => last_readiness = error.to_string(),
         }
         if child.try_wait().unwrap().is_some() {
             break;
@@ -241,12 +411,52 @@ async fn production_binary_passes_readiness_before_scheduled_cleanup() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
-    let _ = child.start_kill();
+    if disk_pressure && listener_available {
+        let health: serde_json::Value = client
+            .get(format!("http://127.0.0.1:{http_port}/api/v1/health"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(health["data"]["readiness"]["reason"], "disk_pressure");
+        assert_eq!(
+            health["data"]["diagnostics"]["sqlite_state"]["capacity"]["admission_allowed"],
+            false
+        );
+    }
+    let failure_diagnostics = if listener_available {
+        String::new()
+    } else {
+        match client
+            .get(format!("http://127.0.0.1:{http_port}/api/v1/health"))
+            .send()
+            .await
+        {
+            Ok(response) => match response.json::<serde_json::Value>().await {
+                Ok(health) => serde_json::json!({
+                    "readiness": health["data"]["readiness"],
+                    "capacity": health["data"]["diagnostics"]["sqlite_state"]["capacity"],
+                    "memory_pressure": health["data"]["diagnostics"]["runtime_memory"]["pressure_state"],
+                }).to_string(),
+                Err(error) => format!("health response decode failed: {error}"),
+            },
+            Err(error) => format!("health request failed: {error}"),
+        }
+    };
+    let killed_by_test = child.try_wait().unwrap().is_none();
+    if killed_by_test {
+        let _ = child.start_kill();
+    }
     let output = child.wait_with_output().await.unwrap();
     assert!(
         listener_available,
-        "production binary did not become ready within {STARTUP_BUDGET:?}; status={:?}; stderr={}",
+        "production binary did not become ready within {STARTUP_BUDGET:?}; \
+         last_readiness={last_readiness}; health={failure_diagnostics}; \
+         killed_by_test={killed_by_test}; status={:?}; stdout={}; stderr={}",
         output.status,
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 }

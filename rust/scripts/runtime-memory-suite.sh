@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mkdir -p target/runtime-memory-artifacts
+export MEMORY_MEASUREMENT_SCOPE="${MEMORY_MEASUREMENT_SCOPE-process_rss}"
+case "$MEMORY_MEASUREMENT_SCOPE" in
+  process_rss|service_cgroup) ;;
+  *)
+    echo "invalid MEMORY_MEASUREMENT_SCOPE '$MEMORY_MEASUREMENT_SCOPE': expected process_rss or service_cgroup" >&2
+    exit 2
+    ;;
+esac
 export MEMORY_ARTIFACT_DIR="${MEMORY_ARTIFACT_DIR:-target/runtime-memory-artifacts}"
+mkdir -p "$MEMORY_ARTIFACT_DIR"
 
 # Reuse the collector-retention change's focused churn scenario first. The
 # production suite owns the total-process phases and does not duplicate it.

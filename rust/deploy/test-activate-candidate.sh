@@ -14,6 +14,7 @@ write_release_binary() {
     local path=$1
     cp "$script_dir/test-fixtures/fake-release.sh" "$path"
     chmod 0755 "$path"
+    printf '%s\n' completion_receipts_v1 >"$(dirname "$path")/recovery-format"
 }
 
 write_release_binary "$deploy_path/releases/old/jetstream-turbo"
@@ -81,7 +82,20 @@ fi
 [[ $(readlink "$deploy_path/current") == "$deploy_path/releases/old" ]]
 [[ $(grep -c '^restart jetstream-turbo$' "$fixture/systemctl.log") -eq 2 ]]
 grep -q '^status jetstream-turbo --no-pager$' "$fixture/systemctl.log"
-grep -Eq '^-u jetstream-turbo --since [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z --no-pager -n 100$' "$fixture/journal.log"
+grep -Eq '^--namespace=jetstream-turbo -u jetstream-turbo --since [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z --no-pager -n 100$' "$fixture/journal.log"
+
+# An unproven prior binary must not be restarted against receipt-aware state.
+ln -sfn "$deploy_path/releases/old" "$deploy_path/current"
+rm "$deploy_path/releases/old/recovery-format"
+: >"$fixture/systemctl.log"
+if run_candidate; then
+    echo "incompatible rollback unexpectedly succeeded" >&2
+    exit 1
+fi
+[[ $(readlink "$deploy_path/current") == "$deploy_path/releases/candidate" ]]
+[[ $(grep -c '^restart jetstream-turbo$' "$fixture/systemctl.log") -eq 1 ]]
+grep -q '^stop jetstream-turbo$' "$fixture/systemctl.log"
+grep -q '^JETSTREAM_TURBO_RELEASE_ID=candidate$' "$deploy_path/.env"
 
 rm "$fixture/readiness-fails"
 rm "$deploy_path/current"

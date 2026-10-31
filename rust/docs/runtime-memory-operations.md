@@ -50,3 +50,45 @@ gate sets `MEMORY_SUITE_SCALE=production`; artifacts are written beneath
 `target/runtime-memory-artifacts/` and compare memory, throughput, committed lag,
 Bluesky request volume, hydration completeness, component limits, backlog, and
 checkpoint monotonicity.
+
+Select measurement scope independently of workload size:
+
+```sh
+# Shared-runner/process acceptance (also the default for direct Cargo tests).
+MEMORY_MEASUREMENT_SCOPE=process_rss scripts/runtime-memory-suite.sh
+MEMORY_MEASUREMENT_SCOPE=process_rss MEMORY_SUITE_SCALE=production \
+  scripts/runtime-memory-suite.sh
+
+# Execute the prebuilt test inside an isolated Linux service cgroup.
+MEMORY_MEASUREMENT_SCOPE=service_cgroup /path/to/runtime_memory_suite-test \
+  production_shaped_memory_suite_smoke --exact
+```
+
+The wrapper preserves either explicit selection and rejects unsupported values
+before invoking Cargo. Both test entry points also reject invalid selections
+before workload setup. Both hosted workflows explicitly use process RSS,
+including scheduled, release, and manual production-scale runs.
+
+Before interpreting a `service_cgroup` result as whole-service acceptance, build
+the test executable outside the measurement group, then execute it inside a
+dedicated Linux cgroup with memory accounting enabled. Include the processes
+that constitute the service, exclude the build toolchain and unrelated jobs,
+and verify membership through `/proc/<pid>/cgroup`, `cgroup.procs`, and the
+memory controller files. Configure and record the intended memory limits and
+headroom, and retain group membership, runner context, and workload size with
+the artifact. `memory.max` alone does not prove exclusive membership. The suite
+collects its existing group; it neither creates isolation nor verifies that
+caller assertion. A shared hosted runner or synthetic sample cannot establish
+whole-service containment. On platforms without cgroup current usage, explicitly
+selected service scope fails instead of falling back to RSS.
+
+New total-memory artifacts are schema v2 with
+`configuration.measurement_scope`; both process and cgroup diagnostics are
+retained, and every selected-source sample is required. Historical v1 artifacts
+keep cgroup-first/RSS-fallback interpretation. Incomplete v2 artifacts are
+invalid. Scope, schema, workload, and runner context must match before comparing
+memory outcomes; see the evidence document for the separate RSS sweep format.
+
+This suite setting does not configure the running application's pressure
+controller. Production pressure samples continue to prefer cgroup current usage
+with RSS fallback, using the existing thresholds and retention safeguards.
